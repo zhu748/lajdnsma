@@ -8,6 +8,9 @@ async def custom_verify_password(
     authorization: Optional[str] = Header(
         None, description="OpenAI 格式请求 Key, 格式: Bearer sk-xxxx"
     ),
+    x_api_key: Optional[str] = Header(
+        None, description="Claude/Anthropic 格式请求 Key, 从请求头 x-api-key 获取"
+    ),
     x_goog_api_key: Optional[str] = Header(
         None, description="Gemini 格式请求 Key, 从请求头 x-goog-api-key 获取"
     ),
@@ -24,7 +27,9 @@ async def custom_verify_password(
     client_provided_api_key: Optional[str] = None
 
     # 提取客户端提供的 Key
-    if x_goog_api_key:
+    if x_api_key:
+        client_provided_api_key = x_api_key
+    elif x_goog_api_key:
         client_provided_api_key = x_goog_api_key
     elif key:
         client_provided_api_key = key

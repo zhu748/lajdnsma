@@ -1,5 +1,5 @@
 from typing import List, Dict, Optional, Union, Literal, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # openAI 请求
@@ -28,9 +28,12 @@ class ChatCompletionRequest(BaseModel):
 
 # gemini 请求
 class ChatRequestGemini(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     contents: List[Dict[str, Any]]
-    system_instruction: Optional[Dict[str, Any]] = None
-    systemInstruction: Optional[Dict[str, Any]] = None
+    system_instruction: Optional[Dict[str, Any]] = Field(
+        default=None, alias="systemInstruction"
+    )
     safetySettings: Optional[List[Dict[str, Any]]] = None
     generationConfig: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
@@ -42,6 +45,7 @@ class AIRequest(BaseModel):
     model: Optional[str] = None
     stream: bool = False
     format_type: Optional[str] = "gemini"
+    api_version: Optional[str] = None
 
 
 class Usage(BaseModel):

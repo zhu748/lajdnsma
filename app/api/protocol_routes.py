@@ -32,9 +32,12 @@ async def responses_api(
     )
 
 
+@router.post("/messages")
 @router.post("/v1/messages")
 @router.post("/claude/v1/messages")
+@router.post("/claude/messages")
 @router.post("/anthropic/v1/messages")
+@router.post("/anthropic/messages")
 async def claude_messages(
     payload: dict = Body(...),
     http_request: Request = None,
@@ -50,9 +53,11 @@ async def claude_messages(
     )
 
 
+@router.post("/{api_version}/models/{model_and_responseType:path}")
 @router.post("/gemini/{api_version:str}/models/{model_and_responseType:path}")
 async def gemini_chat_completions(
     request: Request,
+    api_version: str = "v1beta",
     model_and_responseType: str = Path(...),
     key: Optional[str] = Query(None),
     alt: Optional[str] = Query(None, description="sse 或 None"),
@@ -61,6 +66,9 @@ async def gemini_chat_completions(
     _du=Depends(route_runtime.verify_user_agent),
 ):
     _ = (key, alt)
+    if api_version not in {"v1", "v1beta", "v1alpha"}:
+        raise HTTPException(status_code=400, detail="无效的 Gemini API 版本")
+
     is_stream = False
     try:
         model_name, action_type = model_and_responseType.split(":", 1)
@@ -70,10 +78,20 @@ async def gemini_chat_completions(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="无效的请求路径") from exc
 
-    gemini_request = AIRequest(
-        payload=payload,
-        model=model_name,
-        stream=is_stream,
-        format_type="gemini",
-    )
+    try:
+        gemini_request = AIRequest(
+            payload=payload,
+            model=model_name,
+            stream=is_stream,
+            format_type="gemini",
+            api_version=api_version,
+        )
+    except TypeError:
+        gemini_request = AIRequest(
+            payload=payload,
+            model=model_name,
+            stream=is_stream,
+            format_type="gemini",
+        )
+        setattr(gemini_request, "api_version", api_version)
     return await aistudio_chat_completions(gemini_request, request, _dp, _du)

@@ -119,6 +119,11 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "")
 WHITELIST_MODELS = {
     x.strip() for x in os.environ.get("WHITELIST_MODELS", "").split(",") if x.strip()
 }
+
+# Claude/Anthropic 兼容模式下，如果客户端传入 claude-* 模型名，可映射到该 Gemini 模型。
+# 为空时自动选择当前可用模型列表中的第一个模型。
+CLAUDE_DEFAULT_MODEL = os.environ.get("CLAUDE_DEFAULT_MODEL", "").strip()
+
 # 白名单User-Agent
 WHITELIST_USER_AGENT = {
     x.strip().lower()

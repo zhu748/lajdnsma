@@ -161,10 +161,19 @@ class GeminiClient:
         model = request.model
         format_type = getattr(request, "format_type", None)
         if format_type and (format_type == "gemini"):
-            api_version = "v1alpha" if "think" in request.model else "v1beta"
+            requested_api_version = getattr(request, "api_version", None)
+            api_version = (
+                requested_api_version
+                if requested_api_version in {"v1", "v1beta", "v1alpha"}
+                else "v1alpha"
+                if "think" in request.model
+                else "v1beta"
+            )
             if request.payload:
                 # 将 Pydantic 模型转换为字典, 假设 Pydantic V2+
-                data = request.payload.model_dump(exclude_none=True)
+                data = request.payload.model_dump(exclude_none=True, by_alias=True)
+                if "systemInstruction" in data:
+                    data.pop("system_instruction", None)
             # # 注入搜索提示
             # if settings.search["search_mode"] and request.model and request.model.endswith("-search"):
             #     data.insert(len(data)-2,{'role': 'user', 'parts': [{'text':settings.search["search_prompt"]}]})

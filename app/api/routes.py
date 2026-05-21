@@ -14,6 +14,7 @@ from app.api.embedding_routes import (
 )
 from app.api.model_routes import (
     aistudio_list_models,
+    claude_list_models,
     gemini_list_models,
     list_models,
     router as model_router,
@@ -69,6 +70,7 @@ __all__ = [
     "verify_user_agent",
     "get_cache",
     "aistudio_list_models",
+    "claude_list_models",
     "vertex_list_models",
     "list_models",
     "aistudio_chat_completions",
