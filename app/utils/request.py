@@ -31,7 +31,7 @@ class ActiveRequestsManager:
     def clean_completed(self):
         """清理所有已完成或已取消的任务"""
 
-        for key, task in self.active_requests.items():
+        for key, task in list(self.active_requests.items()):
             if task.done() or task.cancelled():
                 del self.active_requests[key]
 
