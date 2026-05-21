@@ -22,6 +22,7 @@ def load_fake_batch_runner():
     fake_utils.openAI_from_text = lambda model, content, stream=True: {"openai_text": content, "model": model, "stream": stream}
 
     fake_response = types.ModuleType("app.utils.response")
+    fake_response.ensure_gemini_timing_fields = lambda data: data
     fake_response.gemini_from_text = lambda content, stream=True: {"gemini": content, "stream": stream}
     fake_response.openAI_from_Gemini = lambda cached_response, stream=True: {
         "openai": cached_response.data,

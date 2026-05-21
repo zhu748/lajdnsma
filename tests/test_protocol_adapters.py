@@ -155,6 +155,22 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("response.output_text.delta", joined)
         self.assertIn("response.completed", joined)
 
+
+    async def test_openai_stream_parser_supports_event_and_data_without_space(self):
+        chunks = [
+            'event: message\ndata:{"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"测"},"finish_reason":null}]}\n\n',
+            'data:{"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":3}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn('"output_tokens": 3', joined)
+
     async def test_openai_stream_to_claude_stream(self):
         chunks = [
             'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}\n\n',

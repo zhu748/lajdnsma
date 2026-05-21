@@ -258,12 +258,22 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
 
 
 def _parse_sse_json(chunk: str) -> Optional[Dict[str, Any]]:
-    stripped = chunk.strip()
-    if not stripped.startswith("data: "):
+    """Parse SSE chunk and return JSON payload from one or more data lines."""
+    data_lines: List[str] = []
+    for line in chunk.splitlines():
+        line = line.strip()
+        if not line or line.startswith("event:"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+
+    if not data_lines:
         return None
-    payload = stripped[6:].strip()
+
+    payload = "\n".join(data_lines).strip()
     if not payload or payload == "[DONE]":
         return None
+
     try:
         return json.loads(payload)
     except json.JSONDecodeError:
@@ -274,10 +284,12 @@ async def openai_stream_to_responses_stream(
     body_iterator: AsyncIterator[Any],
     model: str,
 ) -> AsyncIterator[str]:
-    response_id = f"resp_{int(time.time())}"
-    yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'model': model, 'object': 'response', 'status': 'in_progress'}}, ensure_ascii=False)}\n\n"
+    created_at = int(time.time())
+    response_id = f"resp_{created_at}"
+    yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'model': model, 'object': 'response', 'status': 'in_progress', 'created_at': created_at}}, ensure_ascii=False)}\n\n"
 
     output_index = 0
+    latest_usage = {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
         parsed = _parse_sse_json(chunk)
@@ -290,9 +302,17 @@ async def openai_stream_to_responses_stream(
         if text:
             yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': output_index, 'delta': text}, ensure_ascii=False)}\n\n"
 
+        usage = parsed.get('usage', {})
+        if usage:
+            latest_usage = {
+                'input_tokens': usage.get('prompt_tokens', latest_usage['input_tokens']),
+                'output_tokens': usage.get('completion_tokens', usage.get('total_tokens', latest_usage['output_tokens'])),
+                'total_tokens': usage.get('total_tokens', latest_usage['total_tokens']),
+            }
+
         if choice.get("finish_reason"):
             yield f"data: {json.dumps({'type': 'response.output_text.done', 'response_id': response_id, 'output_index': output_index}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': response_id, 'model': model, 'object': 'response', 'status': 'completed'}}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': response_id, 'model': model, 'object': 'response', 'status': 'completed', 'created_at': created_at}, 'usage': latest_usage}, ensure_ascii=False)}\n\n"
 
 
 async def openai_stream_to_claude_stream(
@@ -309,6 +329,8 @@ async def openai_stream_to_claude_stream(
         f"data: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}}, ensure_ascii=False)}\n\n"
     )
 
+    output_tokens = 0
+
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
         parsed = _parse_sse_json(chunk)
@@ -324,6 +346,10 @@ async def openai_stream_to_claude_stream(
                 f"data: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': text}}, ensure_ascii=False)}\n\n"
             )
 
+        usage = parsed.get('usage', {})
+        if usage:
+            output_tokens = usage.get('completion_tokens', usage.get('total_tokens', output_tokens))
+
         if choice.get("finish_reason"):
             stop_reason = "end_turn"
             if choice.get("finish_reason") == "tool_calls":
@@ -335,7 +361,7 @@ async def openai_stream_to_claude_stream(
             )
             yield "event: message_delta\n"
             yield (
-                f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None, 'usage': {'output_tokens': parsed.get('usage', {}).get('completion_tokens', 0)}}}, ensure_ascii=False)}\n\n"
+                f"data: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': stop_reason, 'stop_sequence': None, 'usage': {'output_tokens': output_tokens}}}, ensure_ascii=False)}\n\n"
             )
             yield "event: message_stop\n"
             yield f"data: {json.dumps({'type': 'message_stop'}, ensure_ascii=False)}\n\n"

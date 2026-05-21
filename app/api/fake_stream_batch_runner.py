@@ -1,7 +1,11 @@
 import asyncio
 
 from app.utils import handle_gemini_error, openAI_from_text
-from app.utils.response import gemini_from_text, openAI_from_Gemini
+from app.utils.response import (
+    ensure_gemini_timing_fields,
+    gemini_from_text,
+    openAI_from_Gemini,
+)
 from app.utils.response_loop_helpers import (
     dump_json_response,
     log_empty_response_count,
@@ -57,7 +61,9 @@ async def run_fake_stream_batch_until_success(
                     )
                     if cache_hit and cached_response:
                         if is_gemini:
-                            json_payload = dump_json_response(cached_response.data)
+                            json_payload = dump_json_response(
+                                ensure_gemini_timing_fields(cached_response.data)
+                            )
                             yield "chunk", f"data: {json_payload}\n\n"
                         else:
                             yield "chunk", openAI_from_Gemini(cached_response, stream=True)
