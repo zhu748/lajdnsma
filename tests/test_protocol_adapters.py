@@ -65,6 +65,21 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertEqual(request.messages[1]["content"], "你好")
 
+
+    def test_response_request_to_chat_request_skips_empty_message_content(self):
+        request = response_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "input": [
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "   "}]},
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "保留"}]},
+                ],
+            }
+        )
+
+        self.assertEqual(len(request.messages), 1)
+        self.assertEqual(request.messages[0]["content"], "保留")
+
     def test_claude_request_to_chat_request(self):
         request = claude_request_to_chat_request(
             {
@@ -91,6 +106,21 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[1]["content"], "讲个笑话")
         self.assertEqual(request.max_tokens, 128)
         self.assertEqual(request.tools[0]["function"]["name"], "weather")
+
+
+    def test_claude_request_to_chat_request_skips_blank_string_content(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {"role": "user", "content": "   "},
+                    {"role": "user", "content": "有效消息"},
+                ],
+            }
+        )
+
+        self.assertEqual(len(request.messages), 1)
+        self.assertEqual(request.messages[0]["content"], "有效消息")
 
     def test_openai_chat_to_response_api(self):
         response = openai_chat_to_response_api(
@@ -154,6 +184,22 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("response.created", joined)
         self.assertIn("response.output_text.delta", joined)
         self.assertIn("response.completed", joined)
+
+
+    async def test_openai_stream_parser_supports_event_and_data_without_space(self):
+        chunks = [
+            'event: message\ndata:{"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"测"},"finish_reason":null}]}\n\n',
+            'data:{"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":3}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn('"output_tokens": 3', joined)
 
     async def test_openai_stream_to_claude_stream(self):
         chunks = [

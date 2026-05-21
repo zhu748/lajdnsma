@@ -1,5 +1,6 @@
 import json
 import time
+from datetime import datetime, timezone
 
 
 def openAI_from_text(
@@ -39,6 +40,21 @@ def openAI_from_text(
         return formatted_chunk
 
 
+
+
+def ensure_gemini_timing_fields(payload):
+    """补齐 Gemini 响应中的时间字段，便于前端显示耗时/完成时间。"""
+    if not isinstance(payload, dict):
+        return payload
+
+    if not payload.get("responseId"):
+        payload["responseId"] = f"resp_{int(time.time())}"
+
+    if not payload.get("createTime"):
+        payload["createTime"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    return payload
+
 def gemini_from_text(
     content=None, finish_reason=None, total_token_count=0, stream=True
 ):
@@ -53,6 +69,8 @@ def gemini_from_text(
 
     if finish_reason:
         gemini_response["usageMetadata"] = {"totalTokenCount": total_token_count}
+
+    gemini_response = ensure_gemini_timing_fields(gemini_response)
 
     if stream:
         return f"data: {json.dumps(gemini_response, ensure_ascii=False)}\n\n"
