@@ -1,6 +1,6 @@
 import app.config.settings as settings
 from app.utils.error_handling import handle_gemini_error
-from app.utils.response import openAI_from_Gemini
+from app.utils.response import ensure_gemini_timing_fields, openAI_from_Gemini
 from app.utils.response_loop_helpers import (
     dump_json_response,
     log_empty_response_count,
@@ -30,7 +30,7 @@ async def handle_nonstream_task_status(
             )
             cached_response, _ = await response_cache_manager.get_and_remove(cache_key)
             if is_gemini:
-                response = cached_response.data
+                response = ensure_gemini_timing_fields(cached_response.data)
             else:
                 response = openAI_from_Gemini(cached_response, stream=False)
             if serialize_json:

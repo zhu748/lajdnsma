@@ -13,6 +13,16 @@ from app.utils.response_loop_helpers import (
     log_request_success,
 )
 from app.utils.retry_state import remove_completed_tasks
+from app.utils.retry_state import cancel_pending_tasks
+from app.utils.sse import sse_text
+
+
+def _fake_stream_keepalive_chunk(*, chat_request, is_gemini: bool):
+    """Build an empty fake-stream chunk to keep clients receiving time ticks."""
+    if is_gemini:
+        return gemini_from_text(content="", stream=True)
+
+    return openAI_from_text(model=chat_request.model, content="", stream=True)
 
 
 async def run_fake_stream_batch_until_success(
@@ -27,6 +37,10 @@ async def run_fake_stream_batch_until_success(
     settings,
 ):
     """Run a fake-stream batch and yield keepalive/final chunks plus a summary."""
+    yield "chunk", _fake_stream_keepalive_chunk(
+        chat_request=chat_request, is_gemini=is_gemini
+    )
+
     while tasks:
         done, _ = await asyncio.wait(
             [task for _, task in tasks],
@@ -35,12 +49,9 @@ async def run_fake_stream_batch_until_success(
         )
 
         if not done:
-            if is_gemini:
-                yield "chunk", gemini_from_text(content="", stream=True)
-            else:
-                yield "chunk", openAI_from_text(
-                    model=chat_request.model, content="", stream=True
-                )
+            yield "chunk", _fake_stream_keepalive_chunk(
+                chat_request=chat_request, is_gemini=is_gemini
+            )
             continue
 
         for task in done:
@@ -64,9 +75,10 @@ async def run_fake_stream_batch_until_success(
                             json_payload = dump_json_response(
                                 ensure_gemini_timing_fields(cached_response.data)
                             )
-                            yield "chunk", f"data: {json_payload}\n\n"
+                            yield "chunk", sse_text(json_payload)
                         else:
                             yield "chunk", openAI_from_Gemini(cached_response, stream=True)
+                        cancel_pending_tasks(tasks)
                         yield "summary", {
                             "success": True,
                             "empty_response_count": empty_response_count,

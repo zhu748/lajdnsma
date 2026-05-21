@@ -1,11 +1,10 @@
-import json
-
 from fastapi import HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
 import app.config.settings as settings
 from app.utils import log
-from app.utils.response import openAI_from_Gemini
+from app.utils.response import ensure_gemini_timing_fields, openAI_from_Gemini
+from app.utils.sse import sse_data, sse_done
 
 
 key_manager = None
@@ -76,13 +75,16 @@ async def get_cache(cache_key, is_stream: bool, is_gemini=False):
 
         if is_gemini:
             if is_stream:
-                data = f"data: {json.dumps(cached_response.data, ensure_ascii=False)}\n\n"
+                payload = ensure_gemini_timing_fields(cached_response.data)
+                data = sse_data(payload)
                 return StreamingResponse(data, media_type="text/event-stream")
-            return cached_response.data
+            return ensure_gemini_timing_fields(cached_response.data)
 
         if is_stream:
             chunk = openAI_from_Gemini(cached_response, stream=True)
-            return StreamingResponse(chunk, media_type="text/event-stream")
+            return StreamingResponse(
+                f"{chunk}{sse_done()}", media_type="text/event-stream"
+            )
         return openAI_from_Gemini(cached_response, stream=False)
 
     return None

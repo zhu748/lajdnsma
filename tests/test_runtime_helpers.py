@@ -19,6 +19,170 @@ def load_module(module_name: str, relative_path: str, extra_modules: dict | None
 
 
 class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_route_runtime_cache_stream_openai_includes_done(self):
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.HTTPException = Exception
+        fake_fastapi.Request = object
+        fake_fastapi.status = types.SimpleNamespace(HTTP_403_FORBIDDEN=403)
+
+        fake_responses = types.ModuleType("fastapi.responses")
+
+        class StreamingResponse:
+            def __init__(self, body_iterator=None, media_type=None):
+                self.body_iterator = body_iterator
+                self.media_type = media_type
+
+        fake_responses.StreamingResponse = StreamingResponse
+
+        fake_config_pkg = types.ModuleType("app.config")
+        fake_settings = types.ModuleType("app.config.settings")
+        fake_settings.WHITELIST_USER_AGENT = []
+
+        fake_utils = types.ModuleType("app.utils")
+        fake_utils.log = lambda *args, **kwargs: None
+
+        fake_response = types.ModuleType("app.utils.response")
+        fake_response.ensure_gemini_timing_fields = lambda data: data
+        fake_response.openAI_from_Gemini = (
+            lambda cached_response, stream=True: "data: openai\n\n"
+        )
+
+        fake_sse = types.ModuleType("app.utils.sse")
+        fake_sse.sse_data = lambda payload: f"data: {payload}\n\n"
+        fake_sse.sse_done = lambda: "data: [DONE]\n\n"
+
+        module = load_module(
+            "route_runtime",
+            "app/api/route_runtime.py",
+            {
+                "fastapi": fake_fastapi,
+                "fastapi.responses": fake_responses,
+                "app.config": fake_config_pkg,
+                "app.config.settings": fake_settings,
+                "app.utils": fake_utils,
+                "app.utils.response": fake_response,
+                "app.utils.sse": fake_sse,
+            },
+        )
+
+        class Cache:
+            async def get_and_remove(self, key):
+                return types.SimpleNamespace(model="m", data={"ok": True}), True
+
+        module.response_cache_manager = Cache()
+
+        response = await module.get_cache("cache-key", is_stream=True, is_gemini=False)
+
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(response.body_iterator, "data: openai\n\ndata: [DONE]\n\n")
+
+    async def test_route_runtime_cache_gemini_adds_timing(self):
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.HTTPException = Exception
+        fake_fastapi.Request = object
+        fake_fastapi.status = types.SimpleNamespace(HTTP_403_FORBIDDEN=403)
+
+        fake_responses = types.ModuleType("fastapi.responses")
+        fake_responses.StreamingResponse = object
+
+        fake_config_pkg = types.ModuleType("app.config")
+        fake_settings = types.ModuleType("app.config.settings")
+        fake_settings.WHITELIST_USER_AGENT = []
+
+        fake_utils = types.ModuleType("app.utils")
+        fake_utils.log = lambda *args, **kwargs: None
+
+        fake_response = types.ModuleType("app.utils.response")
+        fake_response.ensure_gemini_timing_fields = (
+            lambda data: {**data, "createTime": "now"}
+        )
+        fake_response.openAI_from_Gemini = lambda *args, **kwargs: None
+
+        fake_sse = types.ModuleType("app.utils.sse")
+        fake_sse.sse_data = lambda payload: f"data: {payload}\n\n"
+        fake_sse.sse_done = lambda: "data: [DONE]\n\n"
+
+        module = load_module(
+            "route_runtime",
+            "app/api/route_runtime.py",
+            {
+                "fastapi": fake_fastapi,
+                "fastapi.responses": fake_responses,
+                "app.config": fake_config_pkg,
+                "app.config.settings": fake_settings,
+                "app.utils": fake_utils,
+                "app.utils.response": fake_response,
+                "app.utils.sse": fake_sse,
+            },
+        )
+
+        class Cache:
+            async def get_and_remove(self, key):
+                return types.SimpleNamespace(model="m", data={"ok": True}), True
+
+        module.response_cache_manager = Cache()
+
+        response = await module.get_cache("cache-key", is_stream=False, is_gemini=True)
+
+        self.assertEqual(response, {"ok": True, "createTime": "now"})
+
+    async def test_route_runtime_cache_gemini_stream_adds_timing(self):
+        fake_fastapi = types.ModuleType("fastapi")
+        fake_fastapi.HTTPException = Exception
+        fake_fastapi.Request = object
+        fake_fastapi.status = types.SimpleNamespace(HTTP_403_FORBIDDEN=403)
+
+        fake_responses = types.ModuleType("fastapi.responses")
+
+        class StreamingResponse:
+            def __init__(self, body_iterator=None, media_type=None):
+                self.body_iterator = body_iterator
+                self.media_type = media_type
+
+        fake_responses.StreamingResponse = StreamingResponse
+
+        fake_config_pkg = types.ModuleType("app.config")
+        fake_settings = types.ModuleType("app.config.settings")
+        fake_settings.WHITELIST_USER_AGENT = []
+
+        fake_utils = types.ModuleType("app.utils")
+        fake_utils.log = lambda *args, **kwargs: None
+
+        fake_response = types.ModuleType("app.utils.response")
+        fake_response.ensure_gemini_timing_fields = (
+            lambda data: {**data, "createTime": "now"}
+        )
+        fake_response.openAI_from_Gemini = lambda *args, **kwargs: None
+
+        fake_sse = types.ModuleType("app.utils.sse")
+        fake_sse.sse_data = lambda payload: f"data: {payload}\n\n"
+        fake_sse.sse_done = lambda: "data: [DONE]\n\n"
+
+        module = load_module(
+            "route_runtime",
+            "app/api/route_runtime.py",
+            {
+                "fastapi": fake_fastapi,
+                "fastapi.responses": fake_responses,
+                "app.config": fake_config_pkg,
+                "app.config.settings": fake_settings,
+                "app.utils": fake_utils,
+                "app.utils.response": fake_response,
+                "app.utils.sse": fake_sse,
+            },
+        )
+
+        class Cache:
+            async def get_and_remove(self, key):
+                return types.SimpleNamespace(model="m", data={"ok": True}), True
+
+        module.response_cache_manager = Cache()
+
+        response = await module.get_cache("cache-key", is_stream=True, is_gemini=True)
+
+        self.assertEqual(response.media_type, "text/event-stream")
+        self.assertEqual(response.body_iterator, "data: {'ok': True, 'createTime': 'now'}\n\n")
+
     async def test_empty_response_helpers(self):
         fake_error_response = types.ModuleType("app.utils.error_response")
         fake_logging = types.ModuleType("app.utils.logging")

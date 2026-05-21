@@ -1,5 +1,3 @@
-import asyncio
-
 from app.services import GeminiClient
 from app.utils import handle_gemini_error, log
 from app.utils.gemini_response_processing import (
@@ -19,8 +17,9 @@ async def handle_fake_streaming(
     cache_key,
 ):
     gemini_client = GeminiClient(api_key)
-    gemini_task = asyncio.create_task(
-        gemini_client.complete_chat(
+
+    try:
+        response_content = await gemini_client.complete_chat(
             chat_request,
             contents,
             select_safety_settings(
@@ -28,11 +27,6 @@ async def handle_fake_streaming(
             ),
             system_instruction,
         )
-    )
-    gemini_task = asyncio.shield(gemini_task)
-
-    try:
-        response_content = await gemini_task
         log(
             "info",
             "fake stream response received; caching result",

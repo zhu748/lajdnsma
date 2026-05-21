@@ -2,6 +2,7 @@ import httpx
 import asyncio
 import json
 from typing import List, Dict, Optional
+from app.utils.http_client import get_async_client
 from app.utils.logging import vertex_log
 
 # 导入settings和app_config
@@ -40,71 +41,71 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
 
     for retry in range(max_retries):
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:  # 增加超时时间
-                vertex_log("info", f"尝试获取模型配置，第{retry + 1}次尝试")
-                response = await client.get(models_config_url)
-                response.raise_for_status()  # Raise an exception for HTTP errors
+            client = await get_async_client()
+            vertex_log("info", f"尝试获取模型配置，第{retry + 1}次尝试")
+            response = await client.get(models_config_url, timeout=30.0)
+            response.raise_for_status()  # Raise an exception for HTTP errors
 
-                # 记录原始响应内容，便于调试
-                response_text = response.text
+            # 记录原始响应内容，便于调试
+            response_text = response.text
+            vertex_log(
+                "debug", f"接收到原始响应: {response_text[:200]}..."
+            )  # 只记录前200个字符
+
+            data = response.json()
+
+            # 更详细的验证和日志
+            if not isinstance(data, dict):
+                vertex_log("error", f"模型配置不是有效的JSON对象: {type(data)}")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # 指数退避
+                continue
+
+            if "vertex_models" not in data:
+                vertex_log("error", "模型配置缺少'vertex_models'字段")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+
+            if "vertex_express_models" not in data:
+                vertex_log("error", "模型配置缺少'vertex_express_models'字段")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
+
+            if not isinstance(data["vertex_models"], list):
                 vertex_log(
-                    "debug", f"接收到原始响应: {response_text[:200]}..."
-                )  # 只记录前200个字符
-
-                data = response.json()
-
-                # 更详细的验证和日志
-                if not isinstance(data, dict):
-                    vertex_log("error", f"模型配置不是有效的JSON对象: {type(data)}")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2  # 指数退避
-                    continue
-
-                if "vertex_models" not in data:
-                    vertex_log("error", "模型配置缺少'vertex_models'字段")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-
-                if "vertex_express_models" not in data:
-                    vertex_log("error", "模型配置缺少'vertex_express_models'字段")
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-
-                if not isinstance(data["vertex_models"], list):
-                    vertex_log(
-                        "error",
-                        f"'vertex_models'不是列表: {type(data['vertex_models'])}",
-                    )
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-
-                if not isinstance(data["vertex_express_models"], list):
-                    vertex_log(
-                        "error",
-                        f"'vertex_express_models'不是列表: {type(data['vertex_express_models'])}",
-                    )
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-
-                vertex_log(
-                    "info",
-                    f"成功获取和解析模型配置。找到 {len(data['vertex_models'])} 个标准模型和 {len(data['vertex_express_models'])} 个Express模型。",
+                    "error",
+                    f"'vertex_models'不是列表: {type(data['vertex_models'])}",
                 )
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
 
-                # Add [EXPRESS] prefix to express models
-                prefixed_express_models = [
-                    f"[EXPRESS] {model_name}"
-                    for model_name in data["vertex_express_models"]
-                ]
+            if not isinstance(data["vertex_express_models"], list):
+                vertex_log(
+                    "error",
+                    f"'vertex_express_models'不是列表: {type(data['vertex_express_models'])}",
+                )
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+                continue
 
-                return {
-                    "vertex_models": data["vertex_models"],
-                    "vertex_express_models": prefixed_express_models,
-                }
+            vertex_log(
+                "info",
+                f"成功获取和解析模型配置。找到 {len(data['vertex_models'])} 个标准模型和 {len(data['vertex_express_models'])} 个Express模型。",
+            )
+
+            # Add [EXPRESS] prefix to express models
+            prefixed_express_models = [
+                f"[EXPRESS] {model_name}"
+                for model_name in data["vertex_express_models"]
+            ]
+
+            return {
+                "vertex_models": data["vertex_models"],
+                "vertex_express_models": prefixed_express_models,
+            }
 
         except httpx.RequestError as e:
             vertex_log("error", f"HTTP请求失败({retry + 1}/{max_retries}): {e}")

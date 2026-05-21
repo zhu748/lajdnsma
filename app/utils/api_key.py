@@ -4,6 +4,7 @@ import os
 import logging
 import asyncio
 from apscheduler.schedulers.background import BackgroundScheduler
+from app.utils.http_client import get_async_client
 from app.utils.logging import format_log_message
 import app.config.settings as settings
 
@@ -82,14 +83,12 @@ async def test_api_key(api_key: str) -> bool:
     测试 API 密钥是否有效。
     """
     try:
-        import httpx
-
         url = "https://generativelanguage.googleapis.com/v1beta/models?key={}".format(
             api_key
         )
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return True
+        client = await get_async_client()
+        response = await client.get(url, timeout=60)
+        response.raise_for_status()
+        return True
     except Exception:
         return False

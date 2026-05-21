@@ -1,12 +1,13 @@
 from app.services import GeminiClient
 from app.utils import handle_gemini_error, update_api_call_stats
 from app.utils.gemini_response_processing import select_safety_settings
-from app.utils.response import openAI_from_Gemini
+from app.utils.response import ensure_gemini_timing_fields, openAI_from_Gemini
 from app.utils.response_loop_helpers import (
     dump_json_response,
     log_empty_response_count,
     log_request_failure,
 )
+from app.utils.sse import sse_text
 
 
 async def generate_native_stream_chunks(
@@ -42,8 +43,10 @@ async def generate_native_stream_chunks(
                     token = int(chunk.total_token_count)
                 success = True
                 if is_gemini:
-                    json_payload = dump_json_response(chunk.data)
-                    yield "chunk", f"data: {json_payload}\n\n"
+                    json_payload = dump_json_response(
+                        ensure_gemini_timing_fields(chunk.data)
+                    )
+                    yield "chunk", sse_text(json_payload)
                 else:
                     yield "chunk", openAI_from_Gemini(chunk, stream=True)
             else:

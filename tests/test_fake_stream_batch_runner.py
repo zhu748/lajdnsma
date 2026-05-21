@@ -37,7 +37,11 @@ def load_fake_batch_runner():
     fake_loop.log_request_success = lambda *args, **kwargs: logs.append(("success", args, kwargs))
 
     fake_retry = types.ModuleType("app.utils.retry_state")
+    fake_retry.cancel_pending_tasks = lambda tasks: [task.cancel() for _, task in tasks if not task.done()]
     fake_retry.remove_completed_tasks = lambda tasks: [item for item in tasks if not item[1].done()]
+
+    fake_sse = types.ModuleType("app.utils.sse")
+    fake_sse.sse_text = lambda data: f"data: {data}\n\n"
 
     sys.modules.update(
         {
@@ -45,6 +49,7 @@ def load_fake_batch_runner():
             "app.utils.response": fake_response,
             "app.utils.response_loop_helpers": fake_loop,
             "app.utils.retry_state": fake_retry,
+            "app.utils.sse": fake_sse,
         }
     )
     spec = importlib.util.spec_from_file_location(
@@ -83,9 +88,36 @@ class FakeStreamBatchRunnerTestCase(unittest.IsolatedAsyncioTestCase):
         ):
             items.append(item)
 
-        self.assertEqual(items[0], ("chunk", "data: json:{'ok': True}\n\n"))
+        self.assertEqual(items[0], ("chunk", {"gemini": "", "stream": True}))
+        self.assertEqual(items[1], ("chunk", "data: json:{'ok': True}\n\n"))
         self.assertEqual(items[-1][0], "summary")
         self.assertTrue(items[-1][1]["success"])
+
+    async def test_success_cancels_pending_attempts(self):
+        module = load_fake_batch_runner()
+        success_task = done_future("success")
+        pending_task = asyncio.create_task(asyncio.sleep(60))
+
+        class Cache:
+            async def get_and_remove(self, key):
+                return types.SimpleNamespace(data={"ok": True}), True
+
+        settings = types.SimpleNamespace(FAKE_STREAMING_INTERVAL=0.01, MAX_EMPTY_RESPONSES=3)
+        request = types.SimpleNamespace(model="m")
+        async for _ in module.run_fake_stream_batch_until_success(
+            tasks=[("key123456", success_task), ("keyabcdef", pending_task)],
+            tasks_map={success_task: "key123456", pending_task: "keyabcdef"},
+            chat_request=request,
+            response_cache_manager=Cache(),
+            cache_key="cache",
+            is_gemini=False,
+            empty_response_count=0,
+            settings=settings,
+        ):
+            pass
+
+        await asyncio.sleep(0)
+        self.assertTrue(pending_task.cancelled())
 
     async def test_empty_exhausts_with_updated_count(self):
         module = load_fake_batch_runner()

@@ -83,7 +83,12 @@ def load_routes_module():
     fake_utils.log = lambda *args, **kwargs: None
 
     fake_response = types.ModuleType("app.utils.response")
+    fake_response.ensure_gemini_timing_fields = lambda data: data
     fake_response.openAI_from_Gemini = lambda *args, **kwargs: {"ok": True}
+
+    fake_sse = types.ModuleType("app.utils.sse")
+    fake_sse.sse_data = lambda payload: f"data: {payload}\n\n"
+    fake_sse.sse_done = lambda: "data: [DONE]\n\n"
 
     fake_auth = types.ModuleType("app.utils.auth")
     fake_auth.custom_verify_password = lambda: None
@@ -241,6 +246,7 @@ def load_routes_module():
             "app.services": fake_services,
             "app.utils": fake_utils,
             "app.utils.response": fake_response,
+            "app.utils.sse": fake_sse,
             "app.utils.auth": fake_auth,
             "app.api.request_helpers": fake_request_helpers,
             "app.api.orchestration_helpers": fake_orchestration,

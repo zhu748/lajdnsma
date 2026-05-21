@@ -22,6 +22,7 @@ def load_batch_runner(status_sequence):
     fake_status.handle_nonstream_task_status = handle_nonstream_task_status
 
     fake_retry = types.ModuleType("app.utils.retry_state")
+    fake_retry.cancel_pending_tasks = lambda tasks: [task.cancel() for _, task in tasks if not task.done()]
     fake_retry.remove_completed_tasks = lambda tasks: [item for item in tasks if not item[1].done()]
 
     sys.modules.update(
@@ -62,6 +63,23 @@ class NonstreamBatchRunnerTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["response"], {"ok": True})
+
+    async def test_success_cancels_pending_tasks(self):
+        module = load_batch_runner([("success", {"ok": True}, 0)])
+        success_task = done_future()
+        pending_task = asyncio.create_task(asyncio.sleep(60))
+        result = await module.run_nonstream_batch_until_success(
+            tasks=[("key", success_task), ("key2", pending_task)],
+            tasks_map={success_task: "key", pending_task: "key2"},
+            chat_request=types.SimpleNamespace(model="m"),
+            response_cache_manager=None,
+            cache_key="cache",
+            is_gemini=False,
+            empty_response_count=0,
+        )
+        await asyncio.sleep(0)
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(pending_task.cancelled())
 
     async def test_empty_exhausts_batch_with_updated_count(self):
         module = load_batch_runner([("empty", None, 2)])

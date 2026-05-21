@@ -16,3 +16,9 @@ def reached_empty_response_limit(empty_response_count: int, max_empty_responses:
 
 def remove_completed_tasks(tasks):
     return [(key, task) for key, task in tasks if not task.done()]
+
+
+def cancel_pending_tasks(tasks):
+    for _, task in tasks:
+        if not task.done():
+            task.cancel()

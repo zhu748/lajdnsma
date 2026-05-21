@@ -1,6 +1,5 @@
-import httpx
-from typing import List, Union
 from app.models.schemas import EmbeddingRequest, EmbeddingData, EmbeddingResponse, Usage
+from app.utils.http_client import get_async_client
 from app.utils.logging import log
 
 class EmbeddingClient:
@@ -39,29 +38,33 @@ class EmbeddingClient:
         }
         log("INFO", "Embedding request started", extra=extra_log)
 
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, headers=headers, json=data, timeout=60)
-            response.raise_for_status()
-            
-            response_json = response.json()
-            log("INFO", f"Google AI API response: {response_json}")
-            
-            # The response is a JSON object with an "embeddings" key.
-            # Each item in the list is an object with a "values" key.
-            embeddings = response_json.get("embeddings", [])
+        client = await get_async_client()
+        response = await client.post(url, headers=headers, json=data, timeout=60)
+        response.raise_for_status()
 
-            embedding_data = [
-                EmbeddingData(embedding=item["values"], index=i)
-                for i, item in enumerate(embeddings)
-            ]
+        response_json = response.json()
 
-            # The Gemini API does not provide token usage for embeddings.
-            # We'll return a default usage object.
-            usage = Usage(prompt_tokens=0, total_tokens=0)
+        # The response is a JSON object with an "embeddings" key.
+        # Each item in the list is an object with a "values" key.
+        embeddings = response_json.get("embeddings", [])
+        log(
+            "INFO",
+            f"Embedding request completed, embeddings: {len(embeddings)}",
+            extra=extra_log,
+        )
 
-            return EmbeddingResponse(
-                object="list",
-                data=embedding_data,
-                model=model_name,
-                usage=usage,
-            )
+        embedding_data = [
+            EmbeddingData(embedding=item["values"], index=i)
+            for i, item in enumerate(embeddings)
+        ]
+
+        # The Gemini API does not provide token usage for embeddings.
+        # We'll return a default usage object.
+        usage = Usage(prompt_tokens=0, total_tokens=0)
+
+        return EmbeddingResponse(
+            object="list",
+            data=embedding_data,
+            model=model_name,
+            usage=usage,
+        )

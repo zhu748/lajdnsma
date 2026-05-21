@@ -98,6 +98,35 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         async for chunk in response.body_iterator:
             chunks.append(chunk)
         self.assertIn("responses::gemini-2.5-pro::chunk-a", chunks[0])
+        self.assertIn("responses::gemini-2.5-pro::chunk-b", chunks[1])
+
+    async def test_handle_responses_request_wraps_cached_openai_stream(self):
+        module = load_protocol_handlers()
+
+        async def fake_chat_handler(request, http_request, auth_dep, user_agent_dep):
+            return FakeStreamingResponse(
+                _iter_chunks(["data: cached\n\n", "data: [DONE]\n\n"]),
+                media_type="text/event-stream",
+            )
+
+        response = await module.handle_responses_request(
+            {"model": "gemini-2.5-pro"},
+            http_request=None,
+            auth_dep=None,
+            user_agent_dep=None,
+            chat_handler=fake_chat_handler,
+        )
+
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        self.assertEqual(
+            chunks,
+            [
+                "responses::gemini-2.5-pro::data: cached\n\n",
+                "responses::gemini-2.5-pro::data: [DONE]\n\n",
+            ],
+        )
 
     async def test_handle_claude_messages_request_non_stream(self):
         module = load_protocol_handlers()
@@ -132,6 +161,34 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         async for chunk in response.body_iterator:
             chunks.append(chunk)
         self.assertIn("claude::gemini-2.5-pro::chunk-a", chunks[0])
+
+    async def test_handle_claude_request_wraps_cached_openai_stream(self):
+        module = load_protocol_handlers()
+
+        async def fake_chat_handler(request, http_request, auth_dep, user_agent_dep):
+            return FakeStreamingResponse(
+                _iter_chunks(["data: cached\n\n", "data: [DONE]\n\n"]),
+                media_type="text/event-stream",
+            )
+
+        response = await module.handle_claude_messages_request(
+            {"model": "gemini-2.5-pro"},
+            http_request=None,
+            auth_dep=None,
+            user_agent_dep=None,
+            chat_handler=fake_chat_handler,
+        )
+
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk)
+        self.assertEqual(
+            chunks,
+            [
+                "claude::gemini-2.5-pro::data: cached\n\n",
+                "claude::gemini-2.5-pro::data: [DONE]\n\n",
+            ],
+        )
 
 
 if __name__ == "__main__":

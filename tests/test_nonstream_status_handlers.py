@@ -19,6 +19,7 @@ def load_status_module():
     fake_error_handling.handle_gemini_error = lambda error, api_key: errors.append((error, api_key))
 
     fake_response = types.ModuleType("app.utils.response")
+    fake_response.ensure_gemini_timing_fields = lambda data: {**data, "timing": True}
     fake_response.openAI_from_Gemini = lambda cached_response, stream=False: {
         "converted": cached_response.data,
         "stream": stream,
@@ -77,6 +78,30 @@ class NonstreamStatusHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "success")
         self.assertEqual(response["converted"], {"ok": True})
         self.assertEqual(empty_count, 0)
+
+    async def test_success_status_adds_gemini_timing_fields(self):
+        module = load_status_module()
+
+        class Task:
+            def result(self):
+                return "success"
+
+        class Cache:
+            async def get_and_remove(self, key):
+                return types.SimpleNamespace(data={"ok": True}), True
+
+        request = types.SimpleNamespace(model="m")
+        status, response, _ = await module.handle_nonstream_task_status(
+            task=Task(),
+            api_key="apikey123",
+            chat_request=request,
+            response_cache_manager=Cache(),
+            cache_key="cache",
+            is_gemini=True,
+            empty_response_count=0,
+        )
+        self.assertEqual(status, "success")
+        self.assertTrue(response["timing"])
 
     async def test_empty_and_error_statuses(self):
         module = load_status_module()

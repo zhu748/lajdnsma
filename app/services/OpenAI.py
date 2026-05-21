@@ -1,14 +1,14 @@
-import json
 import os
 from app.models.schemas import ChatCompletionRequest
 from dataclasses import dataclass
 from typing import Optional
-import httpx
 import secrets
 import string
 import app.config.settings as settings
 
+from app.utils.http_client import get_async_client
 from app.utils.logging import log
+from app.utils.sse import iter_sse_json
 
 
 def generate_secure_random_string(length):
@@ -31,6 +31,17 @@ class OpenAIClient:
 
     def __init__(self, api_key: str):
         self.api_key = api_key
+
+    def _request_to_dict(request: ChatCompletionRequest):
+        if hasattr(request, "model_dump"):
+            return request.model_dump(exclude_none=True)
+        if isinstance(request, dict):
+            return request
+        return {
+            key: value
+            for key, value in vars(request).items()
+            if not key.startswith("_") and value is not None
+        }
 
     def filter_data_by_whitelist(data, allowed_keys):
         """
@@ -64,9 +75,10 @@ class OpenAIClient:
             "presence_penalty",
         ]
 
-        data = self.filter_data_by_whitelist(request, whitelist)
+        request_data = self._request_to_dict(request)
+        data = self.filter_data_by_whitelist(request_data, whitelist)
 
-        if settings.search["search_mode"] and data.model.endswith("-search"):
+        if settings.search["search_mode"] and data["model"].endswith("-search"):
             log(
                 "INFO",
                 "开启联网搜索模式",
@@ -74,7 +86,7 @@ class OpenAIClient:
             )
             data.setdefault("tools", []).append({"google_search": {}})
 
-        data.model = data.model.removesuffix("-search")
+        data["model"] = data["model"].removesuffix("-search")
 
         # 真流式请求处理逻辑
         extra_log = {
@@ -90,46 +102,23 @@ class OpenAIClient:
             "Authorization": f"Bearer {self.api_key}",
         }
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST", url, headers=headers, json=data, timeout=600
-            ) as response:
-                buffer = b""  # 用于累积可能不完整的 JSON 数据
-                try:
-                    async for line in response.aiter_lines():
-                        if not line.strip():  # 跳过空行 (SSE 消息分隔符)
-                            continue
-                        if line.startswith("data: "):
-                            line = line[len("data: ") :].strip()  # 去除 "data: " 前缀
-
-                        # 检查是否是结束标志，如果是，结束循环
-                        if line == "[DONE]":
-                            break
-
-                        buffer += line.encode("utf-8")
-                        try:
-                            # 尝试解析整个缓冲区
-                            data = json.loads(buffer.decode("utf-8"))
-                            # 解析成功，清空缓冲区
-                            buffer = b""
-
-                            yield data
-
-                        except json.JSONDecodeError:
-                            # JSON 不完整，继续累积到 buffer
-                            continue
-                        except Exception as e:
-                            log(
-                                "ERROR",
-                                "流式处理期间发生错误",
-                                extra={
-                                    "key": self.api_key[:8],
-                                    "request_type": "stream",
-                                    "model": request.model,
-                                },
-                            )
-                            raise e
-                except Exception as e:
-                    raise e
-                finally:
-                    log("info", "流式请求结束")
+        client = await get_async_client()
+        async with client.stream(
+            "POST", url, headers=headers, json=data, timeout=600
+        ) as response:
+            try:
+                async for data in iter_sse_json(response):
+                    yield data
+            except Exception as e:
+                log(
+                    "ERROR",
+                    "流式处理期间发生错误",
+                    extra={
+                        "key": self.api_key[:8],
+                        "request_type": "stream",
+                        "model": request.model,
+                    },
+                )
+                raise e
+            finally:
+                log("info", "流式请求结束")

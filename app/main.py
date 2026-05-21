@@ -19,6 +19,7 @@ from app.config.persistence import save_settings, load_settings
 from app.api import router, init_router, dashboard_router, init_dashboard_router
 from app.vertex.vertex_ai_init import init_vertex_ai
 from app.vertex.credentials_manager import CredentialManager
+from app.utils.http_client import close_async_client
 import app.config.settings as settings
 from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 import asyncio
@@ -248,6 +249,11 @@ async def startup_event():
 
     # 启动浏览器
     open_browser()
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await close_async_client()
 
 
 # --------------- 异常处理 ---------------

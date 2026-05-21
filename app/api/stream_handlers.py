@@ -24,6 +24,7 @@ from app.utils.retry_state import (
     reached_empty_response_limit,
     should_continue_retry,
 )
+from app.utils.sse import sse_done
 
 
 async def generate_fake_stream_response(
@@ -216,6 +217,8 @@ async def stream_response_generator(
             system_instruction=system_instruction,
         ):
             yield chunk
+        if not is_gemini:
+            yield sse_done()
         return
 
     async for chunk in generate_native_stream_response(
@@ -228,6 +231,8 @@ async def stream_response_generator(
         system_instruction=system_instruction,
     ):
         yield chunk
+    if not is_gemini:
+        yield sse_done()
 
 
 async def process_stream_request(

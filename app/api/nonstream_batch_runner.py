@@ -1,7 +1,7 @@
 import asyncio
 
 from app.api.nonstream_status_handlers import handle_nonstream_task_status
-from app.utils.retry_state import remove_completed_tasks
+from app.utils.retry_state import cancel_pending_tasks, remove_completed_tasks
 
 
 async def run_nonstream_batch_until_success(
@@ -51,6 +51,7 @@ async def run_nonstream_batch_until_success(
                 serialize_json=serialize_json,
             )
             if status == "success":
+                cancel_pending_tasks(tasks)
                 return {
                     "status": "success",
                     "response": response,

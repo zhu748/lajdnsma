@@ -3,12 +3,13 @@ import os
 from app.models.schemas import ChatCompletionRequest
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
-import httpx
 import secrets
 import string
 import app.config.settings as settings
 
+from app.utils.http_client import get_async_client
 from app.utils.logging import log
+from app.utils.sse import iter_sse_json
 
 
 def generate_secure_random_string(length):
@@ -35,7 +36,7 @@ class GeminiResponseWrapper:
         self._total_token_count = self._extract_total_token_count()
         self._thoughts = self._extract_thoughts()
         self._function_call = self._extract_function_call()
-        self._json_dumps = json.dumps(self._data, indent=4, ensure_ascii=False)
+        self._json_dumps = None
         self._model = "gemini"
 
     def _extract_thoughts(self) -> Optional[str]:
@@ -133,6 +134,8 @@ class GeminiResponseWrapper:
 
     @property
     def json_dumps(self) -> str:
+        if self._json_dumps is None:
+            self._json_dumps = json.dumps(self._data, indent=4, ensure_ascii=False)
         return self._json_dumps
 
     @property
@@ -328,46 +331,26 @@ class GeminiClient:
             "Content-Type": "application/json",
         }
 
-        async with httpx.AsyncClient() as client:
-            async with client.stream(
-                "POST", url, headers=headers, json=data, timeout=600
-            ) as response:
-                try:
-                    # 检查响应状态码，如果不是成功，则先消费响应体再抛出异常
-                    if response.status_code != 200:
-                        await response.aread()
-                        response.raise_for_status()
+        client = await get_async_client()
+        async with client.stream(
+            "POST", url, headers=headers, json=data, timeout=600
+        ) as response:
+            try:
+                # 检查响应状态码，如果不是成功，则先消费响应体再抛出异常
+                if response.status_code != 200:
+                    await response.aread()
+                    response.raise_for_status()
 
-                    buffer = b""  # 用于累积可能不完整的 JSON 数据
-                    async for line in response.aiter_lines():
-                        if not line.strip():  # 跳过空行 (SSE 消息分隔符)
-                            continue
-                        if line.startswith("data: "):
-                            line = line[len("data: ") :].strip()  # 去除 "data: " 前缀
+                async for data in iter_sse_json(response):
+                    yield GeminiResponseWrapper(data)
 
-                        # 检查是否是结束标志，如果是，结束循环
-                        if line == "[DONE]":
-                            break
-
-                        buffer += line.encode("utf-8")
-                        try:
-                            # 尝试解析整个缓冲区
-                            data = json.loads(buffer.decode("utf-8"))
-                            # 解析成功，清空缓冲区
-                            buffer = b""
-                            yield GeminiResponseWrapper(data)
-
-                        except json.JSONDecodeError:
-                            # JSON 不完整，继续累积到 buffer
-                            continue
-
-                except Exception as e:
-                    # 在重新抛出异常之前，确保响应体被完全读取
-                    if not response.is_closed:
-                        await response.aread()
-                    raise e
-                finally:
-                    log("info", "流式请求结束")
+            except Exception as e:
+                # 在重新抛出异常之前，确保响应体被完全读取
+                if not response.is_closed:
+                    await response.aread()
+                raise e
+            finally:
+                log("info", "流式请求结束")
 
     # 非流式处理
     async def complete_chat(
@@ -384,11 +367,9 @@ class GeminiClient:
         }
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    url, headers=headers, json=data, timeout=600
-                )
-                response.raise_for_status()  # 检查 HTTP 错误状态
+            client = await get_async_client()
+            response = await client.post(url, headers=headers, json=data, timeout=600)
+            response.raise_for_status()  # 检查 HTTP 错误状态
 
             return GeminiResponseWrapper(response.json())
         except Exception:
@@ -558,21 +539,21 @@ class GeminiClient:
         url = "https://generativelanguage.googleapis.com/v1beta/models?key={}".format(
             api_key
         )
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            data = response.json()
-            models = []
-            for model in data.get("models", []):
-                models.append(model["name"])
-                if (
-                    model["name"].startswith("models/gemini-2")
-                    and settings.search["search_mode"]
-                ):
-                    models.append(model["name"] + "-search")
-            models.extend(GeminiClient.EXTRA_MODELS)
+        client = await get_async_client()
+        response = await client.get(url, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        models = []
+        for model in data.get("models", []):
+            models.append(model["name"])
+            if (
+                model["name"].startswith("models/gemini-2")
+                and settings.search["search_mode"]
+            ):
+                models.append(model["name"] + "-search")
+        models.extend(GeminiClient.EXTRA_MODELS)
 
-            return models
+        return models
 
     @staticmethod
     async def list_native_models(api_key):
@@ -582,7 +563,7 @@ class GeminiClient:
         url = "https://generativelanguage.googleapis.com/v1beta/models?key={}".format(
             api_key
         )
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            return response.json()
+        client = await get_async_client()
+        response = await client.get(url, timeout=60)
+        response.raise_for_status()
+        return response.json()

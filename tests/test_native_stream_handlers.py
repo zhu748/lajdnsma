@@ -41,6 +41,7 @@ def load_native_stream_module(chunks=None, raise_error=False):
     fake_processing.select_safety_settings = lambda model, s1, s2: s2 if "2.5" in model else s1
 
     fake_response = types.ModuleType("app.utils.response")
+    fake_response.ensure_gemini_timing_fields = lambda data: {**data, "timing": True}
     fake_response.openAI_from_Gemini = lambda chunk, stream=True: {"chunk": chunk.data, "stream": stream}
 
     fake_loop = types.ModuleType("app.utils.response_loop_helpers")
@@ -49,6 +50,9 @@ def load_native_stream_module(chunks=None, raise_error=False):
     fake_loop.log_empty_response_count = lambda *args, **kwargs: logs.append(("empty", args, kwargs))
     fake_loop.log_request_failure = lambda *args, **kwargs: logs.append(("failure", args, kwargs))
 
+    fake_sse = types.ModuleType("app.utils.sse")
+    fake_sse.sse_text = lambda data: f"data: {data}\n\n"
+
     sys.modules.update(
         {
             "app.services": fake_services,
@@ -56,6 +60,7 @@ def load_native_stream_module(chunks=None, raise_error=False):
             "app.utils.gemini_response_processing": fake_processing,
             "app.utils.response": fake_response,
             "app.utils.response_loop_helpers": fake_loop,
+            "app.utils.sse": fake_sse,
         }
     )
     spec = importlib.util.spec_from_file_location(
@@ -91,7 +96,7 @@ class NativeStreamHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         ):
             items.append(item)
 
-        self.assertEqual(items[0], ("chunk", "data: json:{'ok': True}\n\n"))
+        self.assertEqual(items[0], ("chunk", "data: json:{'ok': True, 'timing': True}\n\n"))
         self.assertEqual(items[-1][0], "summary")
         self.assertTrue(items[-1][1]["success"])
         self.assertEqual(module._stat_calls[0][3], 7)

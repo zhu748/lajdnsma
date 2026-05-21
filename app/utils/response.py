@@ -2,6 +2,8 @@ import json
 import time
 from datetime import datetime, timezone
 
+from app.utils.sse import sse_data
+
 
 def openAI_from_text(
     model="gemini",
@@ -33,7 +35,7 @@ def openAI_from_text(
     if stream:
         formatted_chunk["choices"][0]["delta"] = content_chunk
         formatted_chunk["object"] = "chat.completion.chunk"
-        return f"data: {json.dumps(formatted_chunk, ensure_ascii=False)}\n\n"
+        return sse_data(formatted_chunk)
     else:
         formatted_chunk["choices"][0]["message"] = content_chunk
         formatted_chunk["object"] = "chat.completion"
@@ -62,18 +64,21 @@ def gemini_from_text(
     根据传入参数，创建 Gemini API 标准响应对象块 (GenerateContentResponse 格式)。
     """
     gemini_response = {
-        "candidates": {"index": 0, "content": {"parts": [], "role": "model"}}
+        "candidates": [
+            {"index": 0, "content": {"parts": [], "role": "model"}}
+        ]
     }
-    if content:
-        gemini_response["candidates"]["content"]["parts"].append({"text": content})
+    if content is not None:
+        gemini_response["candidates"][0]["content"]["parts"].append({"text": content})
 
     if finish_reason:
+        gemini_response["candidates"][0]["finishReason"] = finish_reason
         gemini_response["usageMetadata"] = {"totalTokenCount": total_token_count}
 
     gemini_response = ensure_gemini_timing_fields(gemini_response)
 
     if stream:
-        return f"data: {json.dumps(gemini_response, ensure_ascii=False)}\n\n"
+        return sse_data(gemini_response)
     else:
         return gemini_response
 
@@ -145,7 +150,7 @@ def openAI_from_Gemini(response, stream=True):
         # 仅在流结束时添加 usage 字段
         if response.finish_reason:
             formatted_chunk["usage"] = usage_data
-        return f"data: {json.dumps(formatted_chunk, ensure_ascii=False)}\n\n"
+        return sse_data(formatted_chunk)
 
     else:
         formatted_chunk["choices"][0]["message"] = content_chunk
