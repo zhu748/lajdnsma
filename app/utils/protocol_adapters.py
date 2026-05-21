@@ -1,9 +1,45 @@
 import json
 import time
-from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from app.models.schemas import ChatCompletionRequest
 
+
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _extract_openai_usage(usage: Dict[str, Any]) -> Dict[str, int]:
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    completion = int(
+        usage.get("completion_tokens", usage.get("total_tokens", 0)) or 0
+    )
+    total = int(usage.get("total_tokens", prompt + completion) or 0)
+    return {
+        "input_tokens": prompt,
+        "output_tokens": completion,
+        "total_tokens": total,
+    }
+
+
+
+
+def _merge_stream_usage(latest_usage: Dict[str, int], usage: Dict[str, Any]) -> Dict[str, int]:
+    if not usage:
+        return latest_usage
+
+    merged = latest_usage.copy()
+    if "prompt_tokens" in usage and usage.get("prompt_tokens") is not None:
+        merged["input_tokens"] = int(usage.get("prompt_tokens") or 0)
+    if "completion_tokens" in usage and usage.get("completion_tokens") is not None:
+        merged["output_tokens"] = int(usage.get("completion_tokens") or 0)
+    elif "total_tokens" in usage and usage.get("total_tokens") is not None:
+        merged["output_tokens"] = int(usage.get("total_tokens") or 0)
+
+    if "total_tokens" in usage and usage.get("total_tokens") is not None:
+        merged["total_tokens"] = int(usage.get("total_tokens") or 0)
+
+    return merged
 
 def _ensure_list(value: Any) -> List[Any]:
     if value is None:
@@ -49,7 +85,9 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
                         text = _extract_text_from_response_input_item(content_item)
                         if text:
                             text_parts.append(text)
-                messages.append({"role": role, "content": "\n".join(text_parts)})
+                combined_text = "\n".join(text_parts).strip()
+                if combined_text:
+                    messages.append({"role": role, "content": combined_text})
                 continue
 
             text = _extract_text_from_response_input_item(item)
@@ -94,7 +132,9 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
         content = message.get("content", "")
 
         if isinstance(content, str):
-            messages.append({"role": role, "content": content})
+            content = content.strip()
+            if content:
+                messages.append({"role": role, "content": content})
             continue
 
         if isinstance(content, list):
@@ -119,7 +159,9 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                     )
 
             if text_parts:
-                messages.append({"role": role, "content": "\n".join(text_parts)})
+                combined_text = "\n".join(text_parts).strip()
+                if combined_text:
+                    messages.append({"role": role, "content": combined_text})
             messages.extend(tool_result_messages)
 
     tool_choice = payload.get("tool_choice", {}).get("type")
@@ -187,8 +229,8 @@ def openai_chat_to_response_api(chat_response: Dict[str, Any]) -> Dict[str, Any]
         output_items.append(
             {
                 "type": "function_call",
-                "id": tool_call.get("id", f"fc_{int(time.time())}"),
-                "call_id": tool_call.get("id", f"fc_{int(time.time())}"),
+                "id": tool_call.get("id", f"fc_{_now_ts()}"),
+                "call_id": tool_call.get("id", f"fc_{_now_ts()}"),
                 "name": function_data.get("name"),
                 "arguments": function_data.get("arguments", "{}"),
                 "status": "completed",
@@ -196,17 +238,13 @@ def openai_chat_to_response_api(chat_response: Dict[str, Any]) -> Dict[str, Any]
         )
 
     return {
-        "id": f"resp_{chat_response.get('id', int(time.time()))}",
+        "id": f"resp_{chat_response.get('id', _now_ts())}",
         "object": "response",
-        "created_at": chat_response.get("created", int(time.time())),
+        "created_at": chat_response.get("created", _now_ts()),
         "status": "completed",
         "model": chat_response.get("model"),
         "output": output_items,
-        "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
-            "total_tokens": usage.get("total_tokens", 0),
-        },
+        "usage": _extract_openai_usage(usage),
     }
 
 
@@ -214,6 +252,7 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
     choice = chat_response.get("choices", [{}])[0]
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
+    usage_counts = _extract_openai_usage(usage)
     content: List[Dict[str, Any]] = []
 
     if message.get("content"):
@@ -231,7 +270,7 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
         content.append(
             {
                 "type": "tool_use",
-                "id": tool_call.get("id", f"toolu_{int(time.time())}"),
+                "id": tool_call.get("id", f"toolu_{_now_ts()}"),
                 "name": function_data.get("name"),
                 "input": tool_input,
             }
@@ -243,7 +282,7 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
         stop_reason = "tool_use"
 
     return {
-        "id": f"msg_{chat_response.get('id', int(time.time()))}",
+        "id": f"msg_{chat_response.get('id', _now_ts())}",
         "type": "message",
         "role": "assistant",
         "model": chat_response.get("model"),
@@ -251,8 +290,8 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
         "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": {
-            "input_tokens": usage.get("prompt_tokens", 0),
-            "output_tokens": usage.get("completion_tokens", 0),
+            "input_tokens": usage_counts["input_tokens"],
+            "output_tokens": usage_counts["output_tokens"],
         },
     }
 
@@ -284,7 +323,7 @@ async def openai_stream_to_responses_stream(
     body_iterator: AsyncIterator[Any],
     model: str,
 ) -> AsyncIterator[str]:
-    created_at = int(time.time())
+    created_at = _now_ts()
     response_id = f"resp_{created_at}"
     yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': response_id, 'model': model, 'object': 'response', 'status': 'in_progress', 'created_at': created_at}}, ensure_ascii=False)}\n\n"
 
@@ -303,12 +342,7 @@ async def openai_stream_to_responses_stream(
             yield f"data: {json.dumps({'type': 'response.output_text.delta', 'response_id': response_id, 'output_index': output_index, 'delta': text}, ensure_ascii=False)}\n\n"
 
         usage = parsed.get('usage', {})
-        if usage:
-            latest_usage = {
-                'input_tokens': usage.get('prompt_tokens', latest_usage['input_tokens']),
-                'output_tokens': usage.get('completion_tokens', usage.get('total_tokens', latest_usage['output_tokens'])),
-                'total_tokens': usage.get('total_tokens', latest_usage['total_tokens']),
-            }
+        latest_usage = _merge_stream_usage(latest_usage, usage)
 
         if choice.get("finish_reason"):
             yield f"data: {json.dumps({'type': 'response.output_text.done', 'response_id': response_id, 'output_index': output_index}, ensure_ascii=False)}\n\n"
@@ -319,7 +353,7 @@ async def openai_stream_to_claude_stream(
     body_iterator: AsyncIterator[Any],
     model: str,
 ) -> AsyncIterator[str]:
-    message_id = f"msg_{int(time.time())}"
+    message_id = f"msg_{_now_ts()}"
     yield "event: message_start\n"
     yield (
         f"data: {json.dumps({'type': 'message_start', 'message': {'id': message_id, 'type': 'message', 'role': 'assistant', 'model': model, 'content': [], 'stop_reason': None, 'stop_sequence': None, 'usage': {'input_tokens': 0, 'output_tokens': 0}}}, ensure_ascii=False)}\n\n"
@@ -348,7 +382,10 @@ async def openai_stream_to_claude_stream(
 
         usage = parsed.get('usage', {})
         if usage:
-            output_tokens = usage.get('completion_tokens', usage.get('total_tokens', output_tokens))
+            output_tokens = _merge_stream_usage(
+                {'input_tokens': 0, 'output_tokens': output_tokens, 'total_tokens': 0},
+                usage,
+            )['output_tokens']
 
         if choice.get("finish_reason"):
             stop_reason = "end_turn"
