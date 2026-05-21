@@ -139,6 +139,38 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.max_tokens, 128)
         self.assertEqual(request.tools[0]["function"]["name"], "weather")
 
+    def test_claude_request_to_chat_request_preserves_images_and_thinking(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "thinking": {"type": "enabled", "budget_tokens": 1024},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "看图"},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "AAAA",
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(request.thinking_budget, 1024)
+        self.assertTrue(request.enable_thinking)
+        self.assertEqual(request.messages[0]["content"][0]["text"], "看图")
+        self.assertEqual(
+            request.messages[0]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AAAA",
+        )
+
 
     def test_claude_request_to_chat_request_skips_blank_string_content(self):
         request = claude_request_to_chat_request(
@@ -199,6 +231,31 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["type"], "message")
         self.assertEqual(response["content"][0]["text"], "你好")
         self.assertEqual(response["usage"]["output_tokens"], 5)
+
+    def test_openai_chat_to_claude_response_preserves_reasoning(self):
+        response = openai_chat_to_claude_response(
+            {
+                "id": "chatcmpl_1",
+                "created": 1,
+                "model": "gemini-2.5-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "reasoning_content": "先思考",
+                            "content": "答案",
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        )
+
+        self.assertEqual(response["content"][0]["type"], "thinking")
+        self.assertEqual(response["content"][0]["thinking"], "先思考")
+        self.assertEqual(response["content"][1]["text"], "答案")
 
     async def test_openai_stream_to_responses_stream(self):
         chunks = [
@@ -288,6 +345,23 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("message_start", joined)
         self.assertIn("content_block_delta", joined)
         self.assertIn("message_stop", joined)
+
+    async def test_openai_stream_to_claude_stream_preserves_reasoning(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"reasoning_content":"先思考"},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"答案"},"finish_reason":"stop"}],"usage":{"completion_tokens":2}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn('"type": "thinking"', joined)
+        self.assertIn('"type": "thinking_delta", "thinking": "先思考"', joined)
+        self.assertIn('"index": 1, "delta": {"type": "text_delta", "text": "答案"}', joined)
 
 
 if __name__ == "__main__":

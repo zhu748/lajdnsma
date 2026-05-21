@@ -55,6 +55,27 @@ def _extract_text_from_response_input_item(item: Dict[str, Any]) -> str:
     return ""
 
 
+def _claude_image_to_openai_image(item: Dict[str, Any]) -> Dict[str, Any] | None:
+    source = item.get("source", {})
+    if not isinstance(source, dict):
+        return None
+
+    source_type = source.get("type")
+    if source_type == "base64":
+        media_type = source.get("media_type", "image/png")
+        data = source.get("data", "")
+        if data:
+            return {
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{data}"},
+            }
+
+    if source_type == "url" and source.get("url"):
+        return {"type": "image_url", "image_url": {"url": source["url"]}}
+
+    return None
+
+
 def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionRequest:
     input_value = payload.get("input", [])
     messages: List[Dict[str, Any]] = []
@@ -132,7 +153,7 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
             continue
 
         if isinstance(content, list):
-            text_parts = []
+            content_parts = []
             tool_result_messages = []
             for item in content:
                 if not isinstance(item, dict):
@@ -142,7 +163,11 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                 if item_type == "text":
                     text = item.get("text", "")
                     if text:
-                        text_parts.append(text)
+                        content_parts.append({"type": "text", "text": text})
+                elif item_type == "image":
+                    image_part = _claude_image_to_openai_image(item)
+                    if image_part:
+                        content_parts.append(image_part)
                 elif item_type == "tool_result":
                     tool_result_messages.append(
                         {
@@ -152,10 +177,11 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                         }
                     )
 
-            if text_parts:
-                combined_text = "\n".join(text_parts).strip()
-                if combined_text:
-                    messages.append({"role": role, "content": combined_text})
+            if content_parts:
+                if len(content_parts) == 1 and content_parts[0].get("type") == "text":
+                    messages.append({"role": role, "content": content_parts[0]["text"]})
+                else:
+                    messages.append({"role": role, "content": content_parts})
             messages.extend(tool_result_messages)
 
     tool_choice = payload.get("tool_choice", {}).get("type")
@@ -185,6 +211,18 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                 }
             )
 
+    thinking_config = payload.get("thinking")
+    enable_thinking = True
+    thinking_budget = -1
+    if isinstance(thinking_config, dict):
+        thinking_type = thinking_config.get("type")
+        if thinking_type == "disabled":
+            enable_thinking = False
+            thinking_budget = 0
+        elif thinking_type == "enabled":
+            enable_thinking = True
+            thinking_budget = thinking_config.get("budget_tokens", -1)
+
     return ChatCompletionRequest(
         model=payload["model"],
         messages=messages,
@@ -193,8 +231,9 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
         stream=payload.get("stream", False),
         max_tokens=payload.get("max_tokens"),
         stop=payload.get("stop_sequences"),
+        thinking_budget=thinking_budget,
+        enable_thinking=enable_thinking,
         tools=openai_tools or None,
         tool_choice=mapped_tool_choice,
     )
-
 

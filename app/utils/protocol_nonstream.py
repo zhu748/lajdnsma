@@ -57,6 +57,15 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
     usage_counts = _extract_openai_usage(usage)
     content: List[Dict[str, Any]] = []
 
+    if message.get("reasoning_content"):
+        content.append(
+            {
+                "type": "thinking",
+                "thinking": message["reasoning_content"],
+                "signature": "",
+            }
+        )
+
     if message.get("content"):
         content.append({"type": "text", "text": message["content"]})
 
@@ -96,4 +105,3 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
             "output_tokens": usage_counts["output_tokens"],
         },
     }
-

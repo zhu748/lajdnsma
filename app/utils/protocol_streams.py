@@ -248,16 +248,10 @@ async def openai_stream_to_claude_stream(
             },
         },
     )
-    yield sse_event(
-        "content_block_start",
-        {
-            "type": "content_block_start",
-            "index": 0,
-            "content_block": {"type": "text", "text": ""},
-        },
-    )
-
     latest_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    thinking_started = False
+    thinking_stopped = False
+    text_started = False
 
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
@@ -267,13 +261,58 @@ async def openai_stream_to_claude_stream(
 
         choice = parsed.get("choices", [{}])[0]
         delta = choice.get("delta", {})
-        text = delta.get("content")
-        if text:
+        reasoning_text = delta.get("reasoning_content")
+        if reasoning_text:
+            if not thinking_started:
+                thinking_started = True
+                yield sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {
+                            "type": "thinking",
+                            "thinking": "",
+                            "signature": "",
+                        },
+                    },
+                )
             yield sse_event(
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
                     "index": 0,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": reasoning_text,
+                    },
+                },
+            )
+
+        text = delta.get("content")
+        if text:
+            text_index = 1 if thinking_started else 0
+            if thinking_started and not thinking_stopped:
+                yield sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": 0},
+                )
+                thinking_stopped = True
+            if not text_started:
+                text_started = True
+                yield sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": text_index,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+            yield sse_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": text_index,
                     "delta": {"type": "text_delta", "text": text},
                 },
             )
@@ -287,10 +326,29 @@ async def openai_stream_to_claude_stream(
             if choice.get("finish_reason") == "tool_calls":
                 stop_reason = "tool_use"
 
-            yield sse_event(
-                "content_block_stop",
-                {"type": "content_block_stop", "index": 0},
-            )
+            if text_started:
+                yield sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": 1 if thinking_started else 0},
+                )
+            elif thinking_started and not thinking_stopped:
+                yield sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": 0},
+                )
+            else:
+                yield sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {"type": "text", "text": ""},
+                    },
+                )
+                yield sse_event(
+                    "content_block_stop",
+                    {"type": "content_block_stop", "index": 0},
+                )
             yield sse_event(
                 "message_delta",
                 {
