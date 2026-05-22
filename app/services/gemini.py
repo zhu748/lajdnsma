@@ -20,17 +20,44 @@ def generate_secure_random_string(length):
     return secure_random_string
 
 
+GEMINI_SCHEMA_ALLOWED_KEYS = {
+    "anyOf",
+    "description",
+    "enum",
+    "format",
+    "items",
+    "maximum",
+    "maxItems",
+    "minimum",
+    "minItems",
+    "nullable",
+    "properties",
+    "propertyOrdering",
+    "required",
+    "type",
+}
+
+
 def sanitize_gemini_schema(schema):
-    """Remove JSON Schema fields that Gemini function declarations reject."""
-    if isinstance(schema, dict):
-        return {
-            key: sanitize_gemini_schema(value)
-            for key, value in schema.items()
-            if key not in {"$schema", "additionalProperties"}
-        }
-    if isinstance(schema, list):
-        return [sanitize_gemini_schema(item) for item in schema]
-    return schema
+    """Keep only Schema fields accepted by Gemini function declarations."""
+    def sanitize(value, *, in_properties=False):
+        if isinstance(value, dict):
+            if in_properties:
+                return {key: sanitize(item) for key, item in value.items()}
+            sanitized = {}
+            for key, item in value.items():
+                if key not in GEMINI_SCHEMA_ALLOWED_KEYS:
+                    continue
+                sanitized[key] = sanitize(
+                    item, in_properties=(key == "properties")
+                )
+            return sanitized
+        if isinstance(value, list):
+            return [sanitize(item) for item in value]
+        return value
+
+    return sanitize(schema)
+
 
 
 def sanitize_gemini_payload(data):
@@ -336,6 +363,10 @@ class GeminiClient:
                 if func_name:
                     mode = "ANY"  # 'ANY' 模式用于强制调用特定函数
                     allowed_functions = [func_name]
+            elif isinstance(choice, dict) and choice.get("type") == "function_calling_config":
+                requested_mode = choice.get("mode")
+                if requested_mode in {"AUTO", "ANY", "NONE"}:
+                    mode = requested_mode
 
             # 如果成功解析出有效的 mode，构建 tool_config
             if mode:
@@ -463,6 +494,14 @@ class GeminiClient:
             content = message.get("content")
             if role == "assistant" and message.get("tool_calls"):
                 parts = []
+                if isinstance(content, str) and content:
+                    parts.append({"text": content})
+                elif isinstance(content, list):
+                    for item in content:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("type") == "text" and item.get("text"):
+                            parts.append({"text": item.get("text")})
                 for tool_call in message.get("tool_calls") or []:
                     if not isinstance(tool_call, dict):
                         continue

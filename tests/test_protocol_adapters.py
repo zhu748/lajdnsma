@@ -286,6 +286,82 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[1]["name"], "Bash")
         self.assertEqual(request.messages[1]["content"], "/tmp/project")
 
+    def test_claude_request_keeps_tool_result_before_followup_text(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "Bash",
+                                "input": {"command": "pwd"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [{"type": "text", "text": "/tmp/project"}],
+                            },
+                            {"type": "text", "text": "继续"},
+                        ],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(request.messages[0]["role"], "assistant")
+        self.assertEqual(request.messages[1]["role"], "tool")
+        self.assertEqual(request.messages[1]["tool_call_id"], "toolu_1")
+        self.assertEqual(request.messages[2], {"role": "user", "content": "继续"})
+
+    def test_claude_request_combines_assistant_text_and_tool_use(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "我来查看当前目录。"},
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "Bash",
+                                "input": {"command": "pwd"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(len(request.messages), 1)
+        self.assertEqual(request.messages[0]["role"], "assistant")
+        self.assertEqual(request.messages[0]["content"], "我来查看当前目录。")
+        self.assertEqual(request.messages[0]["tool_calls"][0]["id"], "toolu_1")
+
+    def test_claude_tool_choice_any_forces_any_tool(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "tool_choice": {"type": "any"},
+                "messages": [{"role": "user", "content": "执行一个工具"}],
+            }
+        )
+
+        self.assertEqual(
+            request.tool_choice,
+            {"type": "function_calling_config", "mode": "ANY"},
+        )
+
     def test_claude_request_to_chat_request_preserves_images_and_thinking(self):
         request = claude_request_to_chat_request(
             {

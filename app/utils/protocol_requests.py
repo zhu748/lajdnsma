@@ -276,8 +276,10 @@ def _claude_tool_choice_to_openai(choice: Any) -> Any:
     choice_type = choice.get("type")
     if choice_type == "none":
         return "none"
-    if choice_type in {"auto", "any"}:
+    if choice_type == "auto":
         return "auto"
+    if choice_type == "any":
+        return {"type": "function_calling_config", "mode": "ANY"}
     if choice_type == "tool":
         tool_name = choice.get("name")
         if tool_name:
@@ -310,7 +312,34 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
         if isinstance(content, list):
             content_parts = []
             tool_calls = []
-            tool_result_messages = []
+
+            def append_content_message():
+                nonlocal content_parts
+                if not content_parts:
+                    return
+                if len(content_parts) == 1 and content_parts[0].get("type") == "text":
+                    messages.append({"role": role, "content": content_parts[0]["text"]})
+                else:
+                    messages.append({"role": role, "content": content_parts})
+                content_parts = []
+
+            def build_tool_result_message(item):
+                tool_use_id = item.get("tool_use_id", "")
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": tool_use_id,
+                    "content": _claude_tool_result_content_to_text(
+                        item.get("content", "")
+                    ),
+                }
+                if item.get("is_error"):
+                    tool_message["content"] = (
+                        "[tool_result_error]\n" + tool_message["content"]
+                    ).rstrip()
+                if tool_use_id in tool_use_id_to_name:
+                    tool_message["name"] = tool_use_id_to_name[tool_use_id]
+                return tool_message
+
             for item in content:
                 if not isinstance(item, dict):
                     continue
@@ -351,26 +380,25 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                             }
                         )
                 elif item_type == "tool_result":
-                    tool_use_id = item.get("tool_use_id", "")
-                    tool_message = {
-                        "role": "tool",
-                        "tool_call_id": tool_use_id,
-                        "content": _claude_tool_result_content_to_text(
-                            item.get("content", "")
-                        ),
-                    }
-                    if tool_use_id in tool_use_id_to_name:
-                        tool_message["name"] = tool_use_id_to_name[tool_use_id]
-                    tool_result_messages.append(tool_message)
+                    append_content_message()
+                    messages.append(build_tool_result_message(item))
 
-            if content_parts:
-                if len(content_parts) == 1 and content_parts[0].get("type") == "text":
-                    messages.append({"role": role, "content": content_parts[0]["text"]})
-                else:
-                    messages.append({"role": role, "content": content_parts})
+            if role != "assistant":
+                append_content_message()
             if tool_calls:
-                messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
-            messages.extend(tool_result_messages)
+                assistant_message = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": tool_calls,
+                }
+                if role == "assistant" and content_parts:
+                    if len(content_parts) == 1 and content_parts[0].get("type") == "text":
+                        assistant_message["content"] = content_parts[0]["text"]
+                    else:
+                        assistant_message["content"] = content_parts
+                messages.append(assistant_message)
+            elif role == "assistant":
+                append_content_message()
 
     mapped_tool_choice = _claude_tool_choice_to_openai(payload.get("tool_choice"))
 
