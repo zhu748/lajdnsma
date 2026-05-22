@@ -178,6 +178,44 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.max_tokens, 128)
         self.assertEqual(request.tools[0]["function"]["name"], "weather")
 
+    def test_claude_request_to_chat_request_preserves_tool_use_and_result(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "Bash",
+                                "input": {"command": "pwd"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [{"type": "text", "text": "/tmp/project"}],
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(request.messages[0]["role"], "assistant")
+        self.assertEqual(request.messages[0]["tool_calls"][0]["id"], "toolu_1")
+        self.assertEqual(request.messages[0]["tool_calls"][0]["function"]["name"], "Bash")
+        self.assertEqual(request.messages[1]["role"], "tool")
+        self.assertEqual(request.messages[1]["tool_call_id"], "toolu_1")
+        self.assertEqual(request.messages[1]["name"], "Bash")
+        self.assertEqual(request.messages[1]["content"], "/tmp/project")
+
     def test_claude_request_to_chat_request_preserves_images_and_thinking(self):
         request = claude_request_to_chat_request(
             {
@@ -377,6 +415,25 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         joined = "".join(result)
         self.assertIn('"input_tokens": 1', joined)
         self.assertIn('"output_tokens": 2', joined)
+
+    async def test_openai_stream_to_claude_stream_tool_call(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"Bash","arguments":"{\\\"command\\\":\\\"pwd\\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn('"type": "tool_use"', joined)
+        self.assertIn('"id": "toolu_1"', joined)
+        self.assertIn('"name": "Bash"', joined)
+        self.assertIn('"type": "input_json_delta"', joined)
+        self.assertIn('"stop_reason": "tool_use"', joined)
+        self.assertIn('event: message_stop', joined)
 
     async def test_openai_stream_to_claude_stream_usage_is_top_level(self):
         chunks = [

@@ -231,8 +231,26 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
     )
 
 
+def _claude_tool_result_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    text_parts = []
+    for item in _ensure_list(content):
+        if isinstance(item, str):
+            text_parts.append(item)
+        elif isinstance(item, dict):
+            if item.get("type") == "text" and item.get("text"):
+                text_parts.append(item["text"])
+            elif item.get("type") == "image":
+                text_parts.append(json.dumps(item, ensure_ascii=False))
+            else:
+                text_parts.append(json.dumps(item, ensure_ascii=False))
+    return "\n".join(part for part in text_parts if part)
+
+
 def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionRequest:
     messages: List[Dict[str, Any]] = []
+    tool_use_id_to_name: Dict[str, str] = {}
 
     system_value = payload.get("system")
     if isinstance(system_value, str) and system_value:
@@ -259,6 +277,7 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
 
         if isinstance(content, list):
             content_parts = []
+            tool_calls = []
             tool_result_messages = []
             for item in content:
                 if not isinstance(item, dict):
@@ -273,27 +292,51 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                     image_part = _claude_image_to_openai_image(item)
                     if image_part:
                         content_parts.append(image_part)
+                elif item_type == "tool_use":
+                    tool_id = item.get("id") or f"call_{item.get('name', 'tool')}"
+                    tool_name = item.get("name")
+                    tool_input = item.get("input", {})
+                    if tool_name:
+                        tool_use_id_to_name[tool_id] = tool_name
+                        tool_calls.append(
+                            {
+                                "id": tool_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": json.dumps(tool_input, ensure_ascii=False),
+                                },
+                            }
+                        )
                 elif item_type == "tool_result":
-                    tool_result_messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": item.get("tool_use_id", ""),
-                            "content": item.get("content", ""),
-                        }
-                    )
+                    tool_use_id = item.get("tool_use_id", "")
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": tool_use_id,
+                        "content": _claude_tool_result_content_to_text(
+                            item.get("content", "")
+                        ),
+                    }
+                    if tool_use_id in tool_use_id_to_name:
+                        tool_message["name"] = tool_use_id_to_name[tool_use_id]
+                    tool_result_messages.append(tool_message)
 
             if content_parts:
                 if len(content_parts) == 1 and content_parts[0].get("type") == "text":
                     messages.append({"role": role, "content": content_parts[0]["text"]})
                 else:
                     messages.append({"role": role, "content": content_parts})
+            if tool_calls:
+                messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
             messages.extend(tool_result_messages)
 
     tool_choice = payload.get("tool_choice", {}).get("type")
     mapped_tool_choice: Any = "auto"
     if tool_choice == "none":
         mapped_tool_choice = "none"
-    elif tool_choice in {"auto", "any"}:
+    elif tool_choice == "auto":
+        mapped_tool_choice = "auto"
+    elif tool_choice == "any":
         mapped_tool_choice = "auto"
     elif tool_choice == "tool":
         tool_name = payload.get("tool_choice", {}).get("name")
@@ -315,6 +358,7 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                     },
                 }
             )
+
 
     thinking_config = payload.get("thinking")
     enable_thinking = True

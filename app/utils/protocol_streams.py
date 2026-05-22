@@ -310,6 +310,16 @@ async def openai_stream_to_claude_stream(
     thinking_started = False
     thinking_stopped = False
     text_started = False
+    next_content_index = 0
+    text_index = None
+    thinking_index = None
+    active_tool_calls: Dict[int, Dict[str, Any]] = {}
+
+    def next_index() -> int:
+        nonlocal next_content_index
+        index = next_content_index
+        next_content_index += 1
+        return index
 
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
@@ -323,11 +333,12 @@ async def openai_stream_to_claude_stream(
         if reasoning_text:
             if not thinking_started:
                 thinking_started = True
+                thinking_index = next_index()
                 yield sse_event(
                     "content_block_start",
                     {
                         "type": "content_block_start",
-                        "index": 0,
+                        "index": thinking_index,
                         "content_block": {
                             "type": "thinking",
                             "thinking": "",
@@ -339,7 +350,7 @@ async def openai_stream_to_claude_stream(
                 "content_block_delta",
                 {
                     "type": "content_block_delta",
-                    "index": 0,
+                    "index": thinking_index,
                     "delta": {
                         "type": "thinking_delta",
                         "thinking": reasoning_text,
@@ -349,15 +360,15 @@ async def openai_stream_to_claude_stream(
 
         text = delta.get("content")
         if text:
-            text_index = 1 if thinking_started else 0
             if thinking_started and not thinking_stopped:
                 yield sse_event(
                     "content_block_stop",
-                    {"type": "content_block_stop", "index": 0},
+                    {"type": "content_block_stop", "index": thinking_index},
                 )
                 thinking_stopped = True
             if not text_started:
                 text_started = True
+                text_index = next_index()
                 yield sse_event(
                     "content_block_start",
                     {
@@ -375,6 +386,57 @@ async def openai_stream_to_claude_stream(
                 },
             )
 
+        for tool_call in _ensure_list(delta.get("tool_calls")):
+            if not isinstance(tool_call, dict):
+                continue
+            tool_index = int(tool_call.get("index", len(active_tool_calls)) or 0)
+            function_data = tool_call.get("function", {}) or {}
+            state = active_tool_calls.get(tool_index)
+            if state is None:
+                content_index = next_index()
+                tool_id = tool_call.get("id") or f"toolu_{_now_ts()}_{tool_index}"
+                state = {
+                    "index": content_index,
+                    "id": tool_id,
+                    "name": function_data.get("name") or "",
+                    "input_parts": [],
+                    "started": True,
+                    "stopped": False,
+                }
+                active_tool_calls[tool_index] = state
+                yield sse_event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": content_index,
+                        "content_block": {
+                            "type": "tool_use",
+                            "id": tool_id,
+                            "name": state["name"],
+                            "input": {},
+                        },
+                    },
+                )
+
+            if tool_call.get("id"):
+                state["id"] = tool_call["id"]
+            if function_data.get("name"):
+                state["name"] = function_data["name"]
+            arguments_delta = function_data.get("arguments")
+            if arguments_delta:
+                state["input_parts"].append(arguments_delta)
+                yield sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": state["index"],
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": arguments_delta,
+                        },
+                    },
+                )
+
         usage = parsed.get("usage", {})
         if usage:
             latest_usage = _merge_stream_usage(latest_usage, usage)
@@ -387,25 +449,36 @@ async def openai_stream_to_claude_stream(
             if text_started:
                 yield sse_event(
                     "content_block_stop",
-                    {"type": "content_block_stop", "index": 1 if thinking_started else 0},
+                    {"type": "content_block_stop", "index": text_index},
                 )
             elif thinking_started and not thinking_stopped:
                 yield sse_event(
                     "content_block_stop",
-                    {"type": "content_block_stop", "index": 0},
+                    {"type": "content_block_stop", "index": thinking_index},
                 )
-            else:
+                thinking_stopped = True
+
+            for state in active_tool_calls.values():
+                if not state.get("stopped"):
+                    yield sse_event(
+                        "content_block_stop",
+                        {"type": "content_block_stop", "index": state["index"]},
+                    )
+                    state["stopped"] = True
+
+            if not text_started and not thinking_started and not active_tool_calls:
+                empty_index = next_index()
                 yield sse_event(
                     "content_block_start",
                     {
                         "type": "content_block_start",
-                        "index": 0,
+                        "index": empty_index,
                         "content_block": {"type": "text", "text": ""},
                     },
                 )
                 yield sse_event(
                     "content_block_stop",
-                    {"type": "content_block_stop", "index": 0},
+                    {"type": "content_block_stop", "index": empty_index},
                 )
             yield sse_event(
                 "message_delta",
