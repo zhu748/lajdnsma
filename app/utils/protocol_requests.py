@@ -138,6 +138,19 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
     messages: List[Dict[str, Any]] = []
     call_id_to_name: Dict[str, str] = {}
 
+    previous_response_id = payload.get("previous_response_id")
+    if previous_response_id:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Compatibility note: previous_response_id="
+                    f"{previous_response_id} was supplied, but this gateway is stateless. "
+                    "The client must include the required conversation and tool history in input."
+                ),
+            }
+        )
+
     if isinstance(input_value, str):
         messages.append({"role": "user", "content": input_value})
     else:

@@ -73,6 +73,8 @@ async def openai_stream_to_responses_stream(
             "object": "response",
             "status": "completed",
             "created_at": created_at,
+            "error": None,
+            "incomplete_details": None,
             "output": output_items,
             "usage": latest_usage,
         }

@@ -124,6 +124,13 @@ WHITELIST_MODELS = {
 # 为空时自动选择当前可用模型列表中的第一个模型。
 CLAUDE_DEFAULT_MODEL = os.environ.get("CLAUDE_DEFAULT_MODEL", "").strip()
 
+# OpenAI Responses/Codex 兼容模式下，如果客户端传入 gpt-/o*/codex-* 等模型名，可映射到该 Gemini 模型。
+# 为空时自动选择当前可用模型列表中的第一个模型。
+RESPONSES_DEFAULT_MODEL = os.environ.get("RESPONSES_DEFAULT_MODEL", "").strip()
+RESPONSES_STATELESS_COMPAT = os.environ.get(
+    "RESPONSES_STATELESS_COMPAT", "true"
+).lower() in ["true", "1", "yes"]
+
 # 白名单User-Agent
 WHITELIST_USER_AGENT = {
     x.strip().lower()

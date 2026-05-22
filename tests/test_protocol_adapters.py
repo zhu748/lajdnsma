@@ -73,6 +73,45 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertEqual(request.messages[1]["content"], "你好")
 
+    def test_response_request_converts_function_call_outputs(self):
+        request = response_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_shell__123_0",
+                        "name": "shell",
+                        "arguments": {"cmd": "pwd"},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_shell__123_0",
+                        "output": "D:/hajimi",
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(request.messages[0]["role"], "assistant")
+        self.assertEqual(request.messages[0]["tool_calls"][0]["function"]["name"], "shell")
+        self.assertEqual(request.messages[1]["role"], "tool")
+        self.assertEqual(request.messages[1]["name"], "shell")
+        self.assertEqual(request.messages[1]["content"], "D:/hajimi")
+
+    def test_response_request_adds_stateless_previous_response_note(self):
+        request = response_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "previous_response_id": "resp_123",
+                "input": "continue",
+            }
+        )
+
+        self.assertEqual(request.messages[0]["role"], "system")
+        self.assertIn("previous_response_id=resp_123", request.messages[0]["content"])
+        self.assertEqual(request.messages[1]["content"], "continue")
+
     def test_response_request_converts_function_tools(self):
         request = response_request_to_chat_request(
             {
@@ -211,6 +250,30 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["output"][0]["content"][0]["text"], "你好")
         self.assertEqual(response["usage"]["total_tokens"], 15)
 
+    def test_openai_chat_to_response_api_includes_compat_fields(self):
+        response = openai_chat_to_response_api(
+            {
+                "id": "chatcmpl_1",
+                "created": 1,
+                "model": "gemini-2.5-pro",
+                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "usage": {},
+            },
+            {
+                "instructions": "be helpful",
+                "metadata": {"k": "v"},
+                "previous_response_id": "resp_old",
+                "tool_choice": "auto",
+                "tools": [{"type": "function", "name": "x"}],
+            },
+        )
+
+        self.assertIsNone(response["error"])
+        self.assertEqual(response["instructions"], "be helpful")
+        self.assertEqual(response["metadata"], {"k": "v"})
+        self.assertEqual(response["previous_response_id"], "resp_old")
+        self.assertEqual(response["tools"][0]["name"], "x")
+
     def test_openai_chat_to_claude_response(self):
         response = openai_chat_to_claude_response(
             {
@@ -294,6 +357,8 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         joined = "".join(result)
         self.assertIn('"type": "function_call"', joined)
         self.assertIn('"name": "weather"', joined)
+        self.assertIn("response.function_call_arguments.delta", joined)
+        self.assertIn("response.function_call_arguments.done", joined)
         self.assertIn("response.completed", joined)
 
 

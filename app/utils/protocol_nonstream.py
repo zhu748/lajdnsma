@@ -4,7 +4,10 @@ from typing import Any, Dict, List
 from app.utils.protocol_common import _ensure_list, _extract_openai_usage, _now_ts
 
 
-def openai_chat_to_response_api(chat_response: Dict[str, Any]) -> Dict[str, Any]:
+def openai_chat_to_response_api(
+    chat_response: Dict[str, Any], request_payload: Dict[str, Any] | None = None
+) -> Dict[str, Any]:
+    request_payload = request_payload or {}
     choice = chat_response.get("choices", [{}])[0]
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
@@ -39,14 +42,47 @@ def openai_chat_to_response_api(chat_response: Dict[str, Any]) -> Dict[str, Any]
             }
         )
 
+    usage_counts = _extract_openai_usage(usage)
     return {
         "id": f"resp_{chat_response.get('id', _now_ts())}",
         "object": "response",
         "created_at": chat_response.get("created", _now_ts()),
         "status": "completed",
+        "error": None,
+        "incomplete_details": None,
+        "instructions": request_payload.get("instructions"),
+        "metadata": request_payload.get("metadata") or {},
         "model": chat_response.get("model"),
         "output": output_items,
-        "usage": _extract_openai_usage(usage),
+        "parallel_tool_calls": request_payload.get("parallel_tool_calls", True),
+        "previous_response_id": request_payload.get("previous_response_id"),
+        "reasoning": request_payload.get("reasoning"),
+        "store": request_payload.get("store", False),
+        "temperature": request_payload.get("temperature"),
+        "text": request_payload.get("text") or {"format": {"type": "text"}},
+        "tool_choice": request_payload.get("tool_choice", "auto"),
+        "tools": request_payload.get("tools") or [],
+        "top_p": request_payload.get("top_p"),
+        "truncation": request_payload.get("truncation", "disabled"),
+        "usage": usage_counts,
+    }
+
+
+def responses_error_response(message: str, status_code: int = 500, code: str | None = None) -> Dict[str, Any]:
+    now = _now_ts()
+    return {
+        "id": f"resp_error_{now}",
+        "object": "response",
+        "created_at": now,
+        "status": "failed",
+        "error": {
+            "message": message,
+            "type": "gateway_error",
+            "code": code or str(status_code),
+        },
+        "incomplete_details": None,
+        "output": [],
+        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
     }
 
 

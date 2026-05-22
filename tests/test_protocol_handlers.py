@@ -20,8 +20,22 @@ async def _iter_chunks(chunks):
 
 
 def load_protocol_handlers():
+    fake_fastapi = types.ModuleType("fastapi")
+
+    class FakeHTTPException(Exception):
+        def __init__(self, status_code=500, detail=None):
+            self.status_code = status_code
+            self.detail = detail
+
+    class FakeJSONResponse:
+        def __init__(self, content, status_code=200):
+            self.content = content
+            self.status_code = status_code
+
+    fake_fastapi.HTTPException = FakeHTTPException
     fake_fastapi_responses = types.ModuleType("fastapi.responses")
     fake_fastapi_responses.StreamingResponse = FakeStreamingResponse
+    fake_fastapi_responses.JSONResponse = FakeJSONResponse
 
     fake_protocol_adapters = types.ModuleType("app.utils.protocol_adapters")
     fake_protocol_adapters.response_request_to_chat_request = (
@@ -31,7 +45,10 @@ def load_protocol_handlers():
         lambda payload: types.SimpleNamespace(model=payload["model"], payload=payload)
     )
     fake_protocol_adapters.openai_chat_to_response_api = (
-        lambda response: {"kind": "responses", "response": response}
+        lambda response, payload=None: {"kind": "responses", "response": response, "payload": payload}
+    )
+    fake_protocol_adapters.responses_error_response = (
+        lambda message, status_code=500, code=None: {"status": "failed", "error": {"message": message, "code": code or str(status_code)}}
     )
     fake_protocol_adapters.openai_chat_to_claude_response = (
         lambda response: {"kind": "claude", "response": response}
@@ -52,6 +69,7 @@ def load_protocol_handlers():
         openai_stream_to_claude_stream
     )
 
+    sys.modules["fastapi"] = fake_fastapi
     sys.modules["fastapi.responses"] = fake_fastapi_responses
     sys.modules["app.utils.protocol_adapters"] = fake_protocol_adapters
 
@@ -127,6 +145,40 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
                 "responses::gemini-2.5-pro::data: [DONE]\n\n",
             ],
         )
+
+    async def test_handle_responses_request_passes_payload_to_converter(self):
+        module = load_protocol_handlers()
+
+        async def fake_chat_handler(request, http_request, auth_dep, user_agent_dep):
+            return {"id": "chatcmpl_1"}
+
+        result = await module.handle_responses_request(
+            {"model": "gemini-2.5-pro", "metadata": {"a": "b"}},
+            http_request=None,
+            auth_dep=None,
+            user_agent_dep=None,
+            chat_handler=fake_chat_handler,
+        )
+
+        self.assertEqual(result["payload"]["metadata"], {"a": "b"})
+
+    async def test_handle_responses_request_wraps_http_exception(self):
+        module = load_protocol_handlers()
+
+        async def fake_chat_handler(request, http_request, auth_dep, user_agent_dep):
+            raise module.HTTPException(status_code=400, detail="bad model")
+
+        response = await module.handle_responses_request(
+            {"model": "gemini-2.5-pro"},
+            http_request=None,
+            auth_dep=None,
+            user_agent_dep=None,
+            chat_handler=fake_chat_handler,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content["status"], "failed")
+        self.assertIn("bad model", response.content["error"]["message"])
 
     async def test_handle_claude_messages_request_non_stream(self):
         module = load_protocol_handlers()
