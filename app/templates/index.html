@@ -14,11 +14,11 @@
     <script>
       (() => {
         const panelId = 'responses-model-mapping-panel'
-        async function postConfig(key, value, password) {
-          const res = await fetch('/api/update-config', {
+        async function postResponsesMapping(defaultModel, aliases, password) {
+          const res = await fetch('/api/update-responses-model-mapping', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key, value, password })
+            body: JSON.stringify({ default_model: defaultModel, aliases, password })
           })
           if (!res.ok) {
             const data = await res.json().catch(() => ({}))
@@ -35,7 +35,7 @@
           const row = document.createElement('div')
           row.className = 'responses-alias-row'
           row.innerHTML = `
-            <input class="responses-input responses-alias-name" placeholder="Alias, e.g. codex-mini-latest" value="${alias.replaceAll('"', '&quot;')}">
+            <input class="responses-input responses-alias-name" placeholder="Alias, e.g. codex-mini-latest or gpt-*" value="${alias.replaceAll('"', '&quot;')}">
             <select class="responses-input responses-alias-model">${optionHtml(models, model)}</select>
             <button type="button" class="responses-remove">Delete</button>
           `
@@ -71,7 +71,7 @@
             </div>
             <div class="responses-help">Used when the incoming model name is not available and no custom alias matches.</div>
             <div class="responses-row">
-              <strong>Custom aliases</strong>
+              <strong>Custom aliases (supports * wildcard)</strong>
               <button type="button" id="responses-add-alias">Add mapping</button>
             </div>
             <div id="responses-alias-list"></div>
@@ -95,8 +95,7 @@
             })
             try {
               msg.textContent = 'Saving...'
-              await postConfig('responses_default_model', panel.querySelector('#responses-default-model').value, password)
-              await postConfig('responses_model_aliases', aliasMap, password)
+              await postResponsesMapping(panel.querySelector('#responses-default-model').value, aliasMap, password)
               msg.textContent = 'Saved'
               msg.style.color = 'var(--color-success,#28a745)'
             } catch (e) {

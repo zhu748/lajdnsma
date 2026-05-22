@@ -34,6 +34,38 @@ active_requests_manager = None
 credential_manager = None  # 添加全局credential_manager变量
 
 # 用于存储API密钥检测的进度信息
+
+
+def _validate_responses_model_mapping(default_model, aliases):
+    if not isinstance(default_model, str):
+        raise HTTPException(status_code=422, detail="Responses default model must be a string")
+
+    default_model = default_model.strip()
+    if default_model and default_model not in GeminiClient.AVAILABLE_MODELS:
+        raise HTTPException(status_code=422, detail="Responses default model is not in available models")
+
+    if not isinstance(aliases, dict):
+        raise HTTPException(status_code=422, detail="Responses model aliases must be an object")
+
+    cleaned_aliases = {}
+    for alias, target in aliases.items():
+        alias_name = str(alias).strip()
+        target_model = str(target).strip()
+        if not alias_name or not target_model:
+            continue
+        if any(ch.isspace() for ch in alias_name):
+            raise HTTPException(status_code=422, detail=f"Alias {alias_name} must not contain whitespace")
+        if alias_name in GeminiClient.AVAILABLE_MODELS:
+            raise HTTPException(status_code=422, detail=f"Alias {alias_name} conflicts with an available model")
+        if target_model not in GeminiClient.AVAILABLE_MODELS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Alias {alias_name} target model is not in available models",
+            )
+        cleaned_aliases[alias_name] = target_model
+
+    return default_model, cleaned_aliases
+
 api_key_test_progress = {
     "is_running": False,
     "completed": 0,
@@ -695,29 +727,16 @@ async def update_config(config_data: dict):
                 raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
 
         elif config_key == "responses_default_model":
-            if not isinstance(config_value, str):
-                raise HTTPException(status_code=422, detail="Responses default model must be a string")
-            value = config_value.strip()
-            if value and value not in GeminiClient.AVAILABLE_MODELS:
-                raise HTTPException(status_code=422, detail="Responses default model is not in available models")
+            value, _ = _validate_responses_model_mapping(
+                config_value, settings.RESPONSES_MODEL_ALIASES
+            )
             settings.RESPONSES_DEFAULT_MODEL = value
             log("info", f"Responses default model updated to: {value or 'auto'}")
 
         elif config_key == "responses_model_aliases":
-            if not isinstance(config_value, dict):
-                raise HTTPException(status_code=422, detail="Responses model aliases must be an object")
-            aliases = {}
-            for alias, target in config_value.items():
-                alias_name = str(alias).strip()
-                target_model = str(target).strip()
-                if not alias_name or not target_model:
-                    continue
-                if target_model not in GeminiClient.AVAILABLE_MODELS:
-                    raise HTTPException(
-                        status_code=422,
-                        detail=f"Alias {alias_name} target model is not in available models",
-                    )
-                aliases[alias_name] = target_model
+            _, aliases = _validate_responses_model_mapping(
+                settings.RESPONSES_DEFAULT_MODEL, config_value
+            )
             settings.RESPONSES_MODEL_ALIASES = aliases
             log("info", f"Responses model aliases updated, count: {len(aliases)}")
 
@@ -729,6 +748,44 @@ async def update_config(config_data: dict):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"更新失败：{str(e)}")
+
+
+@dashboard_router.post("/update-responses-model-mapping")
+async def update_responses_model_mapping(config_data: dict):
+    """Atomically update Responses default model and custom model aliases."""
+    try:
+        if not isinstance(config_data, dict):
+            raise HTTPException(status_code=422, detail="Request body must be a JSON object")
+
+        password = config_data.get("password")
+        if not password:
+            raise HTTPException(status_code=400, detail="Missing password")
+        if not isinstance(password, str):
+            raise HTTPException(status_code=422, detail="Password must be a string")
+        if not verify_web_password(password):
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+        default_model, aliases = _validate_responses_model_mapping(
+            config_data.get("default_model", ""),
+            config_data.get("aliases", {}),
+        )
+        settings.RESPONSES_DEFAULT_MODEL = default_model
+        settings.RESPONSES_MODEL_ALIASES = aliases
+        save_settings()
+        log(
+            "info",
+            f"Responses model mapping updated: default={default_model or 'auto'}, aliases={len(aliases)}",
+        )
+        return {
+            "status": "success",
+            "message": "Responses model mapping updated",
+            "responses_default_model": default_model,
+            "responses_model_aliases": aliases,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
 
 
 @dashboard_router.post("/test-api-keys")

@@ -39,7 +39,7 @@ watch(
     storeMaxEmptyResponses: dashboardStore.config.maxEmptyResponses,
     storeResponsesDefaultModel: dashboardStore.config.responsesDefaultModel,
     storeResponsesModelAliases: dashboardStore.config.responsesModelAliases,
-    configIsActuallyLoaded: dashboardStore.isConfigLoaded, // 观察加载状�?
+    configIsActuallyLoaded: dashboardStore.isConfigLoaded, // 观察加载状�?
   }),
   (newValues) => {
     if (newValues.configIsActuallyLoaded && !populatedFromStore.value) {
@@ -65,19 +65,19 @@ watch(
 // 保存组件配置
 async function saveComponentConfigs(passwordFromParent) {
   if (!passwordFromParent) {
-    return { success: false, message: '功能配置: 密码未提�? }
+    return { success: false, message: '功能配置: 密码未提�? }
   }
 
   let allSucceeded = true;
   let individualMessages = [];
 
-  // 逐个保存配置�?
-  const configKeys = Object.keys(localConfig).filter(key => key !== 'responsesModelAliases');
+  // 逐个保存配置�?
+  const configKeys = Object.keys(localConfig).filter(key => !['responsesDefaultModel', 'responsesModelAliases'].includes(key));
   for (const key of configKeys) {
     if (localConfig[key] !== dashboardStore.config[key]) {
       try {
         await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent);
-        // 更新store中的�?- 仅在API调用成功�?
+        // 更新store中的�?- 仅在API调用成功�?
         dashboardStore.config[key] = localConfig[key];
         individualMessages.push(`${key} 保存成功`);
       } catch (error) {
@@ -88,20 +88,24 @@ async function saveComponentConfigs(passwordFromParent) {
   }
 
   const aliasMap = buildAliasMap();
-  if (JSON.stringify(aliasMap) !== JSON.stringify(dashboardStore.config.responsesModelAliases || {})) {
+  if (
+    localConfig.responsesDefaultModel !== (dashboardStore.config.responsesDefaultModel || '') ||
+    JSON.stringify(aliasMap) !== JSON.stringify(dashboardStore.config.responsesModelAliases || {})
+  ) {
     try {
-      await dashboardStore.updateConfig('responsesModelAliases', aliasMap, passwordFromParent);
+      await saveResponsesMapping(localConfig.responsesDefaultModel, aliasMap, passwordFromParent);
+      dashboardStore.config.responsesDefaultModel = localConfig.responsesDefaultModel;
       dashboardStore.config.responsesModelAliases = aliasMap;
-      individualMessages.push('responsesModelAliases saved');
+      individualMessages.push('Responses model mapping saved');
     } catch (error) {
       allSucceeded = false;
-      individualMessages.push(`responsesModelAliases save failed: ${error.message || 'unknown error'}`);
+      individualMessages.push(`Responses model mapping save failed: ${error.message || 'unknown error'}`);
     }
   }
 
   if (allSucceeded && individualMessages.length === 0) {
-    // 如果没有任何更改，也算成功，但提示用�?
-    return { success: true, message: '功能配置: 无更改需要保�? };
+    // 如果没有任何更改，也算成功，但提示用�?
+    return { success: true, message: '功能配置: 无更改需要保�? };
   }
 
   return {
@@ -110,11 +114,28 @@ async function saveComponentConfigs(passwordFromParent) {
   };
 }
 
-// 获取布尔值显示文�?
+// 获取布尔值显示文�?
 function getBooleanText(value) {
   return value ? '启用' : '禁用'
 }
 
+
+async function saveResponsesMapping(defaultModel, aliases, password) {
+  const response = await fetch('/api/update-responses-model-mapping', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      default_model: defaultModel,
+      aliases,
+      password
+    })
+  })
+  if (!response.ok) {
+    const errorData = await response.json()
+    throw new Error(errorData.detail || 'Save Responses model mapping failed')
+  }
+  return response.json()
+}
 
 function addResponseAlias() {
   localConfig.responsesModelAliases.push({ alias: '', model: localConfig.responsesDefaultModel || '' })
@@ -160,7 +181,7 @@ defineExpose({
         </div>
         
         <div class="config-group">
-          <label class="config-label">假流式响�?/label>
+          <label class="config-label">假流式响�?/label>
           <div class="toggle-wrapper">
             <input type="checkbox" class="toggle" id="fakeStreaming" v-model="localConfig.fakeStreaming">
             <label for="fakeStreaming" class="toggle-label">
@@ -188,15 +209,15 @@ defineExpose({
             type="text" 
             class="config-input" 
             v-model="localConfig.searchPrompt" 
-            placeholder="请输入联网搜索提�?
+            placeholder="请输入联网搜索提�?
           >
         </div>
       </div>
       
-      <!-- 数值配置项第一�?-->
+      <!-- 数值配置项第一�?-->
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">最大重试次�?/label>
+          <label class="config-label">最大重试次�?/label>
           <input 
             type="number" 
             class="config-input" 
@@ -206,7 +227,7 @@ defineExpose({
         </div>
         
         <div class="config-group">
-          <label class="config-label">假流式间�?�?</label>
+          <label class="config-label">假流式间�?�?</label>
           <input 
             type="number" 
             class="config-input" 
@@ -227,10 +248,10 @@ defineExpose({
         </div>
       </div>
       
-      <!-- 数值配置项第二�?-->
+      <!-- 数值配置项第二�?-->
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">默认并发请求�?/label>
+          <label class="config-label">默认并发请求�?/label>
           <input 
             type="number" 
             class="config-input" 
@@ -260,10 +281,10 @@ defineExpose({
         </div>
       </div>
       
-      <!-- 数值配置项第三�?-->
+      <!-- 数值配置项第三�?-->
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">空响应重试限�?/label>
+          <label class="config-label">空响应重试限�?/label>
           <input 
             type="number" 
             class="config-input" 
@@ -271,7 +292,7 @@ defineExpose({
             min="0"
           >
         </div>
-        <!-- 可以根据需要在此行添加更多配置�?-->
+        <!-- 可以根据需要在此行添加更多配置�?-->
         <div class="config-group"></div>
         <div class="config-group"></div>
       </div>
@@ -294,10 +315,10 @@ defineExpose({
         </div>
 
         <div class="alias-header">
-          <span>Custom model mappings</span>
+          <span>Custom model mappings (supports * wildcard)</span>
           <button type="button" class="add-alias-button" @click="addResponseAlias">Add mapping</button>
         </div>
-        <div v-if="localConfig.responsesModelAliases.length === 0" class="config-hint">No custom mappings. Example: codex-mini-latest -> gemini-2.5-pro.</div>
+        <div v-if="localConfig.responsesModelAliases.length === 0" class="config-hint">No custom mappings. Examples: codex-mini-latest -> gemini-2.5-pro, gpt-* -> gemini-2.5-flash.</div>
         <div
           v-for="(item, index) in localConfig.responsesModelAliases"
           :key="index"
@@ -307,7 +328,7 @@ defineExpose({
             type="text"
             class="config-input alias-name-input"
             v-model="item.alias"
-            placeholder="Alias model name, e.g. codex-mini-latest"
+            placeholder="Alias model name, e.g. codex-mini-latest or gpt-*"
           >
           <select class="config-input alias-model-select" v-model="item.model">
             <option value="">Select target model</option>
@@ -321,7 +342,7 @@ defineExpose({
         </div>
       </div>
 
-      <!-- 移除独立的保存区�?-->
+      <!-- 移除独立的保存区�?-->
       <!-- 消息提示由父组件处理 -->
     </div>
   </div>
@@ -401,7 +422,7 @@ defineExpose({
   box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
 }
 
-/* 开关样�?*/
+/* 开关样�?*/
 .toggle-wrapper {
   position: relative;
 }
@@ -456,7 +477,7 @@ defineExpose({
   color: var(--color-text);
 }
 
-/* 移动端优�?*/
+/* 移动端优�?*/
 @media (max-width: 768px) {
   .config-row {
     gap: 10px;
@@ -467,7 +488,7 @@ defineExpose({
   }
 }
 
-/* 小屏幕手机进一步优�?*/
+/* 小屏幕手机进一步优�?*/
 @media (max-width: 480px) {
   .config-row {
     flex-direction: column;

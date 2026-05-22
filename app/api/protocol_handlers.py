@@ -1,3 +1,5 @@
+from fnmatch import fnmatchcase
+
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -59,7 +61,14 @@ def _resolve_responses_model_alias(request):
         return
 
     aliases = getattr(settings, "RESPONSES_MODEL_ALIASES", {}) or {}
-    fallback_model = aliases.get(request.model) if isinstance(aliases, dict) else ""
+    fallback_model = ""
+    if isinstance(aliases, dict):
+        fallback_model = aliases.get(request.model, "")
+        if not fallback_model:
+            for alias_pattern, target_model in aliases.items():
+                if "*" in alias_pattern and fnmatchcase(request.model, alias_pattern):
+                    fallback_model = target_model
+                    break
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 

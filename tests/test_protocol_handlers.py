@@ -162,6 +162,56 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["payload"]["metadata"], {"a": "b"})
 
+    def test_responses_model_alias_supports_wildcards(self):
+        module = load_protocol_handlers()
+        fake_settings = types.SimpleNamespace(
+            RESPONSES_MODEL_ALIASES={"gpt-*": "gemini-2.5-flash"},
+            RESPONSES_DEFAULT_MODEL="gemini-2.5-pro",
+            WHITELIST_MODELS=set(),
+        )
+
+        class FakeGeminiClient:
+            AVAILABLE_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash"]
+
+        fake_config = types.ModuleType("app.config")
+        fake_services = types.ModuleType("app.services")
+        fake_logging = types.ModuleType("app.utils.logging")
+        fake_services.GeminiClient = FakeGeminiClient
+        fake_logging.log = lambda *args, **kwargs: None
+        sys.modules["app.config"] = fake_config
+        sys.modules["app.config.settings"] = fake_settings
+        sys.modules["app.services"] = fake_services
+        sys.modules["app.utils.logging"] = fake_logging
+
+        request = types.SimpleNamespace(model="gpt-5")
+        module._resolve_responses_model_alias(request)
+        self.assertEqual(request.model, "gemini-2.5-flash")
+
+    def test_responses_model_alias_uses_exact_before_wildcard(self):
+        module = load_protocol_handlers()
+        fake_settings = types.SimpleNamespace(
+            RESPONSES_MODEL_ALIASES={"gpt-*": "gemini-2.5-flash", "gpt-5": "gemini-2.5-pro"},
+            RESPONSES_DEFAULT_MODEL="gemini-2.5-flash",
+            WHITELIST_MODELS=set(),
+        )
+
+        class FakeGeminiClient:
+            AVAILABLE_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash"]
+
+        fake_config = types.ModuleType("app.config")
+        fake_services = types.ModuleType("app.services")
+        fake_logging = types.ModuleType("app.utils.logging")
+        fake_services.GeminiClient = FakeGeminiClient
+        fake_logging.log = lambda *args, **kwargs: None
+        sys.modules["app.config"] = fake_config
+        sys.modules["app.config.settings"] = fake_settings
+        sys.modules["app.services"] = fake_services
+        sys.modules["app.utils.logging"] = fake_logging
+
+        request = types.SimpleNamespace(model="gpt-5")
+        module._resolve_responses_model_alias(request)
+        self.assertEqual(request.model, "gemini-2.5-pro")
+
     async def test_handle_responses_request_wraps_http_exception(self):
         module = load_protocol_handlers()
 
