@@ -71,7 +71,7 @@ watch(
 )
 
 function getBooleanText(value) {
-  return value ? '??' : '??'
+  return value ? '启用' : '禁用'
 }
 
 function buildAliasMap(rows) {
@@ -92,7 +92,7 @@ async function saveModelMapping(endpoint, defaultModel, aliases, password) {
   })
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
-    throw new Error(errorData.detail || errorData.error?.message || '????????')
+    throw new Error(errorData.detail || errorData.error?.message || '保存模型映射失败')
   }
   return response.json()
 }
@@ -115,7 +115,7 @@ function removeClaudeAlias(index) {
 
 async function saveComponentConfigs(passwordFromParent) {
   if (!passwordFromParent) {
-    return { success: false, message: '?????????????' }
+    return { success: false, message: '功能配置：请先输入管理密码' }
   }
 
   let allSucceeded = true
@@ -132,10 +132,10 @@ async function saveComponentConfigs(passwordFromParent) {
       try {
         await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent)
         dashboardStore.config[key] = localConfig[key]
-        messages.push(`${key} ????`)
+        messages.push(`${key} 保存成功`)
       } catch (error) {
         allSucceeded = false
-        messages.push(`${key} ?????${error.message || '????'}`)
+        messages.push(`${key} 保存失败：${error.message || '未知错误'}`)
       }
     }
   }
@@ -149,10 +149,10 @@ async function saveComponentConfigs(passwordFromParent) {
       await saveModelMapping('/api/update-responses-model-mapping', localConfig.responsesDefaultModel, responsesAliases, passwordFromParent)
       dashboardStore.config.responsesDefaultModel = localConfig.responsesDefaultModel
       dashboardStore.config.responsesModelAliases = responsesAliases
-      messages.push('Responses ????????')
+      messages.push('Responses 模型映射保存成功')
     } catch (error) {
       allSucceeded = false
-      messages.push(`Responses ?????????${error.message || '????'}`)
+      messages.push(`Responses 模型映射保存失败：${error.message || '未知错误'}`)
     }
   }
 
@@ -165,18 +165,18 @@ async function saveComponentConfigs(passwordFromParent) {
       await saveModelMapping('/api/update-claude-model-mapping', localConfig.claudeDefaultModel, claudeAliases, passwordFromParent)
       dashboardStore.config.claudeDefaultModel = localConfig.claudeDefaultModel
       dashboardStore.config.claudeModelAliases = claudeAliases
-      messages.push('Claude ????????')
+      messages.push('Claude 模型映射保存成功')
     } catch (error) {
       allSucceeded = false
-      messages.push(`Claude ?????????${error.message || '????'}`)
+      messages.push(`Claude 模型映射保存失败：${error.message || '未知错误'}`)
     }
   }
 
   if (allSucceeded && messages.length === 0) {
-    return { success: true, message: '??????????????' }
+    return { success: true, message: '功能配置：没有需要保存的更改' }
   }
 
-  return { success: allSucceeded, message: `?????${messages.join('; ')}` }
+  return { success: allSucceeded, message: `功能配置：${messages.join('; ')}` }
 }
 
 defineExpose({ saveComponentConfigs, localConfig })
@@ -184,12 +184,12 @@ defineExpose({ saveComponentConfigs, localConfig })
 
 <template>
   <div class="features-config">
-    <h3 class="section-title">????</h3>
+    <h3 class="section-title">功能配置</h3>
 
     <div class="config-form">
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">????</label>
+          <label class="config-label">联网搜索</label>
           <div class="toggle-wrapper">
             <input id="searchMode" v-model="localConfig.searchMode" type="checkbox" class="toggle">
             <label for="searchMode" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.searchMode) }}</span></label>
@@ -197,7 +197,7 @@ defineExpose({ saveComponentConfigs, localConfig })
         </div>
 
         <div class="config-group">
-          <label class="config-label">?????</label>
+          <label class="config-label">假流式响应</label>
           <div class="toggle-wrapper">
             <input id="fakeStreaming" v-model="localConfig.fakeStreaming" type="checkbox" class="toggle">
             <label for="fakeStreaming" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.fakeStreaming) }}</span></label>
@@ -205,7 +205,7 @@ defineExpose({ saveComponentConfigs, localConfig })
         </div>
 
         <div class="config-group">
-          <label class="config-label">????</label>
+          <label class="config-label">伪装信息</label>
           <div class="toggle-wrapper">
             <input id="randomString" v-model="localConfig.randomString" type="checkbox" class="toggle">
             <label for="randomString" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.randomString) }}</span></label>
@@ -215,68 +215,68 @@ defineExpose({ saveComponentConfigs, localConfig })
 
       <div class="config-row">
         <div class="config-group full-width">
-          <label class="config-label">??????</label>
-          <input v-model="localConfig.searchPrompt" type="text" class="config-input" placeholder="?????????">
+          <label class="config-label">联网搜索提示</label>
+          <input v-model="localConfig.searchPrompt" type="text" class="config-input" placeholder="请输入联网搜索提示">
         </div>
       </div>
 
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">??????</label>
+          <label class="config-label">最大重试次数</label>
           <input v-model.number="localConfig.maxRetryNum" type="number" class="config-input" min="0">
         </div>
         <div class="config-group">
-          <label class="config-label">????????</label>
+          <label class="config-label">假流式间隔（秒）</label>
           <input v-model.number="localConfig.fakeStreamingInterval" type="number" class="config-input" min="0" step="0.1">
         </div>
         <div class="config-group">
-          <label class="config-label">???? length</label>
+          <label class="config-label">伪装信息长度</label>
           <input v-model.number="localConfig.randomStringLength" type="number" class="config-input" min="0">
         </div>
       </div>
 
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">???????</label>
+          <label class="config-label">默认并发请求数</label>
           <input v-model.number="localConfig.concurrentRequests" type="number" class="config-input" min="1">
         </div>
         <div class="config-group">
-          <label class="config-label">????????</label>
+          <label class="config-label">失败时增加并发数</label>
           <input v-model.number="localConfig.increaseConcurrentOnFailure" type="number" class="config-input" min="0">
         </div>
         <div class="config-group">
-          <label class="config-label">???????</label>
+          <label class="config-label">最大并发请求数</label>
           <input v-model.number="localConfig.maxConcurrentRequests" type="number" class="config-input" min="1">
         </div>
       </div>
 
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">???????</label>
+          <label class="config-label">空响应重试限制</label>
           <input v-model.number="localConfig.maxEmptyResponses" type="number" class="config-input" min="0">
         </div>
       </div>
 
       <ModelMappingPanel
         v-model:default-model="localConfig.responsesDefaultModel"
-        title="Responses API ????"
-        help="?? Codex CLI / OpenAI Responses ????????????? Gemini ???"
+        title="Responses API 模型映射"
+        help="配置 Codex CLI / OpenAI Responses 传入的模型名默认映射到哪个 Gemini 模型。"
         :aliases="localConfig.responsesModelAliases"
         :available-models="dashboardStore.availableModels"
-        alias-placeholder="????? codex-mini-latest ? gpt-*"
-        empty-hint="???????????codex-mini-latest -> gemini-2.5-pro?gpt-* -> gemini-2.5-flash?"
+        alias-placeholder="别名，例如 codex-mini-latest 或 gpt-*"
+        empty-hint="暂无自定义映射。示例：codex-mini-latest -> gemini-2.5-pro，gpt-* -> gemini-2.5-flash。"
         @add-alias="addResponseAlias"
         @remove-alias="removeResponseAlias"
       />
 
       <ModelMappingPanel
         v-model:default-model="localConfig.claudeDefaultModel"
-        title="Claude API ????"
-        help="?? Claude Code / Anthropic ????????????? Gemini ???"
+        title="Claude API 模型映射"
+        help="配置 Claude Code / Anthropic 传入的模型名默认映射到哪个 Gemini 模型。"
         :aliases="localConfig.claudeModelAliases"
         :available-models="dashboardStore.availableModels"
-        alias-placeholder="????? claude-sonnet-* ? claude-3-5-haiku-latest"
-        empty-hint="???????????claude-sonnet-* -> gemini-2.5-pro?claude-* -> gemini-2.5-flash?"
+        alias-placeholder="别名，例如 claude-sonnet-* 或 claude-3-5-haiku-latest"
+        empty-hint="暂无自定义映射。示例：claude-sonnet-* -> gemini-2.5-pro，claude-* -> gemini-2.5-flash。"
         @add-alias="addClaudeAlias"
         @remove-alias="removeClaudeAlias"
       />

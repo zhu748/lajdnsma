@@ -5,8 +5,8 @@ const props = defineProps({
   aliases: { type: Array, required: true },
   defaultModel: { type: String, default: '' },
   availableModels: { type: Array, default: () => [] },
-  aliasPlaceholder: { type: String, default: '????? gpt-*' },
-  emptyHint: { type: String, default: '????????' }
+  aliasPlaceholder: { type: String, default: '别名，例如 gpt-*' },
+  emptyHint: { type: String, default: '暂无自定义映射。' }
 })
 
 const emit = defineEmits(['update:defaultModel', 'add-alias', 'remove-alias'])
@@ -23,31 +23,31 @@ function targetModels() {
 
     <div class="config-row">
       <div class="config-group full-width">
-        <label class="config-label">??????</label>
+        <label class="config-label">默认目标模型</label>
         <select
           class="config-input"
           :value="defaultModel"
           @change="emit('update:defaultModel', $event.target.value)"
         >
-          <option value="">???????????</option>
+          <option value="">自动选择第一个可用模型</option>
           <option v-for="model in targetModels()" :key="model" :value="model">{{ model }}</option>
         </select>
       </div>
     </div>
 
     <div class="mapping-header">
-      <span>?????????? * ????</span>
-      <button type="button" class="add-alias-button" @click="emit('add-alias')">????</button>
+      <span>自定义模型映射（支持 * 通配符）</span>
+      <button type="button" class="add-alias-button" @click="emit('add-alias')">添加映射</button>
     </div>
 
     <div v-if="aliases.length === 0" class="config-hint">{{ emptyHint }}</div>
     <div v-for="(item, index) in aliases" :key="index" class="alias-row">
       <input v-model="item.alias" class="config-input" :placeholder="aliasPlaceholder">
       <select v-model="item.model" class="config-input">
-        <option value="">???????</option>
+        <option value="">请选择目标模型</option>
         <option v-for="model in targetModels()" :key="model" :value="model">{{ model }}</option>
       </select>
-      <button type="button" class="remove-alias-button" @click="emit('remove-alias', index)">??</button>
+      <button type="button" class="remove-alias-button" @click="emit('remove-alias', index)">删除</button>
     </div>
   </div>
 </template>
