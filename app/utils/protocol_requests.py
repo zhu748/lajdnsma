@@ -1,3 +1,4 @@
+import json
 from typing import Any, Dict, List, Optional
 
 from app.models.schemas import ChatCompletionRequest
@@ -56,12 +57,59 @@ def _extract_text_from_response_input_item(item: Dict[str, Any]) -> str:
     item_type = item.get("type")
     if item_type in {"input_text", "text", "output_text"}:
         return item.get("text", "")
+    if item_type == "function_call_output":
+        output = item.get("output", "")
+        return output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
     if item_type == "message":
+        content = item.get("content")
+        if isinstance(content, str):
+            return content
         return "\n".join(
             _extract_text_from_response_input_item(content_item)
-            for content_item in _ensure_list(item.get("content"))
+            for content_item in _ensure_list(content)
+            if isinstance(content_item, dict)
         ).strip()
     return ""
+
+
+def _response_content_to_openai_content(content: Any) -> Any:
+    """Convert Responses message content into Chat Completions content."""
+    if isinstance(content, str):
+        return content
+
+    parts: List[Dict[str, Any]] = []
+    text_parts: List[str] = []
+    for item in _ensure_list(content):
+        if not isinstance(item, dict):
+            continue
+
+        item_type = item.get("type")
+        if item_type in {"input_text", "text", "output_text"}:
+            text = item.get("text", "")
+            if text:
+                text_parts.append(text)
+        elif item_type in {"input_image", "image_url"}:
+            image_url = item.get("image_url") or item.get("url")
+            if isinstance(image_url, dict):
+                image_url = image_url.get("url")
+            if image_url:
+                parts.append({"type": "image_url", "image_url": {"url": image_url}})
+
+    if parts:
+        return [{"type": "text", "text": "\n".join(text_parts)}] + parts if text_parts else parts
+    return "\n".join(text_parts).strip()
+
+
+def _function_call_output_to_text(output: Any) -> str:
+    if isinstance(output, str):
+        return output
+    return json.dumps(output, ensure_ascii=False)
+
+
+def _function_name_from_call_id(call_id: Any) -> Optional[str]:
+    if not isinstance(call_id, str) or not call_id.startswith("call_"):
+        return None
+    return call_id[len("call_") :].split("__", 1)[0]
 
 
 def _claude_image_to_openai_image(item: Dict[str, Any]) -> Dict[str, Any] | None:
@@ -88,6 +136,7 @@ def _claude_image_to_openai_image(item: Dict[str, Any]) -> Dict[str, Any] | None
 def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionRequest:
     input_value = payload.get("input", [])
     messages: List[Dict[str, Any]] = []
+    call_id_to_name: Dict[str, str] = {}
 
     if isinstance(input_value, str):
         messages.append({"role": "user", "content": input_value})
@@ -102,16 +151,50 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
 
             if item.get("type") == "message":
                 role = _normalize_openai_role(item.get("role", "user"))
-                content_items = _ensure_list(item.get("content"))
-                text_parts = []
-                for content_item in content_items:
-                    if isinstance(content_item, dict):
-                        text = _extract_text_from_response_input_item(content_item)
-                        if text:
-                            text_parts.append(text)
-                combined_text = "\n".join(text_parts).strip()
-                if combined_text:
-                    messages.append({"role": role, "content": combined_text})
+                content = _response_content_to_openai_content(item.get("content"))
+                if content:
+                    messages.append({"role": role, "content": content})
+                continue
+
+            if item.get("type") == "function_call":
+                call_id = item.get("call_id") or item.get("id")
+                name = item.get("name")
+                arguments = item.get("arguments", "{}")
+                if isinstance(arguments, (dict, list)):
+                    arguments = json.dumps(arguments, ensure_ascii=False)
+                if call_id and name:
+                    call_id_to_name[call_id] = name
+                if name:
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": call_id or f"call_{name}",
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": arguments or "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    )
+                continue
+
+            if item.get("type") == "function_call_output":
+                call_id = item.get("call_id") or item.get("id")
+                output = _function_call_output_to_text(item.get("output", ""))
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": call_id or "",
+                    "content": output,
+                }
+                function_name = call_id_to_name.get(call_id) or _function_name_from_call_id(call_id)
+                if function_name:
+                    tool_message["name"] = function_name
+                messages.append(tool_message)
                 continue
 
             text = _extract_text_from_response_input_item(item)

@@ -115,14 +115,15 @@ def openAI_from_Gemini(response, stream=True):
     }
 
     if response.function_call:
+        formatted_chunk["choices"][0]["finish_reason"] = "tool_calls"
         tool_calls = []
         # 处理函数调用的每一部分
-        for part in response.function_call:
+        for index, part in enumerate(response.function_call):
             function_name = part.get("name")
             # Gemini 的 args 是 dict, OpenAI 需要 string
             function_args_str = json.dumps(part.get("args", {}), ensure_ascii=False)
 
-            tool_call_id = f"call_{function_name}"  # 编码函数名到 ID
+            tool_call_id = f"call_{function_name}__{now_time}_{index}"
             tool_calls.append(
                 {
                     "id": tool_call_id,

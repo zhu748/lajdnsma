@@ -447,21 +447,67 @@ class GeminiClient:
 
         # 转换主要消息
 
+        call_id_to_name = {}
+        for previous_message in messages:
+            if not isinstance(previous_message, dict):
+                continue
+            for tool_call in previous_message.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                function_data = tool_call.get("function", {})
+                if isinstance(function_data, dict) and tool_call.get("id") and function_data.get("name"):
+                    call_id_to_name[tool_call["id"]] = function_data["name"]
+
         for i, message in enumerate(messages):
             role = message.get("role")
             content = message.get("content")
+            if role == "assistant" and message.get("tool_calls"):
+                parts = []
+                for tool_call in message.get("tool_calls") or []:
+                    if not isinstance(tool_call, dict):
+                        continue
+                    function_data = tool_call.get("function", {})
+                    if not isinstance(function_data, dict):
+                        continue
+                    function_name = function_data.get("name")
+                    if not function_name:
+                        continue
+                    arguments = function_data.get("arguments", {})
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments) if arguments else {}
+                        except json.JSONDecodeError:
+                            arguments = {"raw_arguments": arguments}
+                    parts.append(
+                        {
+                            "functionCall": {
+                                "name": function_name,
+                                "args": arguments if isinstance(arguments, dict) else {},
+                            }
+                        }
+                    )
+
+                if parts:
+                    if gemini_history and gemini_history[-1]["role"] == "model":
+                        gemini_history[-1]["parts"].extend(parts)
+                    else:
+                        gemini_history.append({"role": "model", "parts": parts})
+                    continue
+
             if isinstance(content, str):
                 if role == "tool":
                     role_to_use = "function"
                     tool_call_id = message.get("tool_call_id")
 
                     prefix = "call_"
-                    if tool_call_id.startswith(prefix):
-                        # 假设 tool_call_id = f"call_{function_name}" (response.py中的处理)
-                        function_name = tool_call_id[len(prefix) :]
+                    function_name = message.get("name") or call_id_to_name.get(tool_call_id)
+                    if function_name:
+                        pass
+                    elif isinstance(tool_call_id, str) and tool_call_id.startswith(prefix):
+                        # ?? tool_call_id = f"call_{function_name}" (response.py????)
+                        function_name = tool_call_id[len(prefix) :].split("__", 1)[0]
                     else:
                         continue
-
                     function_response_part = {
                         "functionResponse": {
                             "name": function_name,

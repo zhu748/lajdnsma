@@ -44,11 +44,11 @@ async def openai_stream_to_responses_stream(
         }
     )
 
-    output_index = 0
     content_index = 0
-    text_started = False
+    text_output_index = None
     output_text_parts: List[str] = []
     output_items: List[Dict[str, Any]] = []
+    active_tool_calls: Dict[int, Dict[str, Any]] = {}
     latest_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
     def build_message_item(status: str = "in_progress") -> Dict[str, Any]:
@@ -87,14 +87,15 @@ async def openai_stream_to_responses_stream(
         delta = choice.get("delta", {})
         text = delta.get("content")
         if text:
-            if not text_started:
-                text_started = True
+            if text_output_index is None:
+                text_output_index = len(output_items)
+                output_items.append(build_message_item())
                 yield _sse_data(
                     {
                         "type": "response.output_item.added",
                         "response_id": response_id,
-                        "output_index": output_index,
-                        "item": build_message_item(),
+                        "output_index": text_output_index,
+                        "item": output_items[text_output_index],
                     }
                 )
                 yield _sse_data(
@@ -102,7 +103,7 @@ async def openai_stream_to_responses_stream(
                         "type": "response.content_part.added",
                         "response_id": response_id,
                         "item_id": message_item_id,
-                        "output_index": output_index,
+                        "output_index": text_output_index,
                         "content_index": content_index,
                         "part": {
                             "type": "output_text",
@@ -112,12 +113,13 @@ async def openai_stream_to_responses_stream(
                     }
                 )
             output_text_parts.append(text)
+            output_items[text_output_index] = build_message_item()
             yield _sse_data(
                 {
                     "type": "response.output_text.delta",
                     "response_id": response_id,
                     "item_id": message_item_id,
-                    "output_index": output_index,
+                    "output_index": text_output_index,
                     "content_index": content_index,
                     "delta": text,
                 }
@@ -126,45 +128,71 @@ async def openai_stream_to_responses_stream(
         for tool_call in _ensure_list(delta.get("tool_calls")):
             if not isinstance(tool_call, dict):
                 continue
-            function_data = tool_call.get("function", {})
-            item = {
-                "id": tool_call.get("id", f"fc_{_now_ts()}"),
-                "type": "function_call",
-                "call_id": tool_call.get("id", f"fc_{_now_ts()}"),
-                "name": function_data.get("name"),
-                "arguments": function_data.get("arguments", "{}"),
-                "status": "completed",
-            }
-            output_items.append(item)
-            yield _sse_data(
-                {
-                    "type": "response.output_item.added",
-                    "response_id": response_id,
-                    "output_index": len(output_items) - 1,
-                    "item": item,
+            tool_index = int(tool_call.get("index", len(active_tool_calls)) or 0)
+            function_data = tool_call.get("function", {}) or {}
+            state = active_tool_calls.get(tool_index)
+            if state is None:
+                call_id = tool_call.get("id") or f"fc_{created_at}_{tool_index}"
+                item = {
+                    "id": call_id,
+                    "type": "function_call",
+                    "call_id": call_id,
+                    "name": function_data.get("name"),
+                    "arguments": "",
+                    "status": "in_progress",
                 }
-            )
-            yield _sse_data(
-                {
-                    "type": "response.output_item.done",
-                    "response_id": response_id,
-                    "output_index": len(output_items) - 1,
+                state = {
+                    "output_index": len(output_items),
                     "item": item,
+                    "arguments_parts": [],
+                    "done": False,
                 }
-            )
+                active_tool_calls[tool_index] = state
+                output_items.append(item)
+                yield _sse_data(
+                    {
+                        "type": "response.output_item.added",
+                        "response_id": response_id,
+                        "output_index": state["output_index"],
+                        "item": item,
+                    }
+                )
+
+            item = state["item"]
+            if tool_call.get("id"):
+                item["id"] = tool_call["id"]
+                item["call_id"] = tool_call["id"]
+            if function_data.get("name"):
+                item["name"] = function_data["name"]
+
+            arguments_delta = function_data.get("arguments")
+            if arguments_delta:
+                state["arguments_parts"].append(arguments_delta)
+                item["arguments"] = "".join(state["arguments_parts"])
+                output_items[state["output_index"]] = item
+                yield _sse_data(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        "response_id": response_id,
+                        "item_id": item["id"],
+                        "output_index": state["output_index"],
+                        "delta": arguments_delta,
+                    }
+                )
 
         usage = parsed.get("usage", {})
         latest_usage = _merge_stream_usage(latest_usage, usage)
 
         if choice.get("finish_reason"):
-            if not text_started and not output_items:
-                text_started = True
+            if text_output_index is None and not output_items:
+                text_output_index = len(output_items)
+                output_items.append(build_message_item())
                 yield _sse_data(
                     {
                         "type": "response.output_item.added",
                         "response_id": response_id,
-                        "output_index": output_index,
-                        "item": build_message_item(),
+                        "output_index": text_output_index,
+                        "item": output_items[text_output_index],
                     }
                 )
                 yield _sse_data(
@@ -172,7 +200,7 @@ async def openai_stream_to_responses_stream(
                         "type": "response.content_part.added",
                         "response_id": response_id,
                         "item_id": message_item_id,
-                        "output_index": output_index,
+                        "output_index": text_output_index,
                         "content_index": content_index,
                         "part": {
                             "type": "output_text",
@@ -181,14 +209,15 @@ async def openai_stream_to_responses_stream(
                         },
                     }
                 )
-            if text_started:
+
+            if text_output_index is not None:
                 done_text = "".join(output_text_parts)
                 yield _sse_data(
                     {
                         "type": "response.output_text.done",
                         "response_id": response_id,
                         "item_id": message_item_id,
-                        "output_index": output_index,
+                        "output_index": text_output_index,
                         "content_index": content_index,
                         "text": done_text,
                     }
@@ -203,21 +232,48 @@ async def openai_stream_to_responses_stream(
                         "type": "response.content_part.done",
                         "response_id": response_id,
                         "item_id": message_item_id,
-                        "output_index": output_index,
+                        "output_index": text_output_index,
                         "content_index": content_index,
                         "part": done_part,
                     }
                 )
                 done_item = build_message_item(status="completed")
-                output_items.insert(0, done_item)
+                output_items[text_output_index] = done_item
                 yield _sse_data(
                     {
                         "type": "response.output_item.done",
                         "response_id": response_id,
-                        "output_index": output_index,
+                        "output_index": text_output_index,
                         "item": done_item,
                     }
                 )
+
+            for state in active_tool_calls.values():
+                if state.get("done"):
+                    continue
+                item = state["item"]
+                item["arguments"] = "".join(state["arguments_parts"])
+                yield _sse_data(
+                    {
+                        "type": "response.function_call_arguments.done",
+                        "response_id": response_id,
+                        "item_id": item["id"],
+                        "output_index": state["output_index"],
+                        "arguments": item["arguments"],
+                    }
+                )
+                item["status"] = "completed"
+                output_items[state["output_index"]] = item
+                state["done"] = True
+                yield _sse_data(
+                    {
+                        "type": "response.output_item.done",
+                        "response_id": response_id,
+                        "output_index": state["output_index"],
+                        "item": item,
+                    }
+                )
+
             yield _sse_data(
                 {
                     "type": "response.completed",
