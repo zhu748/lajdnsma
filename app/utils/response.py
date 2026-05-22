@@ -124,16 +124,17 @@ def openAI_from_Gemini(response, stream=True):
             function_args_str = json.dumps(part.get("args", {}), ensure_ascii=False)
 
             tool_call_id = f"call_{function_name}__{now_time}_{index}"
-            tool_calls.append(
-                {
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": function_name,
-                        "arguments": function_args_str,
-                    },
-                }
-            )
+            tool_call = {
+                "id": tool_call_id,
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                    "arguments": function_args_str,
+                },
+            }
+            if part.get("extra_content"):
+                tool_call["extra_content"] = part["extra_content"]
+            tool_calls.append(tool_call)
 
         content_chunk = {
             "role": "assistant",

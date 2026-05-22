@@ -348,6 +348,32 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[0]["content"], "我来查看当前目录。")
         self.assertEqual(request.messages[0]["tool_calls"][0]["id"], "toolu_1")
 
+    def test_claude_request_preserves_tool_use_thought_signature(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "Bash",
+                                "input": {"command": "pwd"},
+                                "thought_signature": "real-signature",
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            request.messages[0]["tool_calls"][0]["extra_content"],
+            {"google": {"thought_signature": "real-signature"}},
+        )
+
     def test_claude_tool_choice_any_forces_any_tool(self):
         request = claude_request_to_chat_request(
             {
@@ -503,6 +529,43 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["content"][0]["type"], "thinking")
         self.assertEqual(response["content"][0]["thinking"], "先思考")
         self.assertEqual(response["content"][1]["text"], "答案")
+
+    def test_openai_chat_to_claude_response_preserves_tool_thought_signature(self):
+        response = openai_chat_to_claude_response(
+            {
+                "id": "chatcmpl_1",
+                "created": 1,
+                "model": "gemini-2.5-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "tool_calls",
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "toolu_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "Bash",
+                                        "arguments": "{\"command\":\"pwd\"}",
+                                    },
+                                    "extra_content": {
+                                        "google": {
+                                            "thought_signature": "real-signature"
+                                        }
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        )
+
+        self.assertEqual(response["content"][0]["type"], "tool_use")
+        self.assertEqual(response["content"][0]["thought_signature"], "real-signature")
 
     async def test_openai_stream_to_responses_stream(self):
         chunks = [

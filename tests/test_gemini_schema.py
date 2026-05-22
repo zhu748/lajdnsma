@@ -148,7 +148,80 @@ class GeminiSchemaTestCase(unittest.TestCase):
         self.assertEqual(history[0]["parts"][0], {"text": "我来查看当前目录。"})
         self.assertEqual(
             history[0]["parts"][1],
-            {"functionCall": {"name": "Bash", "args": {"command": "pwd"}}},
+            {
+                "functionCall": {"name": "Bash", "args": {"command": "pwd"}},
+                "thoughtSignature": "skip_thought_signature_validator",
+            },
+        )
+
+    def test_convert_messages_preserves_tool_call_thought_signature(self):
+        module = load_gemini_module()
+        client = module.GeminiClient("test-key")
+
+        history, _ = client.convert_messages(
+            [
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "toolu_1",
+                            "type": "function",
+                            "function": {
+                                "name": "Bash",
+                                "arguments": "{\"command\":\"pwd\"}",
+                            },
+                            "extra_content": {
+                                "google": {"thought_signature": "real-signature"}
+                            },
+                        }
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(
+            history[0]["parts"][0],
+            {
+                "functionCall": {"name": "Bash", "args": {"command": "pwd"}},
+                "thoughtSignature": "real-signature",
+            },
+        )
+
+    def test_gemini_response_extracts_function_call_thought_signature(self):
+        module = load_gemini_module()
+
+        response = module.GeminiResponseWrapper(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "functionCall": {
+                                        "name": "Bash",
+                                        "args": {"command": "pwd"},
+                                    },
+                                    "thoughtSignature": "real-signature",
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            response.function_call,
+            [
+                {
+                    "name": "Bash",
+                    "args": {"command": "pwd"},
+                    "extra_content": {
+                        "google": {"thought_signature": "real-signature"}
+                    },
+                }
+            ],
         )
 
 

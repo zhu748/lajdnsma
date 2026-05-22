@@ -12,6 +12,9 @@ from app.utils.logging import log
 from app.utils.sse import iter_sse_json
 
 
+GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+
+
 def generate_secure_random_string(length):
     all_characters = string.ascii_letters + string.digits
     secure_random_string = "".join(
@@ -136,12 +139,19 @@ class GeminiResponseWrapper:
                 .get("content", {})
                 .get("parts", [])
             )
-            # 使用列表推导式查找所有包含 'functionCall' 的 part，并提取其值
-            function_calls = [
-                part["functionCall"]
-                for part in parts
-                if isinstance(part, dict) and "functionCall" in part
-            ]
+            function_calls = []
+            for part in parts:
+                if not isinstance(part, dict) or "functionCall" not in part:
+                    continue
+                function_call = dict(part["functionCall"])
+                thought_signature = part.get("thoughtSignature") or part.get(
+                    "thought_signature"
+                )
+                if thought_signature:
+                    function_call["extra_content"] = {
+                        "google": {"thought_signature": thought_signature}
+                    }
+                function_calls.append(function_call)
             # 如果列表不为空，则返回列表；否则返回 None
             return function_calls if function_calls else None
         except (KeyError, IndexError, TypeError):
@@ -517,14 +527,23 @@ class GeminiClient:
                             arguments = json.loads(arguments) if arguments else {}
                         except json.JSONDecodeError:
                             arguments = {"raw_arguments": arguments}
-                    parts.append(
-                        {
-                            "functionCall": {
-                                "name": function_name,
-                                "args": arguments if isinstance(arguments, dict) else {},
-                            }
+                    function_call_part = {
+                        "functionCall": {
+                            "name": function_name,
+                            "args": arguments if isinstance(arguments, dict) else {},
                         }
+                    }
+                    extra_content = tool_call.get("extra_content") or {}
+                    google_extra = extra_content.get("google", {})
+                    thought_signature = (
+                        google_extra.get("thought_signature")
+                        or google_extra.get("thoughtSignature")
+                        or tool_call.get("thought_signature")
+                        or tool_call.get("thoughtSignature")
+                        or GEMINI_DUMMY_THOUGHT_SIGNATURE
                     )
+                    function_call_part["thoughtSignature"] = thought_signature
+                    parts.append(function_call_part)
 
                 if parts:
                     if gemini_history and gemini_history[-1]["role"] == "model":

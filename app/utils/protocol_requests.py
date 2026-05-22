@@ -369,16 +369,23 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                     tool_input = item.get("input", {})
                     if tool_name:
                         tool_use_id_to_name[tool_id] = tool_name
-                        tool_calls.append(
-                            {
-                                "id": tool_id,
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": json.dumps(tool_input, ensure_ascii=False),
-                                },
-                            }
+                        tool_call = {
+                            "id": tool_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps(tool_input, ensure_ascii=False),
+                            },
+                        }
+                        thought_signature = (
+                            item.get("thought_signature")
+                            or item.get("thoughtSignature")
                         )
+                        if thought_signature:
+                            tool_call["extra_content"] = {
+                                "google": {"thought_signature": thought_signature}
+                            }
+                        tool_calls.append(tool_call)
                 elif item_type == "tool_result":
                     append_content_message()
                     messages.append(build_tool_result_message(item))

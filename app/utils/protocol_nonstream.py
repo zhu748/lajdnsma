@@ -105,6 +105,13 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
                 "input": tool_input,
             }
         )
+        extra_content = tool_call.get("extra_content") or {}
+        google_extra = extra_content.get("google", {})
+        thought_signature = google_extra.get("thought_signature") or google_extra.get(
+            "thoughtSignature"
+        )
+        if thought_signature:
+            content[-1]["thought_signature"] = thought_signature
 
     finish_reason = choice.get("finish_reason")
     stop_reason = "end_turn"
