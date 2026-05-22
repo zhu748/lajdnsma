@@ -20,6 +20,49 @@ def generate_secure_random_string(length):
     return secure_random_string
 
 
+def sanitize_gemini_schema(schema):
+    """Remove JSON Schema fields that Gemini function declarations reject."""
+    if isinstance(schema, dict):
+        return {
+            key: sanitize_gemini_schema(value)
+            for key, value in schema.items()
+            if key not in {"$schema", "additionalProperties"}
+        }
+    if isinstance(schema, list):
+        return [sanitize_gemini_schema(item) for item in schema]
+    return schema
+
+
+def sanitize_gemini_payload(data):
+    """Normalize pass-through Gemini payloads produced from OpenAI-compatible clients."""
+    if not isinstance(data, dict):
+        return data
+
+    for content in data.get("contents") or []:
+        if not isinstance(content, dict):
+            continue
+        role = content.get("role")
+        if role in {"developer", "system"}:
+            content["role"] = "user"
+        elif role == "assistant":
+            content["role"] = "model"
+
+    system_instruction = data.get("system_instruction") or data.get("systemInstruction")
+    if isinstance(system_instruction, dict):
+        system_instruction.pop("role", None)
+
+    for tool in data.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        for declaration in tool.get("function_declarations") or tool.get("functionDeclarations") or []:
+            if isinstance(declaration, dict) and "parameters" in declaration:
+                declaration["parameters"] = sanitize_gemini_schema(
+                    declaration["parameters"]
+                )
+
+    return data
+
+
 @dataclass
 class GeneratedText:
     text: str
@@ -192,6 +235,8 @@ class GeminiClient:
                 request, contents, safety_settings, system_instruction
             )
 
+        data = sanitize_gemini_payload(data)
+
         # 联网模式
         if settings.search["search_mode"] and request.model.endswith("-search"):
             log(
@@ -261,10 +306,7 @@ class GeminiClient:
                             "description": func_def.get("description"),
                         }
                         # 获取 parameters 并移除可能存在的 $schema 字段
-                        parameters = func_def.get("parameters")
-                        if isinstance(parameters, dict) and "$schema" in parameters:
-                            parameters = parameters.copy()
-                            del parameters["$schema"]
+                        parameters = sanitize_gemini_schema(func_def.get("parameters"))
                         if parameters is not None:
                             declaration["parameters"] = parameters
 
@@ -432,7 +474,7 @@ class GeminiClient:
                     )
 
                     continue
-                elif role in ["user", "system"]:
+                elif role in ["user", "system", "developer"]:
                     role_to_use = "user"
                 elif role == "assistant":
                     role_to_use = "model"
@@ -478,7 +520,7 @@ class GeminiClient:
                             errors.append(f"Invalid image URL format for item: {item}")
 
                 if parts:
-                    if role in ["user", "system"]:
+                    if role in ["user", "system", "developer"]:
                         role_to_use = "user"
                     elif role == "assistant":
                         role_to_use = "model"

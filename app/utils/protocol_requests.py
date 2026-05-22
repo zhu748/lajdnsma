@@ -30,6 +30,15 @@ def _response_tools_to_openai_tools(tools: Any) -> Optional[List[Dict[str, Any]]
     return openai_tools or None
 
 
+def _normalize_openai_role(role: Any) -> str:
+    """Normalize newer OpenAI roles to chat-completions compatible roles."""
+    if role in {"developer", "system"}:
+        return "system"
+    if role in {"assistant", "tool"}:
+        return role
+    return "user"
+
+
 def _response_tool_choice_to_openai(choice: Any) -> Any:
     if not isinstance(choice, dict):
         return choice or "auto"
@@ -92,7 +101,7 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
                 continue
 
             if item.get("type") == "message":
-                role = item.get("role", "user")
+                role = _normalize_openai_role(item.get("role", "user"))
                 content_items = _ensure_list(item.get("content"))
                 text_parts = []
                 for content_item in content_items:
@@ -236,4 +245,3 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
         tools=openai_tools or None,
         tool_choice=mapped_tool_choice,
     )
-
