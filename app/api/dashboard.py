@@ -36,16 +36,16 @@ credential_manager = None  # 添加全局credential_manager变量
 # 用于存储API密钥检测的进度信息
 
 
-def _validate_responses_model_mapping(default_model, aliases):
+def _validate_model_mapping(default_model, aliases, label="Model"):
     if not isinstance(default_model, str):
-        raise HTTPException(status_code=422, detail="Responses default model must be a string")
+        raise HTTPException(status_code=422, detail=f"{label} default model must be a string")
 
     default_model = default_model.strip()
     if default_model and default_model not in GeminiClient.AVAILABLE_MODELS:
-        raise HTTPException(status_code=422, detail="Responses default model is not in available models")
+        raise HTTPException(status_code=422, detail=f"{label} default model is not in available models")
 
     if not isinstance(aliases, dict):
-        raise HTTPException(status_code=422, detail="Responses model aliases must be an object")
+        raise HTTPException(status_code=422, detail=f"{label} model aliases must be an object")
 
     cleaned_aliases = {}
     for alias, target in aliases.items():
@@ -65,6 +65,14 @@ def _validate_responses_model_mapping(default_model, aliases):
         cleaned_aliases[alias_name] = target_model
 
     return default_model, cleaned_aliases
+
+
+def _validate_responses_model_mapping(default_model, aliases):
+    return _validate_model_mapping(default_model, aliases, "Responses")
+
+
+def _validate_claude_model_mapping(default_model, aliases):
+    return _validate_model_mapping(default_model, aliases, "Claude")
 
 api_key_test_progress = {
     "is_running": False,
@@ -193,6 +201,8 @@ async def get_dashboard_data():
         "available_models": GeminiClient.AVAILABLE_MODELS,  # 添加可用模型列表
         "responses_default_model": settings.RESPONSES_DEFAULT_MODEL,
         "responses_model_aliases": settings.RESPONSES_MODEL_ALIASES,
+        "claude_default_model": settings.CLAUDE_DEFAULT_MODEL,
+        "claude_model_aliases": settings.CLAUDE_MODEL_ALIASES,
         "retry_count": settings.MAX_RETRY_NUM,
         "credentials_count": credentials_count,  # 添加凭证数量
         "last_24h_calls": last_24h_calls,
@@ -740,6 +750,20 @@ async def update_config(config_data: dict):
             settings.RESPONSES_MODEL_ALIASES = aliases
             log("info", f"Responses model aliases updated, count: {len(aliases)}")
 
+        elif config_key == "claude_default_model":
+            value, _ = _validate_claude_model_mapping(
+                config_value, settings.CLAUDE_MODEL_ALIASES
+            )
+            settings.CLAUDE_DEFAULT_MODEL = value
+            log("info", f"Claude default model updated to: {value or 'auto'}")
+
+        elif config_key == "claude_model_aliases":
+            _, aliases = _validate_claude_model_mapping(
+                settings.CLAUDE_DEFAULT_MODEL, config_value
+            )
+            settings.CLAUDE_MODEL_ALIASES = aliases
+            log("info", f"Claude model aliases updated, count: {len(aliases)}")
+
         else:
             raise HTTPException(status_code=400, detail=f"不支持的配置项：{config_key}")
         save_settings()
@@ -781,6 +805,44 @@ async def update_responses_model_mapping(config_data: dict):
             "message": "Responses model mapping updated",
             "responses_default_model": default_model,
             "responses_model_aliases": aliases,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
+
+
+@dashboard_router.post("/update-claude-model-mapping")
+async def update_claude_model_mapping(config_data: dict):
+    """Atomically update Claude default model and custom model aliases."""
+    try:
+        if not isinstance(config_data, dict):
+            raise HTTPException(status_code=422, detail="Request body must be a JSON object")
+
+        password = config_data.get("password")
+        if not password:
+            raise HTTPException(status_code=400, detail="Missing password")
+        if not isinstance(password, str):
+            raise HTTPException(status_code=422, detail="Password must be a string")
+        if not verify_web_password(password):
+            raise HTTPException(status_code=401, detail="Invalid password")
+
+        default_model, aliases = _validate_claude_model_mapping(
+            config_data.get("default_model", ""),
+            config_data.get("aliases", {}),
+        )
+        settings.CLAUDE_DEFAULT_MODEL = default_model
+        settings.CLAUDE_MODEL_ALIASES = aliases
+        save_settings()
+        log(
+            "info",
+            f"Claude model mapping updated: default={default_model or 'auto'}, aliases={len(aliases)}",
+        )
+        return {
+            "status": "success",
+            "message": "Claude model mapping updated",
+            "claude_default_model": default_model,
+            "claude_model_aliases": aliases,
         }
     except HTTPException:
         raise

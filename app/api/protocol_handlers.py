@@ -14,6 +14,24 @@ from app.utils.protocol_adapters import (
 )
 
 
+def _select_alias_model(model: str, aliases) -> str:
+    if not isinstance(aliases, dict):
+        return ""
+    exact_match = aliases.get(model, "")
+    if exact_match:
+        return exact_match
+    for alias_pattern, target_model in aliases.items():
+        if "*" in alias_pattern and fnmatchcase(model, alias_pattern):
+            return target_model
+    return ""
+
+
+def anthropic_error_response(
+    message: str, error_type: str = "invalid_request_error"
+) -> dict:
+    return {"type": "error", "error": {"type": error_type, "message": message}}
+
+
 def _resolve_claude_model_alias(request):
     """Map Claude model IDs to an available Gemini model for Anthropic clients."""
     try:
@@ -26,7 +44,14 @@ def _resolve_claude_model_alias(request):
     if request.model in GeminiClient.AVAILABLE_MODELS:
         return
 
-    fallback_model = settings.CLAUDE_DEFAULT_MODEL
+    fallback_model = _select_alias_model(
+        request.model, getattr(settings, "CLAUDE_MODEL_ALIASES", {}) or {}
+    )
+    if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
+        fallback_model = ""
+
+    if not fallback_model:
+        fallback_model = settings.CLAUDE_DEFAULT_MODEL
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 
@@ -61,14 +86,7 @@ def _resolve_responses_model_alias(request):
         return
 
     aliases = getattr(settings, "RESPONSES_MODEL_ALIASES", {}) or {}
-    fallback_model = ""
-    if isinstance(aliases, dict):
-        fallback_model = aliases.get(request.model, "")
-        if not fallback_model:
-            for alias_pattern, target_model in aliases.items():
-                if "*" in alias_pattern and fnmatchcase(request.model, alias_pattern):
-                    fallback_model = target_model
-                    break
+    fallback_model = _select_alias_model(request.model, aliases)
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 
@@ -120,7 +138,13 @@ async def handle_responses_request(payload: dict, http_request, auth_dep, user_a
 async def handle_claude_messages_request(payload: dict, http_request, auth_dep, user_agent_dep, chat_handler):
     normalized_request = claude_request_to_chat_request(payload)
     _resolve_claude_model_alias(normalized_request)
-    response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
+    try:
+        response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
+    except HTTPException as exc:
+        return JSONResponse(
+            anthropic_error_response(str(exc.detail)),
+            status_code=exc.status_code,
+        )
 
     if isinstance(response, StreamingResponse):
         return StreamingResponse(

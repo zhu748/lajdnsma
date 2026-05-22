@@ -124,6 +124,12 @@ WHITELIST_MODELS = {
 # Claude/Anthropic 兼容模式下，如果客户端传入 claude-* 模型名，可映射到该 Gemini 模型。
 # 为空时自动选择当前可用模型列表中的第一个模型。
 CLAUDE_DEFAULT_MODEL = os.environ.get("CLAUDE_DEFAULT_MODEL", "").strip()
+try:
+    CLAUDE_MODEL_ALIASES = json.loads(os.environ.get("CLAUDE_MODEL_ALIASES", "{}"))
+    if not isinstance(CLAUDE_MODEL_ALIASES, dict):
+        CLAUDE_MODEL_ALIASES = {}
+except json.JSONDecodeError:
+    CLAUDE_MODEL_ALIASES = {}
 
 # OpenAI Responses/Codex 兼容模式下，如果客户端传入 gpt-/o*/codex-* 等模型名，可映射到该 Gemini 模型。
 # 为空时自动选择当前可用模型列表中的第一个模型。

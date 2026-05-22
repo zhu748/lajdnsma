@@ -212,6 +212,59 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         module._resolve_responses_model_alias(request)
         self.assertEqual(request.model, "gemini-2.5-pro")
 
+    def test_claude_model_alias_supports_wildcards(self):
+        module = load_protocol_handlers()
+        fake_settings = types.SimpleNamespace(
+            CLAUDE_MODEL_ALIASES={"claude-sonnet-*": "gemini-2.5-flash"},
+            CLAUDE_DEFAULT_MODEL="gemini-2.5-pro",
+            WHITELIST_MODELS=set(),
+        )
+
+        class FakeGeminiClient:
+            AVAILABLE_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash"]
+
+        fake_config = types.ModuleType("app.config")
+        fake_services = types.ModuleType("app.services")
+        fake_logging = types.ModuleType("app.utils.logging")
+        fake_services.GeminiClient = FakeGeminiClient
+        fake_logging.log = lambda *args, **kwargs: None
+        sys.modules["app.config"] = fake_config
+        sys.modules["app.config.settings"] = fake_settings
+        sys.modules["app.services"] = fake_services
+        sys.modules["app.utils.logging"] = fake_logging
+
+        request = types.SimpleNamespace(model="claude-sonnet-4-20250514")
+        module._resolve_claude_model_alias(request)
+        self.assertEqual(request.model, "gemini-2.5-flash")
+
+    def test_claude_model_alias_uses_exact_before_wildcard(self):
+        module = load_protocol_handlers()
+        fake_settings = types.SimpleNamespace(
+            CLAUDE_MODEL_ALIASES={
+                "claude-*": "gemini-2.5-flash",
+                "claude-opus-4-20250514": "gemini-2.5-pro",
+            },
+            CLAUDE_DEFAULT_MODEL="gemini-2.5-flash",
+            WHITELIST_MODELS=set(),
+        )
+
+        class FakeGeminiClient:
+            AVAILABLE_MODELS = ["gemini-2.5-pro", "gemini-2.5-flash"]
+
+        fake_config = types.ModuleType("app.config")
+        fake_services = types.ModuleType("app.services")
+        fake_logging = types.ModuleType("app.utils.logging")
+        fake_services.GeminiClient = FakeGeminiClient
+        fake_logging.log = lambda *args, **kwargs: None
+        sys.modules["app.config"] = fake_config
+        sys.modules["app.config.settings"] = fake_settings
+        sys.modules["app.services"] = fake_services
+        sys.modules["app.utils.logging"] = fake_logging
+
+        request = types.SimpleNamespace(model="claude-opus-4-20250514")
+        module._resolve_claude_model_alias(request)
+        self.assertEqual(request.model, "gemini-2.5-pro")
+
     async def test_handle_responses_request_wraps_http_exception(self):
         module = load_protocol_handlers()
 
@@ -228,6 +281,25 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content["status"], "failed")
+        self.assertIn("bad model", response.content["error"]["message"])
+
+    async def test_handle_claude_request_wraps_http_exception_as_anthropic_error(self):
+        module = load_protocol_handlers()
+
+        async def fake_chat_handler(request, http_request, auth_dep, user_agent_dep):
+            raise module.HTTPException(status_code=400, detail="bad model")
+
+        response = await module.handle_claude_messages_request(
+            {"model": "gemini-2.5-pro"},
+            http_request=None,
+            auth_dep=None,
+            user_agent_dep=None,
+            chat_handler=fake_chat_handler,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content["type"], "error")
+        self.assertEqual(response.content["error"]["type"], "invalid_request_error")
         self.assertIn("bad model", response.content["error"]["message"])
 
     async def test_handle_claude_messages_request_non_stream(self):
