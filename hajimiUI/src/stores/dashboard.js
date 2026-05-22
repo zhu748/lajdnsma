@@ -39,7 +39,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
     searchPrompt: '',
     maxEmptyResponses: 0,
     responsesDefaultModel: '',
-    responsesModelAliases: {}
+    responsesModelAliases: {},
+    claudeDefaultModel: '',
+    claudeModelAliases: {}
   })
 
   const apiKeyStats = ref([])
@@ -141,7 +143,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
       maxRetryNum: data.max_retry_num || 0,
       maxEmptyResponses: data.max_empty_responses || 0,
       responsesDefaultModel: data.responses_default_model || '',
-      responsesModelAliases: data.responses_model_aliases || {}
+      responsesModelAliases: data.responses_model_aliases || {},
+      claudeDefaultModel: data.claude_default_model || '',
+      claudeModelAliases: data.claude_model_aliases || {}
     }
 
     // 更新API密钥统计

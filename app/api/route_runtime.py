@@ -1,3 +1,5 @@
+from fnmatch import fnmatchcase
+
 from fastapi import HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 
@@ -55,7 +57,7 @@ async def verify_user_agent(request: Request):
     if not settings.WHITELIST_USER_AGENT:
         return
     user_agent = request.headers.get("User-Agent", "").lower()
-    if user_agent not in settings.WHITELIST_USER_AGENT:
+    if not any(fnmatchcase(user_agent, pattern) for pattern in settings.WHITELIST_USER_AGENT):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not allowed client",

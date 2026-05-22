@@ -1,6 +1,7 @@
 import json
 from typing import Any, Dict, List
 
+from app.utils.errors import responses_error_response
 from app.utils.protocol_common import _ensure_list, _extract_openai_usage, _now_ts
 
 
@@ -65,24 +66,6 @@ def openai_chat_to_response_api(
         "top_p": request_payload.get("top_p"),
         "truncation": request_payload.get("truncation", "disabled"),
         "usage": usage_counts,
-    }
-
-
-def responses_error_response(message: str, status_code: int = 500, code: str | None = None) -> Dict[str, Any]:
-    now = _now_ts()
-    return {
-        "id": f"resp_error_{now}",
-        "object": "response",
-        "created_at": now,
-        "status": "failed",
-        "error": {
-            "message": message,
-            "type": "gateway_error",
-            "code": code or str(status_code),
-        },
-        "incomplete_details": None,
-        "output": [],
-        "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
     }
 
 

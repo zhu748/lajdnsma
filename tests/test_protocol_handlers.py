@@ -69,9 +69,33 @@ def load_protocol_handlers():
         openai_stream_to_claude_stream
     )
 
+    fake_model_mapping = types.ModuleType("app.utils.model_mapping")
+
+    def select_alias_model(model, aliases):
+        if not isinstance(aliases, dict):
+            return ""
+        if aliases.get(model):
+            return aliases[model]
+        for alias, target in aliases.items():
+            if alias.endswith("*") and model.startswith(alias[:-1]):
+                return target
+        return ""
+
+    fake_model_mapping.select_alias_model = select_alias_model
+
+    fake_errors = types.ModuleType("app.utils.errors")
+    fake_errors.anthropic_error_response = (
+        lambda message, error_type="invalid_request_error": {
+            "type": "error",
+            "error": {"type": error_type, "message": message},
+        }
+    )
+
     sys.modules["fastapi"] = fake_fastapi
     sys.modules["fastapi.responses"] = fake_fastapi_responses
     sys.modules["app.utils.protocol_adapters"] = fake_protocol_adapters
+    sys.modules["app.utils.model_mapping"] = fake_model_mapping
+    sys.modules["app.utils.errors"] = fake_errors
 
     spec = importlib.util.spec_from_file_location(
         "protocol_handlers", ROOT / "app/api/protocol_handlers.py"

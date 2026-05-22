@@ -31,6 +31,7 @@ sys.modules["app.utils.sse"] = fake_sse
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "app" / "utils" / "protocol_adapters.py"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 SPEC = importlib.util.spec_from_file_location("protocol_adapters", MODULE_PATH)
 protocol_adapters = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -177,6 +178,45 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[1]["content"], "讲个笑话")
         self.assertEqual(request.max_tokens, 128)
         self.assertEqual(request.tools[0]["function"]["name"], "weather")
+
+    def test_claude_code_fixture_converts_tool_choice_and_system_array(self):
+        payload = json.loads((FIXTURES_DIR / "claude_code_tool_use.json").read_text(encoding="utf-8"))
+        request = claude_request_to_chat_request(payload)
+
+        self.assertTrue(request.stream)
+        self.assertIn("You are Claude Code.", request.messages[0]["content"])
+        self.assertIn("Prefer concise tool calls.", request.messages[0]["content"])
+        self.assertEqual(
+            request.tool_choice,
+            {"type": "function", "function": {"name": "Bash"}},
+        )
+        self.assertEqual(request.messages[3]["role"], "tool")
+        self.assertEqual(request.messages[3]["name"], "Bash")
+
+    def test_claude_tool_choice_string_is_safe(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tool_choice": "auto",
+            }
+        )
+
+        self.assertEqual(request.tool_choice, "auto")
+
+    def test_responses_codex_fixture_converts_function_history(self):
+        payload = json.loads((FIXTURES_DIR / "codex_responses_function_call.json").read_text(encoding="utf-8"))
+        request = response_request_to_chat_request(payload)
+
+        self.assertTrue(request.stream)
+        self.assertEqual(request.messages[0]["role"], "system")
+        self.assertEqual(request.messages[2]["tool_calls"][0]["function"]["name"], "shell")
+        self.assertEqual(request.messages[3]["role"], "tool")
+        self.assertEqual(request.messages[3]["name"], "shell")
+        self.assertEqual(
+            request.tool_choice,
+            {"type": "function", "function": {"name": "shell"}},
+        )
 
     def test_claude_request_to_chat_request_preserves_tool_use_and_result(self):
         request = claude_request_to_chat_request(

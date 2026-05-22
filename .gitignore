@@ -63,3 +63,5 @@ ipython_config.py
 
 python/
 /hajimi
+.pytest_cache/
+.mypy_cache/

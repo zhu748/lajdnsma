@@ -1,9 +1,14 @@
 """Compatibility exports for protocol adapter helpers."""
 
+from app.utils.errors import (
+    anthropic_error_response,
+    gemini_error_response,
+    openai_error_response,
+    responses_error_response,
+)
 from app.utils.protocol_nonstream import (
     openai_chat_to_claude_response,
     openai_chat_to_response_api,
-    responses_error_response,
 )
 from app.utils.protocol_requests import (
     claude_request_to_chat_request,
@@ -18,8 +23,11 @@ __all__ = [
     "claude_request_to_chat_request",
     "openai_chat_to_claude_response",
     "openai_chat_to_response_api",
+    "openai_error_response",
     "openai_stream_to_claude_stream",
     "openai_stream_to_responses_stream",
     "response_request_to_chat_request",
     "responses_error_response",
+    "anthropic_error_response",
+    "gemini_error_response",
 ]

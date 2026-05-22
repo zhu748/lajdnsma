@@ -1,8 +1,7 @@
-from fnmatch import fnmatchcase
-
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.utils.model_mapping import select_alias_model
 from app.utils.protocol_adapters import (
     claude_request_to_chat_request,
     openai_chat_to_claude_response,
@@ -12,24 +11,7 @@ from app.utils.protocol_adapters import (
     response_request_to_chat_request,
     responses_error_response,
 )
-
-
-def _select_alias_model(model: str, aliases) -> str:
-    if not isinstance(aliases, dict):
-        return ""
-    exact_match = aliases.get(model, "")
-    if exact_match:
-        return exact_match
-    for alias_pattern, target_model in aliases.items():
-        if "*" in alias_pattern and fnmatchcase(model, alias_pattern):
-            return target_model
-    return ""
-
-
-def anthropic_error_response(
-    message: str, error_type: str = "invalid_request_error"
-) -> dict:
-    return {"type": "error", "error": {"type": error_type, "message": message}}
+from app.utils.errors import anthropic_error_response
 
 
 def _resolve_claude_model_alias(request):
@@ -44,7 +26,7 @@ def _resolve_claude_model_alias(request):
     if request.model in GeminiClient.AVAILABLE_MODELS:
         return
 
-    fallback_model = _select_alias_model(
+    fallback_model = select_alias_model(
         request.model, getattr(settings, "CLAUDE_MODEL_ALIASES", {}) or {}
     )
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
@@ -86,7 +68,7 @@ def _resolve_responses_model_alias(request):
         return
 
     aliases = getattr(settings, "RESPONSES_MODEL_ALIASES", {}) or {}
-    fallback_model = _select_alias_model(request.model, aliases)
+    fallback_model = select_alias_model(request.model, aliases)
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 

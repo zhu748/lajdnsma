@@ -248,19 +248,51 @@ def _claude_tool_result_content_to_text(content: Any) -> str:
     return "\n".join(part for part in text_parts if part)
 
 
+def _claude_system_to_text(system_value: Any) -> str:
+    if isinstance(system_value, str):
+        return system_value.strip()
+
+    text_parts = []
+    for item in _ensure_list(system_value):
+        if isinstance(item, str):
+            text_parts.append(item)
+        elif isinstance(item, dict):
+            item_type = item.get("type")
+            if item_type in {None, "text"} and item.get("text"):
+                text_parts.append(item["text"])
+            elif item.get("content"):
+                text_parts.append(str(item["content"]))
+
+    return "\n".join(part.strip() for part in text_parts if part and part.strip())
+
+
+def _claude_tool_choice_to_openai(choice: Any) -> Any:
+    if isinstance(choice, str):
+        return "none" if choice == "none" else "auto"
+
+    if not isinstance(choice, dict):
+        return "auto"
+
+    choice_type = choice.get("type")
+    if choice_type == "none":
+        return "none"
+    if choice_type in {"auto", "any"}:
+        return "auto"
+    if choice_type == "tool":
+        tool_name = choice.get("name")
+        if tool_name:
+            return {"type": "function", "function": {"name": tool_name}}
+
+    return "auto"
+
+
 def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionRequest:
     messages: List[Dict[str, Any]] = []
     tool_use_id_to_name: Dict[str, str] = {}
 
-    system_value = payload.get("system")
-    if isinstance(system_value, str) and system_value:
-        messages.append({"role": "system", "content": system_value})
-    elif isinstance(system_value, list):
-        system_text = "\n".join(
-            item.get("text", "") for item in system_value if isinstance(item, dict)
-        ).strip()
-        if system_text:
-            messages.append({"role": "system", "content": system_text})
+    system_text = _claude_system_to_text(payload.get("system"))
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
 
     for message in _ensure_list(payload.get("messages")):
         if not isinstance(message, dict):
@@ -288,6 +320,16 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                     text = item.get("text", "")
                     if text:
                         content_parts.append({"type": "text", "text": text})
+                elif item_type == "thinking":
+                    thinking = item.get("thinking", "")
+                    if thinking:
+                        content_parts.append({"type": "text", "text": thinking})
+                elif item_type == "redacted_thinking":
+                    redacted = item.get("data") or item.get("text") or ""
+                    if redacted:
+                        content_parts.append(
+                            {"type": "text", "text": f"[redacted_thinking:{redacted}]"}
+                        )
                 elif item_type == "image":
                     image_part = _claude_image_to_openai_image(item)
                     if image_part:
@@ -330,18 +372,7 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
                 messages.append({"role": "assistant", "content": None, "tool_calls": tool_calls})
             messages.extend(tool_result_messages)
 
-    tool_choice = payload.get("tool_choice", {}).get("type")
-    mapped_tool_choice: Any = "auto"
-    if tool_choice == "none":
-        mapped_tool_choice = "none"
-    elif tool_choice == "auto":
-        mapped_tool_choice = "auto"
-    elif tool_choice == "any":
-        mapped_tool_choice = "auto"
-    elif tool_choice == "tool":
-        tool_name = payload.get("tool_choice", {}).get("name")
-        if tool_name:
-            mapped_tool_choice = {"type": "function", "function": {"name": tool_name}}
+    mapped_tool_choice = _claude_tool_choice_to_openai(payload.get("tool_choice"))
 
     openai_tools = []
     for tool in _ensure_list(payload.get("tools")):
