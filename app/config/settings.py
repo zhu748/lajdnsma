@@ -2,6 +2,7 @@ import os
 import pathlib
 import logging
 import asyncio
+import json
 
 # ---------- 以下是基础配置信息 ----------
 
@@ -127,6 +128,12 @@ CLAUDE_DEFAULT_MODEL = os.environ.get("CLAUDE_DEFAULT_MODEL", "").strip()
 # OpenAI Responses/Codex 兼容模式下，如果客户端传入 gpt-/o*/codex-* 等模型名，可映射到该 Gemini 模型。
 # 为空时自动选择当前可用模型列表中的第一个模型。
 RESPONSES_DEFAULT_MODEL = os.environ.get("RESPONSES_DEFAULT_MODEL", "").strip()
+try:
+    RESPONSES_MODEL_ALIASES = json.loads(os.environ.get("RESPONSES_MODEL_ALIASES", "{}"))
+    if not isinstance(RESPONSES_MODEL_ALIASES, dict):
+        RESPONSES_MODEL_ALIASES = {}
+except json.JSONDecodeError:
+    RESPONSES_MODEL_ALIASES = {}
 RESPONSES_STATELESS_COMPAT = os.environ.get(
     "RESPONSES_STATELESS_COMPAT", "true"
 ).lower() in ["true", "1", "yes"]

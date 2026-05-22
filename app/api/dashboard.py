@@ -159,6 +159,8 @@ async def get_dashboard_data():
         "key_count": len(key_manager.api_keys),
         "model_count": len(GeminiClient.AVAILABLE_MODELS),
         "available_models": GeminiClient.AVAILABLE_MODELS,  # 添加可用模型列表
+        "responses_default_model": settings.RESPONSES_DEFAULT_MODEL,
+        "responses_model_aliases": settings.RESPONSES_MODEL_ALIASES,
         "retry_count": settings.MAX_RETRY_NUM,
         "credentials_count": credentials_count,  # 添加凭证数量
         "last_24h_calls": last_24h_calls,
@@ -691,6 +693,33 @@ async def update_config(config_data: dict):
                 log("info", f"空响应重试次数已更新为：{value}")
             except ValueError as e:
                 raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+
+        elif config_key == "responses_default_model":
+            if not isinstance(config_value, str):
+                raise HTTPException(status_code=422, detail="Responses default model must be a string")
+            value = config_value.strip()
+            if value and value not in GeminiClient.AVAILABLE_MODELS:
+                raise HTTPException(status_code=422, detail="Responses default model is not in available models")
+            settings.RESPONSES_DEFAULT_MODEL = value
+            log("info", f"Responses default model updated to: {value or 'auto'}")
+
+        elif config_key == "responses_model_aliases":
+            if not isinstance(config_value, dict):
+                raise HTTPException(status_code=422, detail="Responses model aliases must be an object")
+            aliases = {}
+            for alias, target in config_value.items():
+                alias_name = str(alias).strip()
+                target_model = str(target).strip()
+                if not alias_name or not target_model:
+                    continue
+                if target_model not in GeminiClient.AVAILABLE_MODELS:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"Alias {alias_name} target model is not in available models",
+                    )
+                aliases[alias_name] = target_model
+            settings.RESPONSES_MODEL_ALIASES = aliases
+            log("info", f"Responses model aliases updated, count: {len(aliases)}")
 
         else:
             raise HTTPException(status_code=400, detail=f"不支持的配置项：{config_key}")

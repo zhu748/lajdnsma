@@ -58,7 +58,13 @@ def _resolve_responses_model_alias(request):
     if request.model in GeminiClient.AVAILABLE_MODELS:
         return
 
-    fallback_model = settings.RESPONSES_DEFAULT_MODEL
+    aliases = getattr(settings, "RESPONSES_MODEL_ALIASES", {}) or {}
+    fallback_model = aliases.get(request.model) if isinstance(aliases, dict) else ""
+    if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
+        fallback_model = ""
+
+    if not fallback_model:
+        fallback_model = settings.RESPONSES_DEFAULT_MODEL
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 
