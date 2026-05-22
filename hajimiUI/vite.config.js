@@ -26,6 +26,7 @@ export default defineConfig({
     outDir: resolve(__dirname, '../app/templates/assets'),
     // 不生成 HTML 文件，我们将在 build.js 中手动创建
     emptyOutDir: true,
+    chunkSizeWarningLimit: 1200,
     // 禁用自动添加哈希值到文件名
     rollupOptions: {
       output: {

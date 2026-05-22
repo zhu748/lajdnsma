@@ -1,10 +1,10 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
-import { ref, reactive, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
+import ModelMappingPanel from './ModelMappingPanel.vue'
 
 const dashboardStore = useDashboardStore()
 
-// Initialize localConfig with default structure
 const localConfig = reactive({
   searchMode: false,
   searchPrompt: '',
@@ -13,126 +13,86 @@ const localConfig = reactive({
   fakeStreamingInterval: 0,
   randomString: false,
   randomStringLength: 0,
-  concurrentRequests: 1, // Default to 1 or a sensible minimum
+  concurrentRequests: 1,
   increaseConcurrentOnFailure: 0,
-  maxConcurrentRequests: 1, // Default to 1 or a sensible minimum
+  maxConcurrentRequests: 1,
   maxEmptyResponses: 0,
   responsesDefaultModel: '',
-  responsesModelAliases: []
+  responsesModelAliases: [],
+  claudeDefaultModel: '',
+  claudeModelAliases: []
 })
 
-const populatedFromStore = ref(false);
+const populatedFromStore = ref(false)
 
-// Watch for store changes to populate localConfig ONCE when config is loaded
+function aliasesToRows(aliases) {
+  return Object.entries(aliases || {}).map(([alias, model]) => ({ alias, model }))
+}
+
 watch(
   () => ({
-    storeSearchMode: dashboardStore.config.searchMode,
-    storeSearchPrompt: dashboardStore.config.searchPrompt,
-    storeMaxRetryNum: dashboardStore.config.maxRetryNum,
-    storeFakeStreaming: dashboardStore.config.fakeStreaming,
-    storeFakeStreamingInterval: dashboardStore.config.fakeStreamingInterval,
-    storeRandomString: dashboardStore.config.randomString,
-    storeRandomStringLength: dashboardStore.config.randomStringLength,
-    storeConcurrentRequests: dashboardStore.config.concurrentRequests,
-    storeIncreaseConcurrentOnFailure: dashboardStore.config.increaseConcurrentOnFailure,
-    storeMaxConcurrentRequests: dashboardStore.config.maxConcurrentRequests,
-    storeMaxEmptyResponses: dashboardStore.config.maxEmptyResponses,
-    storeResponsesDefaultModel: dashboardStore.config.responsesDefaultModel,
-    storeResponsesModelAliases: dashboardStore.config.responsesModelAliases,
-    configIsActuallyLoaded: dashboardStore.isConfigLoaded, // 观察加载状�?
+    searchMode: dashboardStore.config.searchMode,
+    searchPrompt: dashboardStore.config.searchPrompt,
+    maxRetryNum: dashboardStore.config.maxRetryNum,
+    fakeStreaming: dashboardStore.config.fakeStreaming,
+    fakeStreamingInterval: dashboardStore.config.fakeStreamingInterval,
+    randomString: dashboardStore.config.randomString,
+    randomStringLength: dashboardStore.config.randomStringLength,
+    concurrentRequests: dashboardStore.config.concurrentRequests,
+    increaseConcurrentOnFailure: dashboardStore.config.increaseConcurrentOnFailure,
+    maxConcurrentRequests: dashboardStore.config.maxConcurrentRequests,
+    maxEmptyResponses: dashboardStore.config.maxEmptyResponses,
+    responsesDefaultModel: dashboardStore.config.responsesDefaultModel,
+    responsesModelAliases: dashboardStore.config.responsesModelAliases,
+    claudeDefaultModel: dashboardStore.config.claudeDefaultModel,
+    claudeModelAliases: dashboardStore.config.claudeModelAliases,
+    isLoaded: dashboardStore.isConfigLoaded
   }),
-  (newValues) => {
-    if (newValues.configIsActuallyLoaded && !populatedFromStore.value) {
-      localConfig.searchMode = newValues.storeSearchMode;
-      localConfig.searchPrompt = newValues.storeSearchPrompt;
-      localConfig.maxRetryNum = newValues.storeMaxRetryNum;
-      localConfig.fakeStreaming = newValues.storeFakeStreaming;
-      localConfig.fakeStreamingInterval = newValues.storeFakeStreamingInterval;
-      localConfig.randomString = newValues.storeRandomString;
-      localConfig.randomStringLength = newValues.storeRandomStringLength;
-      localConfig.concurrentRequests = newValues.storeConcurrentRequests;
-      localConfig.increaseConcurrentOnFailure = newValues.storeIncreaseConcurrentOnFailure;
-      localConfig.maxConcurrentRequests = newValues.storeMaxConcurrentRequests;
-      localConfig.maxEmptyResponses = newValues.storeMaxEmptyResponses;
-      localConfig.responsesDefaultModel = newValues.storeResponsesDefaultModel || '';
-      localConfig.responsesModelAliases = Object.entries(newValues.storeResponsesModelAliases || {}).map(([alias, model]) => ({ alias, model }));
-      populatedFromStore.value = true;
-    }
+  (values) => {
+    if (!values.isLoaded || populatedFromStore.value) return
+    localConfig.searchMode = values.searchMode
+    localConfig.searchPrompt = values.searchPrompt
+    localConfig.maxRetryNum = values.maxRetryNum
+    localConfig.fakeStreaming = values.fakeStreaming
+    localConfig.fakeStreamingInterval = values.fakeStreamingInterval
+    localConfig.randomString = values.randomString
+    localConfig.randomStringLength = values.randomStringLength
+    localConfig.concurrentRequests = values.concurrentRequests
+    localConfig.increaseConcurrentOnFailure = values.increaseConcurrentOnFailure
+    localConfig.maxConcurrentRequests = values.maxConcurrentRequests
+    localConfig.maxEmptyResponses = values.maxEmptyResponses
+    localConfig.responsesDefaultModel = values.responsesDefaultModel || ''
+    localConfig.responsesModelAliases = aliasesToRows(values.responsesModelAliases)
+    localConfig.claudeDefaultModel = values.claudeDefaultModel || ''
+    localConfig.claudeModelAliases = aliasesToRows(values.claudeModelAliases)
+    populatedFromStore.value = true
   },
   { deep: true, immediate: true }
 )
 
-// 保存组件配置
-async function saveComponentConfigs(passwordFromParent) {
-  if (!passwordFromParent) {
-    return { success: false, message: '功能配置: 密码未提�? }
-  }
-
-  let allSucceeded = true;
-  let individualMessages = [];
-
-  // 逐个保存配置�?
-  const configKeys = Object.keys(localConfig).filter(key => !['responsesDefaultModel', 'responsesModelAliases'].includes(key));
-  for (const key of configKeys) {
-    if (localConfig[key] !== dashboardStore.config[key]) {
-      try {
-        await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent);
-        // 更新store中的�?- 仅在API调用成功�?
-        dashboardStore.config[key] = localConfig[key];
-        individualMessages.push(`${key} 保存成功`);
-      } catch (error) {
-        allSucceeded = false;
-        individualMessages.push(`${key} 保存失败: ${error.message || '未知错误'}`);
-      }
-    }
-  }
-
-  const aliasMap = buildAliasMap();
-  if (
-    localConfig.responsesDefaultModel !== (dashboardStore.config.responsesDefaultModel || '') ||
-    JSON.stringify(aliasMap) !== JSON.stringify(dashboardStore.config.responsesModelAliases || {})
-  ) {
-    try {
-      await saveResponsesMapping(localConfig.responsesDefaultModel, aliasMap, passwordFromParent);
-      dashboardStore.config.responsesDefaultModel = localConfig.responsesDefaultModel;
-      dashboardStore.config.responsesModelAliases = aliasMap;
-      individualMessages.push('Responses model mapping saved');
-    } catch (error) {
-      allSucceeded = false;
-      individualMessages.push(`Responses model mapping save failed: ${error.message || 'unknown error'}`);
-    }
-  }
-
-  if (allSucceeded && individualMessages.length === 0) {
-    // 如果没有任何更改，也算成功，但提示用�?
-    return { success: true, message: '功能配置: 无更改需要保�? };
-  }
-
-  return {
-    success: allSucceeded,
-    message: `功能配置: ${individualMessages.join('; ')}`
-  };
-}
-
-// 获取布尔值显示文�?
 function getBooleanText(value) {
-  return value ? '启用' : '禁用'
+  return value ? 'Enabled' : 'Disabled'
 }
 
+function buildAliasMap(rows) {
+  const result = {}
+  for (const item of rows) {
+    const alias = (item.alias || '').trim()
+    const model = (item.model || '').trim()
+    if (alias && model) result[alias] = model
+  }
+  return result
+}
 
-async function saveResponsesMapping(defaultModel, aliases, password) {
-  const response = await fetch('/api/update-responses-model-mapping', {
+async function saveModelMapping(endpoint, defaultModel, aliases, password) {
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      default_model: defaultModel,
-      aliases,
-      password
-    })
+    body: JSON.stringify({ default_model: defaultModel, aliases, password })
   })
   if (!response.ok) {
-    const errorData = await response.json()
-    throw new Error(errorData.detail || 'Save Responses model mapping failed')
+    const errorData = await response.json().catch(() => ({}))
+    throw new Error(errorData.detail || errorData.error?.message || 'Save model mapping failed')
   }
   return response.json()
 }
@@ -145,205 +105,181 @@ function removeResponseAlias(index) {
   localConfig.responsesModelAliases.splice(index, 1)
 }
 
-function buildAliasMap() {
-  const result = {}
-  for (const item of localConfig.responsesModelAliases) {
-    const alias = (item.alias || '').trim()
-    const model = (item.model || '').trim()
-    if (alias && model) {
-      result[alias] = model
-    }
-  }
-  return result
+function addClaudeAlias() {
+  localConfig.claudeModelAliases.push({ alias: '', model: localConfig.claudeDefaultModel || '' })
 }
 
-defineExpose({
-  saveComponentConfigs,
-  localConfig
-})
+function removeClaudeAlias(index) {
+  localConfig.claudeModelAliases.splice(index, 1)
+}
+
+async function saveComponentConfigs(passwordFromParent) {
+  if (!passwordFromParent) {
+    return { success: false, message: 'Features config: password is required' }
+  }
+
+  let allSucceeded = true
+  const messages = []
+  const mappingKeys = [
+    'responsesDefaultModel',
+    'responsesModelAliases',
+    'claudeDefaultModel',
+    'claudeModelAliases'
+  ]
+
+  for (const key of Object.keys(localConfig).filter(key => !mappingKeys.includes(key))) {
+    if (localConfig[key] !== dashboardStore.config[key]) {
+      try {
+        await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent)
+        dashboardStore.config[key] = localConfig[key]
+        messages.push(`${key} saved`)
+      } catch (error) {
+        allSucceeded = false
+        messages.push(`${key} failed: ${error.message || 'unknown error'}`)
+      }
+    }
+  }
+
+  const responsesAliases = buildAliasMap(localConfig.responsesModelAliases)
+  if (
+    localConfig.responsesDefaultModel !== (dashboardStore.config.responsesDefaultModel || '') ||
+    JSON.stringify(responsesAliases) !== JSON.stringify(dashboardStore.config.responsesModelAliases || {})
+  ) {
+    try {
+      await saveModelMapping('/api/update-responses-model-mapping', localConfig.responsesDefaultModel, responsesAliases, passwordFromParent)
+      dashboardStore.config.responsesDefaultModel = localConfig.responsesDefaultModel
+      dashboardStore.config.responsesModelAliases = responsesAliases
+      messages.push('Responses model mapping saved')
+    } catch (error) {
+      allSucceeded = false
+      messages.push(`Responses model mapping failed: ${error.message || 'unknown error'}`)
+    }
+  }
+
+  const claudeAliases = buildAliasMap(localConfig.claudeModelAliases)
+  if (
+    localConfig.claudeDefaultModel !== (dashboardStore.config.claudeDefaultModel || '') ||
+    JSON.stringify(claudeAliases) !== JSON.stringify(dashboardStore.config.claudeModelAliases || {})
+  ) {
+    try {
+      await saveModelMapping('/api/update-claude-model-mapping', localConfig.claudeDefaultModel, claudeAliases, passwordFromParent)
+      dashboardStore.config.claudeDefaultModel = localConfig.claudeDefaultModel
+      dashboardStore.config.claudeModelAliases = claudeAliases
+      messages.push('Claude model mapping saved')
+    } catch (error) {
+      allSucceeded = false
+      messages.push(`Claude model mapping failed: ${error.message || 'unknown error'}`)
+    }
+  }
+
+  if (allSucceeded && messages.length === 0) {
+    return { success: true, message: 'Features config: no changes to save' }
+  }
+
+  return { success: allSucceeded, message: `Features config: ${messages.join('; ')}` }
+}
+
+defineExpose({ saveComponentConfigs, localConfig })
 </script>
 
 <template>
   <div class="features-config">
-    <h3 class="section-title">功能配置</h3>
-    
+    <h3 class="section-title">Features Config</h3>
+
     <div class="config-form">
-      <!-- 布尔值配置项 -->
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">联网搜索</label>
+          <label class="config-label">Search mode</label>
           <div class="toggle-wrapper">
-            <input type="checkbox" class="toggle" id="searchMode" v-model="localConfig.searchMode">
-            <label for="searchMode" class="toggle-label">
-              <span class="toggle-text">{{ getBooleanText(localConfig.searchMode) }}</span>
-            </label>
+            <input id="searchMode" v-model="localConfig.searchMode" type="checkbox" class="toggle">
+            <label for="searchMode" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.searchMode) }}</span></label>
           </div>
         </div>
-        
+
         <div class="config-group">
-          <label class="config-label">假流式响�?/label>
+          <label class="config-label">Fake streaming</label>
           <div class="toggle-wrapper">
-            <input type="checkbox" class="toggle" id="fakeStreaming" v-model="localConfig.fakeStreaming">
-            <label for="fakeStreaming" class="toggle-label">
-              <span class="toggle-text">{{ getBooleanText(localConfig.fakeStreaming) }}</span>
-            </label>
+            <input id="fakeStreaming" v-model="localConfig.fakeStreaming" type="checkbox" class="toggle">
+            <label for="fakeStreaming" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.fakeStreaming) }}</span></label>
           </div>
         </div>
-        
+
         <div class="config-group">
-          <label class="config-label">伪装信息</label>
+          <label class="config-label">Random padding</label>
           <div class="toggle-wrapper">
-            <input type="checkbox" class="toggle" id="randomString" v-model="localConfig.randomString">
-            <label for="randomString" class="toggle-label">
-              <span class="toggle-text">{{ getBooleanText(localConfig.randomString) }}</span>
-            </label>
+            <input id="randomString" v-model="localConfig.randomString" type="checkbox" class="toggle">
+            <label for="randomString" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.randomString) }}</span></label>
           </div>
         </div>
       </div>
-      
-      <!-- 字符串配置项 -->
+
       <div class="config-row">
         <div class="config-group full-width">
-          <label class="config-label">联网搜索提示</label>
-          <input 
-            type="text" 
-            class="config-input" 
-            v-model="localConfig.searchPrompt" 
-            placeholder="请输入联网搜索提�?
-          >
-        </div>
-      </div>
-      
-      <!-- 数值配置项第一�?-->
-      <div class="config-row">
-        <div class="config-group">
-          <label class="config-label">最大重试次�?/label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.maxRetryNum" 
-            min="0"
-          >
-        </div>
-        
-        <div class="config-group">
-          <label class="config-label">假流式间�?�?</label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.fakeStreamingInterval" 
-            min="0"
-            step="0.1"
-          >
-        </div>
-        
-        <div class="config-group">
-          <label class="config-label">伪装信息长度</label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.randomStringLength" 
-            min="0"
-          >
-        </div>
-      </div>
-      
-      <!-- 数值配置项第二�?-->
-      <div class="config-row">
-        <div class="config-group">
-          <label class="config-label">默认并发请求�?/label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.concurrentRequests" 
-            min="1"
-          >
-        </div>
-        
-        <div class="config-group">
-          <label class="config-label">失败时增加并发数</label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.increaseConcurrentOnFailure" 
-            min="0"
-          >
-        </div>
-        
-        <div class="config-group">
-          <label class="config-label">最大并发请求数</label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.maxConcurrentRequests" 
-            min="1"
-          >
-        </div>
-      </div>
-      
-      <!-- 数值配置项第三�?-->
-      <div class="config-row">
-        <div class="config-group">
-          <label class="config-label">空响应重试限�?/label>
-          <input 
-            type="number" 
-            class="config-input" 
-            v-model.number="localConfig.maxEmptyResponses" 
-            min="0"
-          >
-        </div>
-        <!-- 可以根据需要在此行添加更多配置�?-->
-        <div class="config-group"></div>
-        <div class="config-group"></div>
-      </div>
-
-      <div class="responses-mapping-section">
-        <h4 class="subsection-title">Responses API Model Mapping</h4>
-        <div class="config-row">
-          <div class="config-group full-width">
-            <label class="config-label">Responses default target model</label>
-            <select class="config-input" v-model="localConfig.responsesDefaultModel">
-              <option value="">Auto select first available model</option>
-              <option
-                v-for="model in dashboardStore.availableModels.filter(m => m !== 'all')"
-                :key="model"
-                :value="model"
-              >{{ model }}</option>
-            </select>
-            <div class="config-hint">Used when Codex CLI sends gpt-/o*/codex-* or another model name unavailable in this gateway.</div>
-          </div>
-        </div>
-
-        <div class="alias-header">
-          <span>Custom model mappings (supports * wildcard)</span>
-          <button type="button" class="add-alias-button" @click="addResponseAlias">Add mapping</button>
-        </div>
-        <div v-if="localConfig.responsesModelAliases.length === 0" class="config-hint">No custom mappings. Examples: codex-mini-latest -> gemini-2.5-pro, gpt-* -> gemini-2.5-flash.</div>
-        <div
-          v-for="(item, index) in localConfig.responsesModelAliases"
-          :key="index"
-          class="alias-row"
-        >
-          <input
-            type="text"
-            class="config-input alias-name-input"
-            v-model="item.alias"
-            placeholder="Alias model name, e.g. codex-mini-latest or gpt-*"
-          >
-          <select class="config-input alias-model-select" v-model="item.model">
-            <option value="">Select target model</option>
-            <option
-              v-for="model in dashboardStore.availableModels.filter(m => m !== 'all')"
-              :key="model"
-              :value="model"
-            >{{ model }}</option>
-          </select>
-          <button type="button" class="remove-alias-button" @click="removeResponseAlias(index)">Delete</button>
+          <label class="config-label">Search prompt</label>
+          <input v-model="localConfig.searchPrompt" type="text" class="config-input" placeholder="Prompt appended when search mode is enabled">
         </div>
       </div>
 
-      <!-- 移除独立的保存区�?-->
-      <!-- 消息提示由父组件处理 -->
+      <div class="config-row">
+        <div class="config-group">
+          <label class="config-label">Max retry count</label>
+          <input v-model.number="localConfig.maxRetryNum" type="number" class="config-input" min="0">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Fake stream interval</label>
+          <input v-model.number="localConfig.fakeStreamingInterval" type="number" class="config-input" min="0" step="0.1">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Random padding length</label>
+          <input v-model.number="localConfig.randomStringLength" type="number" class="config-input" min="0">
+        </div>
+      </div>
+
+      <div class="config-row">
+        <div class="config-group">
+          <label class="config-label">Default concurrency</label>
+          <input v-model.number="localConfig.concurrentRequests" type="number" class="config-input" min="1">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Increase concurrency on failure</label>
+          <input v-model.number="localConfig.increaseConcurrentOnFailure" type="number" class="config-input" min="0">
+        </div>
+        <div class="config-group">
+          <label class="config-label">Max concurrency</label>
+          <input v-model.number="localConfig.maxConcurrentRequests" type="number" class="config-input" min="1">
+        </div>
+      </div>
+
+      <div class="config-row">
+        <div class="config-group">
+          <label class="config-label">Empty response retry limit</label>
+          <input v-model.number="localConfig.maxEmptyResponses" type="number" class="config-input" min="0">
+        </div>
+      </div>
+
+      <ModelMappingPanel
+        v-model:default-model="localConfig.responsesDefaultModel"
+        title="Responses API Model Mapping"
+        help="Configure which Gemini model Codex CLI / OpenAI Responses model names should map to."
+        :aliases="localConfig.responsesModelAliases"
+        :available-models="dashboardStore.availableModels"
+        alias-placeholder="Alias, e.g. codex-mini-latest or gpt-*"
+        empty-hint="No custom mappings. Examples: codex-mini-latest -> gemini-2.5-pro, gpt-* -> gemini-2.5-flash."
+        @add-alias="addResponseAlias"
+        @remove-alias="removeResponseAlias"
+      />
+
+      <ModelMappingPanel
+        v-model:default-model="localConfig.claudeDefaultModel"
+        title="Claude API Model Mapping"
+        help="Configure which Gemini model Claude Code / Anthropic model names should map to."
+        :aliases="localConfig.claudeModelAliases"
+        :available-models="dashboardStore.availableModels"
+        alias-placeholder="Alias, e.g. claude-sonnet-* or claude-3-5-haiku-latest"
+        empty-hint="No custom mappings. Examples: claude-sonnet-* -> gemini-2.5-pro, claude-* -> gemini-2.5-flash."
+        @add-alias="addClaudeAlias"
+        @remove-alias="removeClaudeAlias"
+      />
     </div>
   </div>
 </template>
@@ -383,37 +319,34 @@ defineExpose({
 
 .config-row {
   display: flex;
-  gap: 15px;
-  margin-bottom: 15px;
-  flex-wrap: wrap;
+  gap: 20px;
+  margin-bottom: 20px;
 }
 
 .config-group {
   flex: 1;
-  min-width: 120px;
+  min-width: 0;
 }
 
-.full-width {
+.config-group.full-width {
   flex-basis: 100%;
 }
 
 .config-label {
   display: block;
-  font-size: 14px;
-  margin-bottom: 5px;
-  color: var(--color-text);
+  margin-bottom: 8px;
+  color: var(--color-heading);
   font-weight: 500;
 }
 
 .config-input {
   width: 100%;
-  padding: 8px 12px;
+  padding: 10px 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background-color: var(--color-background);
   color: var(--color-text);
   font-size: 14px;
-  transition: all 0.3s ease;
 }
 
 .config-input:focus {
@@ -422,145 +355,35 @@ defineExpose({
   box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
 }
 
-/* 开关样�?*/
 .toggle-wrapper {
-  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .toggle {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
+  width: 18px;
+  height: 18px;
 }
 
 .toggle-label {
-  display: flex;
-  align-items: center;
   cursor: pointer;
-  user-select: none;
-}
-
-.toggle-label::before {
-  content: '';
-  display: inline-block;
-  width: 36px;
-  height: 20px;
-  background-color: var(--color-border);
-  border-radius: 10px;
-  margin-right: 8px;
-  position: relative;
-  transition: all 0.3s ease;
-}
-
-.toggle-label::after {
-  content: '';
-  position: absolute;
-  left: 3px;
-  width: 14px;
-  height: 14px;
-  background-color: white;
-  border-radius: 50%;
-  transition: all 0.3s ease;
-}
-
-.toggle:checked + .toggle-label::before {
-  background-color: var(--button-primary);
-}
-
-.toggle:checked + .toggle-label::after {
-  left: 19px;
+  color: var(--color-text);
 }
 
 .toggle-text {
   font-size: 14px;
-  color: var(--color-text);
 }
 
-/* 移动端优�?*/
 @media (max-width: 768px) {
-  .config-row {
-    gap: 10px;
-  }
-  
-  .config-group {
-    min-width: 100px;
-  }
-}
-
-/* 小屏幕手机进一步优�?*/
-@media (max-width: 480px) {
-  .config-row {
-    flex-direction: column;
-    gap: 10px;
-  }
-  
-  .config-group {
-    width: 100%;
-  }
-  
   .config-form {
     padding: 15px;
   }
-}
 
-.responses-mapping-section {
-  margin-top: 18px;
-  padding: 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: color-mix(in srgb, var(--card-background) 94%, var(--button-primary) 6%);
-}
-
-.subsection-title {
-  margin: 0 0 14px;
-  color: var(--color-heading);
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.config-hint {
-  margin-top: 6px;
-  color: var(--color-text-soft);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.alias-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin: 12px 0 8px;
-  color: var(--color-heading);
-  font-weight: 500;
-}
-
-.alias-row {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(220px, 1.2fr) auto;
-  gap: 10px;
-  align-items: center;
-  margin-bottom: 10px;
-}
-
-.add-alias-button,
-.remove-alias-button {
-  border: none;
-  border-radius: var(--radius-md);
-  padding: 8px 12px;
-  cursor: pointer;
-  color: white;
-  background: var(--button-primary);
-}
-
-.remove-alias-button {
-  background: var(--button-danger, #dc3545);
-}
-
-@media (max-width: 768px) {
-  .alias-row {
-    grid-template-columns: 1fr;
+  .config-row {
+    flex-direction: column;
+    gap: 15px;
+    margin-bottom: 15px;
   }
 }
-
 </style>

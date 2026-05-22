@@ -204,6 +204,36 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(request.tool_choice, "auto")
 
+    def test_claude_request_ignores_cache_control_and_metadata(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "system": [
+                    {
+                        "type": "text",
+                        "text": "system prompt",
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+                "metadata": {"user_id": "claude-code"},
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "hello",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(request.messages[0]["content"], "system prompt")
+        self.assertEqual(request.messages[1]["content"], "hello")
+
     def test_responses_codex_fixture_converts_function_history(self):
         payload = json.loads((FIXTURES_DIR / "codex_responses_function_call.json").read_text(encoding="utf-8"))
         request = response_request_to_chat_request(payload)
