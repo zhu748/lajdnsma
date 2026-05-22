@@ -71,7 +71,7 @@ watch(
 )
 
 function getBooleanText(value) {
-  return value ? 'Enabled' : 'Disabled'
+  return value ? '??' : '??'
 }
 
 function buildAliasMap(rows) {
@@ -92,7 +92,7 @@ async function saveModelMapping(endpoint, defaultModel, aliases, password) {
   })
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}))
-    throw new Error(errorData.detail || errorData.error?.message || 'Save model mapping failed')
+    throw new Error(errorData.detail || errorData.error?.message || '????????')
   }
   return response.json()
 }
@@ -115,7 +115,7 @@ function removeClaudeAlias(index) {
 
 async function saveComponentConfigs(passwordFromParent) {
   if (!passwordFromParent) {
-    return { success: false, message: 'Features config: password is required' }
+    return { success: false, message: '?????????????' }
   }
 
   let allSucceeded = true
@@ -132,10 +132,10 @@ async function saveComponentConfigs(passwordFromParent) {
       try {
         await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent)
         dashboardStore.config[key] = localConfig[key]
-        messages.push(`${key} saved`)
+        messages.push(`${key} ????`)
       } catch (error) {
         allSucceeded = false
-        messages.push(`${key} failed: ${error.message || 'unknown error'}`)
+        messages.push(`${key} ?????${error.message || '????'}`)
       }
     }
   }
@@ -149,10 +149,10 @@ async function saveComponentConfigs(passwordFromParent) {
       await saveModelMapping('/api/update-responses-model-mapping', localConfig.responsesDefaultModel, responsesAliases, passwordFromParent)
       dashboardStore.config.responsesDefaultModel = localConfig.responsesDefaultModel
       dashboardStore.config.responsesModelAliases = responsesAliases
-      messages.push('Responses model mapping saved')
+      messages.push('Responses ????????')
     } catch (error) {
       allSucceeded = false
-      messages.push(`Responses model mapping failed: ${error.message || 'unknown error'}`)
+      messages.push(`Responses ?????????${error.message || '????'}`)
     }
   }
 
@@ -165,18 +165,18 @@ async function saveComponentConfigs(passwordFromParent) {
       await saveModelMapping('/api/update-claude-model-mapping', localConfig.claudeDefaultModel, claudeAliases, passwordFromParent)
       dashboardStore.config.claudeDefaultModel = localConfig.claudeDefaultModel
       dashboardStore.config.claudeModelAliases = claudeAliases
-      messages.push('Claude model mapping saved')
+      messages.push('Claude ????????')
     } catch (error) {
       allSucceeded = false
-      messages.push(`Claude model mapping failed: ${error.message || 'unknown error'}`)
+      messages.push(`Claude ?????????${error.message || '????'}`)
     }
   }
 
   if (allSucceeded && messages.length === 0) {
-    return { success: true, message: 'Features config: no changes to save' }
+    return { success: true, message: '??????????????' }
   }
 
-  return { success: allSucceeded, message: `Features config: ${messages.join('; ')}` }
+  return { success: allSucceeded, message: `?????${messages.join('; ')}` }
 }
 
 defineExpose({ saveComponentConfigs, localConfig })
@@ -184,12 +184,12 @@ defineExpose({ saveComponentConfigs, localConfig })
 
 <template>
   <div class="features-config">
-    <h3 class="section-title">Features Config</h3>
+    <h3 class="section-title">????</h3>
 
     <div class="config-form">
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">Search mode</label>
+          <label class="config-label">????</label>
           <div class="toggle-wrapper">
             <input id="searchMode" v-model="localConfig.searchMode" type="checkbox" class="toggle">
             <label for="searchMode" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.searchMode) }}</span></label>
@@ -197,7 +197,7 @@ defineExpose({ saveComponentConfigs, localConfig })
         </div>
 
         <div class="config-group">
-          <label class="config-label">Fake streaming</label>
+          <label class="config-label">?????</label>
           <div class="toggle-wrapper">
             <input id="fakeStreaming" v-model="localConfig.fakeStreaming" type="checkbox" class="toggle">
             <label for="fakeStreaming" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.fakeStreaming) }}</span></label>
@@ -205,7 +205,7 @@ defineExpose({ saveComponentConfigs, localConfig })
         </div>
 
         <div class="config-group">
-          <label class="config-label">Random padding</label>
+          <label class="config-label">????</label>
           <div class="toggle-wrapper">
             <input id="randomString" v-model="localConfig.randomString" type="checkbox" class="toggle">
             <label for="randomString" class="toggle-label"><span class="toggle-text">{{ getBooleanText(localConfig.randomString) }}</span></label>
@@ -215,68 +215,68 @@ defineExpose({ saveComponentConfigs, localConfig })
 
       <div class="config-row">
         <div class="config-group full-width">
-          <label class="config-label">Search prompt</label>
-          <input v-model="localConfig.searchPrompt" type="text" class="config-input" placeholder="Prompt appended when search mode is enabled">
+          <label class="config-label">??????</label>
+          <input v-model="localConfig.searchPrompt" type="text" class="config-input" placeholder="?????????">
         </div>
       </div>
 
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">Max retry count</label>
+          <label class="config-label">??????</label>
           <input v-model.number="localConfig.maxRetryNum" type="number" class="config-input" min="0">
         </div>
         <div class="config-group">
-          <label class="config-label">Fake stream interval</label>
+          <label class="config-label">????????</label>
           <input v-model.number="localConfig.fakeStreamingInterval" type="number" class="config-input" min="0" step="0.1">
         </div>
         <div class="config-group">
-          <label class="config-label">Random padding length</label>
+          <label class="config-label">???? length</label>
           <input v-model.number="localConfig.randomStringLength" type="number" class="config-input" min="0">
         </div>
       </div>
 
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">Default concurrency</label>
+          <label class="config-label">???????</label>
           <input v-model.number="localConfig.concurrentRequests" type="number" class="config-input" min="1">
         </div>
         <div class="config-group">
-          <label class="config-label">Increase concurrency on failure</label>
+          <label class="config-label">????????</label>
           <input v-model.number="localConfig.increaseConcurrentOnFailure" type="number" class="config-input" min="0">
         </div>
         <div class="config-group">
-          <label class="config-label">Max concurrency</label>
+          <label class="config-label">???????</label>
           <input v-model.number="localConfig.maxConcurrentRequests" type="number" class="config-input" min="1">
         </div>
       </div>
 
       <div class="config-row">
         <div class="config-group">
-          <label class="config-label">Empty response retry limit</label>
+          <label class="config-label">???????</label>
           <input v-model.number="localConfig.maxEmptyResponses" type="number" class="config-input" min="0">
         </div>
       </div>
 
       <ModelMappingPanel
         v-model:default-model="localConfig.responsesDefaultModel"
-        title="Responses API Model Mapping"
-        help="Configure which Gemini model Codex CLI / OpenAI Responses model names should map to."
+        title="Responses API ????"
+        help="?? Codex CLI / OpenAI Responses ????????????? Gemini ???"
         :aliases="localConfig.responsesModelAliases"
         :available-models="dashboardStore.availableModels"
-        alias-placeholder="Alias, e.g. codex-mini-latest or gpt-*"
-        empty-hint="No custom mappings. Examples: codex-mini-latest -> gemini-2.5-pro, gpt-* -> gemini-2.5-flash."
+        alias-placeholder="????? codex-mini-latest ? gpt-*"
+        empty-hint="???????????codex-mini-latest -> gemini-2.5-pro?gpt-* -> gemini-2.5-flash?"
         @add-alias="addResponseAlias"
         @remove-alias="removeResponseAlias"
       />
 
       <ModelMappingPanel
         v-model:default-model="localConfig.claudeDefaultModel"
-        title="Claude API Model Mapping"
-        help="Configure which Gemini model Claude Code / Anthropic model names should map to."
+        title="Claude API ????"
+        help="?? Claude Code / Anthropic ????????????? Gemini ???"
         :aliases="localConfig.claudeModelAliases"
         :available-models="dashboardStore.availableModels"
-        alias-placeholder="Alias, e.g. claude-sonnet-* or claude-3-5-haiku-latest"
-        empty-hint="No custom mappings. Examples: claude-sonnet-* -> gemini-2.5-pro, claude-* -> gemini-2.5-flash."
+        alias-placeholder="????? claude-sonnet-* ? claude-3-5-haiku-latest"
+        empty-hint="???????????claude-sonnet-* -> gemini-2.5-pro?claude-* -> gemini-2.5-flash?"
         @add-alias="addClaudeAlias"
         @remove-alias="removeClaudeAlias"
       />

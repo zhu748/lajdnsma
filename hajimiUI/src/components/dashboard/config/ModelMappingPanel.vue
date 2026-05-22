@@ -5,8 +5,8 @@ const props = defineProps({
   aliases: { type: Array, required: true },
   defaultModel: { type: String, default: '' },
   availableModels: { type: Array, default: () => [] },
-  aliasPlaceholder: { type: String, default: 'Alias, e.g. gpt-*' },
-  emptyHint: { type: String, default: 'No custom mappings.' }
+  aliasPlaceholder: { type: String, default: '????? gpt-*' },
+  emptyHint: { type: String, default: '????????' }
 })
 
 const emit = defineEmits(['update:defaultModel', 'add-alias', 'remove-alias'])
@@ -23,31 +23,31 @@ function targetModels() {
 
     <div class="config-row">
       <div class="config-group full-width">
-        <label class="config-label">Default target model</label>
+        <label class="config-label">??????</label>
         <select
           class="config-input"
           :value="defaultModel"
           @change="emit('update:defaultModel', $event.target.value)"
         >
-          <option value="">Auto select first available model</option>
+          <option value="">???????????</option>
           <option v-for="model in targetModels()" :key="model" :value="model">{{ model }}</option>
         </select>
       </div>
     </div>
 
     <div class="mapping-header">
-      <span>Custom aliases (supports * wildcard)</span>
-      <button type="button" class="add-alias-button" @click="emit('add-alias')">Add mapping</button>
+      <span>?????????? * ????</span>
+      <button type="button" class="add-alias-button" @click="emit('add-alias')">????</button>
     </div>
 
     <div v-if="aliases.length === 0" class="config-hint">{{ emptyHint }}</div>
     <div v-for="(item, index) in aliases" :key="index" class="alias-row">
       <input v-model="item.alias" class="config-input" :placeholder="aliasPlaceholder">
       <select v-model="item.model" class="config-input">
-        <option value="">Select target model</option>
+        <option value="">???????</option>
         <option v-for="model in targetModels()" :key="model" :value="model">{{ model }}</option>
       </select>
-      <button type="button" class="remove-alias-button" @click="emit('remove-alias', index)">Delete</button>
+      <button type="button" class="remove-alias-button" @click="emit('remove-alias', index)">??</button>
     </div>
   </div>
 </template>
