@@ -53,7 +53,9 @@ async def generate_native_stream_chunks(
                         stream=True,
                         include_reasoning=bool(
                             getattr(chat_request, "enable_thinking", True)
-                        ),
+                        )
+                        and getattr(chat_request, "source_protocol", None)
+                        not in {"claude", "responses"},
                     )
             else:
                 log_empty_response_count(

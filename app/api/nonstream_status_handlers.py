@@ -37,7 +37,9 @@ async def handle_nonstream_task_status(
                     stream=False,
                     include_reasoning=bool(
                         getattr(chat_request, "enable_thinking", True)
-                    ),
+                    )
+                    and getattr(chat_request, "source_protocol", None)
+                    not in {"claude", "responses"},
                 )
             if serialize_json:
                 response = dump_json_response(response)

@@ -82,7 +82,9 @@ async def run_fake_stream_batch_until_success(
                                 stream=True,
                                 include_reasoning=bool(
                                     getattr(chat_request, "enable_thinking", True)
-                                ),
+                                )
+                                and getattr(chat_request, "source_protocol", None)
+                                not in {"claude", "responses"},
                             )
                         cancel_pending_tasks(tasks)
                         yield "summary", {
