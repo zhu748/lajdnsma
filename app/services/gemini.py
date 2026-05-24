@@ -3,6 +3,7 @@ import os
 from app.models.schemas import ChatCompletionRequest
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
+from urllib.parse import urlparse
 import secrets
 import string
 import app.config.settings as settings
@@ -91,6 +92,19 @@ def sanitize_gemini_payload(data):
                 )
 
     return data
+
+
+def _guess_mime_type_from_url(url: str) -> Optional[str]:
+    path = urlparse(url).path.lower()
+    if path.endswith((".jpg", ".jpeg")):
+        return "image/jpeg"
+    if path.endswith(".png"):
+        return "image/png"
+    if path.endswith(".webp"):
+        return "image/webp"
+    if path.endswith(".gif"):
+        return "image/gif"
+    return None
 
 
 @dataclass
@@ -464,6 +478,7 @@ class GeminiClient:
         errors = []
 
         system_instruction_text = ""
+        leading_system_count = 0
         system_instruction_parts = []  # 用于收集系统指令文本
 
         # 处理系统指令
@@ -475,6 +490,7 @@ class GeminiClient:
                     message.get("content"), str
                 ):
                     system_instruction_parts.append(message.get("content"))
+                    leading_system_count += 1
                 else:
                     break  # 遇到第一个非 system 或内容非字符串的消息就停止
 
@@ -500,6 +516,9 @@ class GeminiClient:
                     call_id_to_name[tool_call["id"]] = function_data["name"]
 
         for i, message in enumerate(messages):
+            if use_system_prompt and i < leading_system_count:
+                continue
+
             role = message.get("role")
             content = message.get("content")
             if role == "assistant" and message.get("tool_calls"):
@@ -620,6 +639,12 @@ class GeminiClient:
                                 errors.append(
                                     f"Invalid data URI for image: {image_data}"
                                 )
+                        elif image_data.startswith(("http://", "https://")):
+                            file_data = {"file_uri": image_data}
+                            mime_type = _guess_mime_type_from_url(image_data)
+                            if mime_type:
+                                file_data["mime_type"] = mime_type
+                            parts.append({"file_data": file_data})
                         else:
                             errors.append(f"Invalid image URL format for item: {item}")
 

@@ -124,7 +124,7 @@ async def handle_claude_messages_request(payload: dict, http_request, auth_dep, 
         response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
     except HTTPException as exc:
         return JSONResponse(
-            anthropic_error_response(str(exc.detail)),
+            anthropic_error_response(str(exc.detail), status_code=exc.status_code),
             status_code=exc.status_code,
         )
 

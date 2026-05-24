@@ -6,7 +6,13 @@ from app.api.model_handlers import build_aistudio_model_list
 try:
     from app.api.model_handlers import build_claude_model_list
 except ImportError:
-    def build_claude_model_list(available_models, whitelist_models, blocked_models):
+    def build_claude_model_list(
+        available_models,
+        whitelist_models,
+        blocked_models,
+        aliases=None,
+        default_model="",
+    ):
         filtered_models = [
             model
             for model in available_models
@@ -55,6 +61,8 @@ async def claude_list_models(
         GeminiClient.AVAILABLE_MODELS,
         settings.WHITELIST_MODELS,
         settings.BLOCKED_MODELS,
+        settings.CLAUDE_MODEL_ALIASES,
+        settings.CLAUDE_DEFAULT_MODEL,
     )
 
 
@@ -73,6 +81,8 @@ async def list_models(
             GeminiClient.AVAILABLE_MODELS,
             settings.WHITELIST_MODELS,
             settings.BLOCKED_MODELS,
+            settings.CLAUDE_MODEL_ALIASES,
+            settings.CLAUDE_DEFAULT_MODEL,
         )
 
     if settings.ENABLE_VERTEX:

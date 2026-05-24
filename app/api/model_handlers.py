@@ -23,8 +23,23 @@ def build_aistudio_model_list(available_models, whitelist_models, blocked_models
     )
 
 
-def build_claude_model_list(available_models, whitelist_models, blocked_models):
+def build_claude_model_list(
+    available_models,
+    whitelist_models,
+    blocked_models,
+    aliases=None,
+    default_model="",
+):
     filtered_models = filter_model_names(available_models, whitelist_models, blocked_models)
+    aliases = aliases if isinstance(aliases, dict) else {}
+    alias_models = [
+        alias
+        for alias, target in aliases.items()
+        if "*" not in alias and (not target or target in filtered_models)
+    ]
+    if default_model and default_model in filtered_models and not alias_models:
+        alias_models.append(default_model)
+    model_ids = alias_models or filtered_models
     return {
         "data": [
             {
@@ -33,9 +48,9 @@ def build_claude_model_list(available_models, whitelist_models, blocked_models):
                 "display_name": model,
                 "created_at": "2024-01-01T00:00:00Z",
             }
-            for model in filtered_models
+            for model in model_ids
         ],
         "has_more": False,
-        "first_id": filtered_models[0] if filtered_models else None,
-        "last_id": filtered_models[-1] if filtered_models else None,
+        "first_id": model_ids[0] if model_ids else None,
+        "last_id": model_ids[-1] if model_ids else None,
     }

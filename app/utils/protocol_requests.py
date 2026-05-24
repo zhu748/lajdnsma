@@ -244,7 +244,20 @@ def _claude_tool_result_content_to_text(content: Any) -> str:
             if item.get("type") == "text" and item.get("text"):
                 text_parts.append(item["text"])
             elif item.get("type") == "image":
-                text_parts.append(json.dumps(item, ensure_ascii=False))
+                source = item.get("source") or {}
+                source_type = source.get("type") if isinstance(source, dict) else None
+                if source_type == "url" and source.get("url"):
+                    text_parts.append(f"[tool_result_image:url:{source['url']}]")
+                elif source_type == "base64":
+                    media_type = source.get("media_type", "image/png")
+                    text_parts.append(f"[tool_result_image:{media_type}:base64]")
+                else:
+                    text_parts.append(json.dumps(item, ensure_ascii=False))
+            elif item.get("type") == "document":
+                text_parts.append(
+                    "[tool_result_document]\n"
+                    + json.dumps(item, ensure_ascii=False)
+                )
             else:
                 text_parts.append(json.dumps(item, ensure_ascii=False))
     return "\n".join(part for part in text_parts if part)
@@ -429,8 +442,8 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
 
 
     thinking_config = payload.get("thinking")
-    enable_thinking = True
-    thinking_budget = -1
+    enable_thinking = False
+    thinking_budget = 0
     if isinstance(thinking_config, dict):
         thinking_type = thinking_config.get("type")
         if thinking_type == "disabled":

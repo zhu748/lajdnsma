@@ -62,6 +62,21 @@ class ModelAndEmbeddingHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual([item["id"] for item in result.data], ["a", "c"])
 
+    async def test_build_claude_model_list_prefers_exact_aliases(self):
+        module = load_model_handlers()
+        result = module.build_claude_model_list(
+            ["gemini-2.5-pro", "gemini-2.5-flash"],
+            whitelist_models=[],
+            blocked_models=[],
+            aliases={
+                "claude-sonnet-4-20250514": "gemini-2.5-pro",
+                "claude-*": "gemini-2.5-flash",
+            },
+        )
+
+        self.assertEqual(result["data"][0]["id"], "claude-sonnet-4-20250514")
+        self.assertEqual(result["first_id"], "claude-sonnet-4-20250514")
+
     async def test_embedding_and_vector_handlers(self):
         module, HTTPException = load_embedding_handlers()
 

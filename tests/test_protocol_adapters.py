@@ -453,6 +453,60 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             "data:image/png;base64,AAAA",
         )
 
+    def test_claude_request_defaults_thinking_off(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+
+        self.assertFalse(request.enable_thinking)
+        self.assertEqual(request.thinking_budget, 0)
+
+    def test_claude_tool_result_image_uses_marker_text(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_1",
+                                "name": "View",
+                                "input": {"path": "screen.png"},
+                            }
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_1",
+                                "content": [
+                                    {
+                                        "type": "image",
+                                        "source": {
+                                            "type": "url",
+                                            "url": "https://example.com/screen.png",
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ],
+            }
+        )
+
+        self.assertIn(
+            "[tool_result_image:url:https://example.com/screen.png]",
+            request.messages[1]["content"],
+        )
+
 
     def test_claude_request_to_chat_request_skips_blank_string_content(self):
         request = claude_request_to_chat_request(

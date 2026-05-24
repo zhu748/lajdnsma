@@ -154,6 +154,51 @@ class GeminiSchemaTestCase(unittest.TestCase):
             },
         )
 
+    def test_convert_messages_promotes_leading_system_instruction(self):
+        module = load_gemini_module()
+        client = module.GeminiClient("test-key")
+
+        history, system_instruction = client.convert_messages(
+            [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "hello"},
+            ],
+            use_system_prompt=True,
+        )
+
+        self.assertEqual(system_instruction, {"parts": [{"text": "system prompt"}]})
+        self.assertEqual(history, [{"role": "user", "parts": [{"text": "hello"}]}])
+
+    def test_convert_messages_keeps_remote_image_url_as_file_data(self):
+        module = load_gemini_module()
+        client = module.GeminiClient("test-key")
+
+        history, _ = client.convert_messages(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://example.com/image.png",
+                            },
+                        }
+                    ],
+                }
+            ]
+        )
+
+        self.assertEqual(
+            history[0]["parts"][0],
+            {
+                "file_data": {
+                    "file_uri": "https://example.com/image.png",
+                    "mime_type": "image/png",
+                }
+            },
+        )
+
     def test_convert_messages_preserves_tool_call_thought_signature(self):
         module = load_gemini_module()
         client = module.GeminiClient("test-key")

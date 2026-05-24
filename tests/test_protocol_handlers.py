@@ -85,9 +85,13 @@ def load_protocol_handlers():
 
     fake_errors = types.ModuleType("app.utils.errors")
     fake_errors.anthropic_error_response = (
-        lambda message, error_type="invalid_request_error": {
+        lambda message, error_type=None, status_code=None: {
             "type": "error",
-            "error": {"type": error_type, "message": message},
+            "error": {
+                "type": error_type
+                or ("rate_limit_error" if status_code == 429 else "invalid_request_error"),
+                "message": message,
+            },
         }
     )
 
@@ -325,6 +329,23 @@ class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content["type"], "error")
         self.assertEqual(response.content["error"]["type"], "invalid_request_error")
         self.assertIn("bad model", response.content["error"]["message"])
+
+    async def test_handle_claude_request_maps_rate_limit_error(self):
+        module = load_protocol_handlers()
+
+        async def fake_chat_handler(request, http_request, auth_dep, user_agent_dep):
+            raise module.HTTPException(status_code=429, detail="slow down")
+
+        response = await module.handle_claude_messages_request(
+            {"model": "gemini-2.5-pro"},
+            http_request=None,
+            auth_dep=None,
+            user_agent_dep=None,
+            chat_handler=fake_chat_handler,
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.content["error"]["type"], "rate_limit_error")
 
     async def test_handle_claude_messages_request_non_stream(self):
         module = load_protocol_handlers()
