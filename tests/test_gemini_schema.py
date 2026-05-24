@@ -226,6 +226,7 @@ class GeminiSchemaTestCase(unittest.TestCase):
             n=1,
             thinking_budget=31999,
             enable_thinking=True,
+            expose_reasoning=True,
             tools=None,
             tool_choice="auto",
         )
@@ -236,6 +237,34 @@ class GeminiSchemaTestCase(unittest.TestCase):
             data["generationConfig"]["thinkingConfig"]["thinkingBudget"],
             24576,
         )
+        self.assertTrue(
+            data["generationConfig"]["thinkingConfig"]["include_thoughts"]
+        )
+
+    def test_convert_openai_request_can_hide_thoughts_but_keep_budget(self):
+        module = load_gemini_module()
+        module.settings.ENABLE_THINKING = True
+        client = module.GeminiClient("test-key")
+        request = types.SimpleNamespace(
+            model="gemini-2.5-pro",
+            temperature=0.7,
+            max_tokens=None,
+            top_p=None,
+            top_k=None,
+            stop=None,
+            n=1,
+            thinking_budget=1024,
+            enable_thinking=True,
+            expose_reasoning=False,
+            tools=None,
+            tool_choice="auto",
+        )
+
+        _, data = client._convert_openAI_request(request, [], None, None)
+
+        thinking_config = data["generationConfig"]["thinkingConfig"]
+        self.assertEqual(thinking_config["thinkingBudget"], 1024)
+        self.assertNotIn("include_thoughts", thinking_config)
 
     def test_convert_messages_preserves_tool_call_thought_signature(self):
         module = load_gemini_module()

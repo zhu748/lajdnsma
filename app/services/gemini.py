@@ -336,7 +336,7 @@ class GeminiClient:
                     request.thinking_budget
                 )
             
-            if getattr(request, "enable_thinking", False):
+            if getattr(request, "expose_reasoning", getattr(request, "enable_thinking", False)):
                 thinking_config["include_thoughts"] = True
 
         if thinking_config:
