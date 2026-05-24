@@ -82,6 +82,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.model, "gemini-2.5-pro")
         self.assertTrue(request.stream)
         self.assertEqual(request.max_tokens, 256)
+        self.assertEqual(request.source_protocol, "responses")
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertEqual(request.messages[1]["content"], "你好")
 
@@ -210,6 +211,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[0]["role"], "system")
         self.assertEqual(request.messages[1]["content"], "讲个笑话")
         self.assertEqual(request.max_tokens, 128)
+        self.assertEqual(request.source_protocol, "claude")
         self.assertEqual(request.tools[0]["function"]["name"], "weather")
 
     def test_claude_code_fixture_converts_tool_choice_and_system_array(self):

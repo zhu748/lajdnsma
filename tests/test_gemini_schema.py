@@ -169,6 +169,19 @@ class GeminiSchemaTestCase(unittest.TestCase):
         self.assertEqual(system_instruction, {"parts": [{"text": "system prompt"}]})
         self.assertEqual(history, [{"role": "user", "parts": [{"text": "hello"}]}])
 
+    def test_convert_messages_can_skip_random_string_for_protocol_clients(self):
+        module = load_gemini_module()
+        module.settings.RANDOM_STRING = True
+        module.settings.RANDOM_STRING_LENGTH = 8
+        client = module.GeminiClient("test-key")
+
+        history, _ = client.convert_messages(
+            [{"role": "user", "content": "hello"}],
+            skip_random_string=True,
+        )
+
+        self.assertEqual(history, [{"role": "user", "parts": [{"text": "hello"}]}])
+
     def test_convert_messages_keeps_remote_image_url_as_file_data(self):
         module = load_gemini_module()
         client = module.GeminiClient("test-key")

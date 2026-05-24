@@ -484,7 +484,13 @@ class GeminiClient:
             raise
 
     # OpenAI 格式请求转换为 gemini 格式请求
-    def convert_messages(self, messages, use_system_prompt=False, model=None):
+    def convert_messages(
+        self,
+        messages,
+        use_system_prompt=False,
+        model=None,
+        skip_random_string=False,
+    ):
         gemini_history = []
         errors = []
 
@@ -685,7 +691,7 @@ class GeminiClient:
             )
 
         # 注入随机字符串
-        if settings.RANDOM_STRING:
+        if settings.RANDOM_STRING and not skip_random_string:
             gemini_history.insert(
                 1,
                 {

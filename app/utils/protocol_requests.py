@@ -241,6 +241,7 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
         or payload.get("max_completion_tokens"),
         tools=_response_tools_to_openai_tools(payload.get("tools")),
         tool_choice=_response_tool_choice_to_openai(payload.get("tool_choice", "auto")),
+        source_protocol="responses",
     )
 
 
@@ -478,4 +479,5 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
         enable_thinking=enable_thinking,
         tools=openai_tools or None,
         tool_choice=mapped_tool_choice,
+        source_protocol="claude",
     )
