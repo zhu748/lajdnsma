@@ -45,8 +45,10 @@ def _response_tool_choice_to_openai(choice: Any) -> Any:
         return choice or "auto"
 
     choice_type = choice.get("type")
-    if choice_type in {"auto", "none", "required"}:
-        return "auto" if choice_type == "required" else choice_type
+    if choice_type in {"auto", "none"}:
+        return choice_type
+    if choice_type == "required":
+        return {"type": "function_calling_config", "mode": "ANY"}
     if choice_type == "function" and choice.get("name"):
         return {"type": "function", "function": {"name": choice["name"]}}
 

@@ -2,7 +2,12 @@ import json
 from typing import Any, Dict, List
 
 from app.utils.errors import responses_error_response
-from app.utils.protocol_common import _ensure_list, _extract_openai_usage, _now_ts
+from app.utils.protocol_common import (
+    _ensure_list,
+    _extract_openai_usage,
+    _now_ts,
+    _openai_finish_reason_to_claude_stop_reason,
+)
 
 
 def openai_chat_to_response_api(
@@ -113,10 +118,9 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
         if thought_signature:
             content[-1]["thought_signature"] = thought_signature
 
-    finish_reason = choice.get("finish_reason")
-    stop_reason = "end_turn"
-    if finish_reason == "tool_calls":
-        stop_reason = "tool_use"
+    stop_reason = _openai_finish_reason_to_claude_stop_reason(
+        choice.get("finish_reason")
+    )
 
     return {
         "id": f"msg_{chat_response.get('id', _now_ts())}",

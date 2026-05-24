@@ -50,6 +50,17 @@ async def _iter_chunks(chunks):
         yield chunk
 
 
+def _event_payloads(events):
+    payloads = []
+    for event in events:
+        for line in event.splitlines():
+            if line.startswith("data: "):
+                data = line[len("data: ") :]
+                if data != "[DONE]":
+                    payloads.append(json.loads(data))
+    return payloads
+
+
 class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
     def test_response_request_to_chat_request(self):
         request = response_request_to_chat_request(
@@ -135,6 +146,28 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             request.tool_choice,
             {"type": "function", "function": {"name": "weather"}},
+        )
+
+    def test_response_tool_choice_required_forces_any_tool(self):
+        request = response_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "input": "Run one tool",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "shell",
+                        "description": "Run shell commands",
+                        "parameters": {"type": "object"},
+                    }
+                ],
+                "tool_choice": {"type": "required"},
+            }
+        )
+
+        self.assertEqual(
+            request.tool_choice,
+            {"type": "function_calling_config", "mode": "ANY"},
         )
 
 
@@ -530,6 +563,44 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response["content"][0]["thinking"], "先思考")
         self.assertEqual(response["content"][1]["text"], "答案")
 
+    def test_openai_chat_to_claude_response_maps_length_stop_reason(self):
+        response = openai_chat_to_claude_response(
+            {
+                "id": "chatcmpl_1",
+                "created": 1,
+                "model": "gemini-2.5-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": "partial"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }
+        )
+
+        self.assertEqual(response["stop_reason"], "max_tokens")
+
+    def test_openai_chat_to_claude_response_maps_safety_stop_reason(self):
+        response = openai_chat_to_claude_response(
+            {
+                "id": "chatcmpl_1",
+                "created": 1,
+                "model": "gemini-2.5-pro",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "SAFETY",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 0},
+            }
+        )
+
+        self.assertEqual(response["stop_reason"], "refusal")
+
     def test_openai_chat_to_claude_response_preserves_tool_thought_signature(self):
         response = openai_chat_to_claude_response(
             {
@@ -608,6 +679,49 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("response.function_call_arguments.done", joined)
         self.assertIn("response.completed", joined)
 
+        payloads = _event_payloads(result)
+        sequence_numbers = [payload["sequence_number"] for payload in payloads]
+        self.assertEqual(sequence_numbers, list(range(1, len(payloads) + 1)))
+        done_event = next(
+            payload
+            for payload in payloads
+            if payload["type"] == "response.function_call_arguments.done"
+        )
+        self.assertEqual(done_event["name"], "weather")
+
+
+    async def test_openai_stream_to_responses_stream_split_tool_call(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_shell","type":"function","function":{}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"shell"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\\"cmd\\\":\\\"pwd\\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_responses_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        payloads = _event_payloads(result)
+        added_events = [
+            payload
+            for payload in payloads
+            if payload["type"] == "response.output_item.added"
+            and payload["item"]["type"] == "function_call"
+        ]
+        self.assertEqual(len(added_events), 1)
+        self.assertEqual(added_events[0]["item"]["name"], "shell")
+        self.assertNotIn('"name": null', "".join(result))
+
+        done_event = next(
+            payload
+            for payload in payloads
+            if payload["type"] == "response.function_call_arguments.done"
+        )
+        self.assertEqual(done_event["name"], "shell")
+        self.assertEqual(done_event["arguments"], "{\"cmd\":\"pwd\"}")
+
 
     async def test_openai_stream_parser_supports_event_and_data_without_space(self):
         chunks = [
@@ -665,6 +779,74 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"stop_reason": "tool_use"', joined)
         self.assertIn('event: message_stop', joined)
 
+    async def test_openai_stream_to_claude_stream_stops_text_before_tool_use(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"I will read it."},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\\\"file_path\\\":\\\"README.md\\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        text_stop_pos = joined.index('event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}')
+        tool_start_pos = joined.index('"type": "tool_use"')
+        self.assertLess(text_stop_pos, tool_start_pos)
+
+    async def test_openai_stream_to_claude_stream_stops_thinking_before_tool_use(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"reasoning_content":"Need the file."},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\\\"file_path\\\":\\\"README.md\\\"}"}}]},"finish_reason":"tool_calls"}]}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        thinking_stop_pos = joined.index('event: content_block_stop\ndata: {"type": "content_block_stop", "index": 0}')
+        tool_start_pos = joined.index('"type": "tool_use"')
+        self.assertLess(thinking_stop_pos, tool_start_pos)
+
+    async def test_openai_stream_to_claude_stream_preserves_tool_thought_signature(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"Read","arguments":"{\\\"file_path\\\":\\\"README.md\\\"}"},"extra_content":{"google":{"thought_signature":"real-signature"}}}]},"finish_reason":"tool_calls"}]}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn('"thought_signature": "real-signature"', joined)
+
+    async def test_openai_stream_to_claude_stream_delays_split_tool_start_until_name(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"Read"}}]},"finish_reason":null}]}\n\n',
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\\"file_path\\\":\\\"README.md\\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn('"type": "tool_use"', joined)
+        self.assertIn('"id": "toolu_1"', joined)
+        self.assertIn('"name": "Read"', joined)
+        self.assertNotIn('"name": ""', joined)
+        self.assertIn('"partial_json": "{\\"file_path\\":\\"README.md\\"}"', joined)
+
     async def test_openai_stream_to_claude_stream_usage_is_top_level(self):
         chunks = [
             'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"你"},"finish_reason":null}]}\n\n',
@@ -680,6 +862,34 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         message_delta = "".join(result).split("event: message_delta\n", 1)[1]
         self.assertIn('"delta": {"stop_reason": "end_turn"', message_delta)
         self.assertIn('"usage": {"input_tokens": 10, "output_tokens": 2}', message_delta)
+
+    async def test_openai_stream_to_claude_stream_maps_length_stop_reason(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"partial"},"finish_reason":"length"}],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        message_delta = "".join(result).split("event: message_delta\n", 1)[1]
+        self.assertIn('"delta": {"stop_reason": "max_tokens"', message_delta)
+
+    async def test_openai_stream_to_claude_stream_maps_safety_stop_reason(self):
+        chunks = [
+            'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{},"finish_reason":"SAFETY"}],"usage":{"prompt_tokens":10,"completion_tokens":0,"total_tokens":10}}\n\n',
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        message_delta = "".join(result).split("event: message_delta\n", 1)[1]
+        self.assertIn('"delta": {"stop_reason": "refusal"', message_delta)
 
     async def test_openai_stream_to_claude_stream(self):
         chunks = [

@@ -63,6 +63,23 @@ def _merge_stream_usage(
     return merged
 
 
+def _openai_finish_reason_to_claude_stop_reason(finish_reason: Any) -> str:
+    if not isinstance(finish_reason, str):
+        return "end_turn"
+
+    normalized = finish_reason.lower()
+    if normalized in {"tool_calls", "function_call"}:
+        return "tool_use"
+    if normalized in {"length", "max_tokens", "max_output_tokens"}:
+        return "max_tokens"
+    if normalized in {"stop", "stop_sequence", "end_turn"}:
+        return "end_turn"
+    if normalized in {"content_filter", "safety", "recitation", "refusal"}:
+        return "refusal"
+
+    return "end_turn"
+
+
 def _ensure_list(value: Any) -> List[Any]:
     if value is None:
         return []

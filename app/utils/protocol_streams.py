@@ -4,6 +4,7 @@ from app.utils.protocol_common import (
     _ensure_list,
     _merge_stream_usage,
     _now_ts,
+    _openai_finish_reason_to_claude_stop_reason,
     _parse_sse_json_events,
     _sse_data,
 )
@@ -17,7 +18,14 @@ async def openai_stream_to_responses_stream(
     created_at = _now_ts()
     response_id = f"resp_{created_at}"
     message_item_id = f"msg_{created_at}"
-    yield _sse_data(
+    sequence_number = 0
+
+    def response_event(payload: Dict[str, Any]) -> str:
+        nonlocal sequence_number
+        sequence_number += 1
+        return _sse_data({**payload, "sequence_number": sequence_number})
+
+    yield response_event(
         {
             "type": "response.created",
             "response": {
@@ -30,7 +38,7 @@ async def openai_stream_to_responses_stream(
             },
         }
     )
-    yield _sse_data(
+    yield response_event(
         {
             "type": "response.in_progress",
             "response": {
@@ -89,7 +97,7 @@ async def openai_stream_to_responses_stream(
                 if text_output_index is None:
                     text_output_index = len(output_items)
                     output_items.append(build_message_item())
-                    yield _sse_data(
+                    yield response_event(
                         {
                             "type": "response.output_item.added",
                             "response_id": response_id,
@@ -97,7 +105,7 @@ async def openai_stream_to_responses_stream(
                             "item": output_items[text_output_index],
                         }
                     )
-                    yield _sse_data(
+                    yield response_event(
                         {
                             "type": "response.content_part.added",
                             "response_id": response_id,
@@ -113,7 +121,7 @@ async def openai_stream_to_responses_stream(
                     )
                 output_text_parts.append(text)
                 output_items[text_output_index] = build_message_item()
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.output_text.delta",
                         "response_id": response_id,
@@ -144,18 +152,11 @@ async def openai_stream_to_responses_stream(
                         "output_index": len(output_items),
                         "item": item,
                         "arguments_parts": [],
+                        "added": False,
                         "done": False,
                     }
                     active_tool_calls[tool_index] = state
                     output_items.append(item)
-                    yield _sse_data(
-                        {
-                            "type": "response.output_item.added",
-                            "response_id": response_id,
-                            "output_index": state["output_index"],
-                            "item": item,
-                        }
-                    )
 
                 item = state["item"]
                 if tool_call.get("id"):
@@ -165,11 +166,22 @@ async def openai_stream_to_responses_stream(
                     item["name"] = function_data["name"]
 
                 arguments_delta = function_data.get("arguments")
-                if arguments_delta:
+                if not state["added"] and (item.get("name") or arguments_delta is not None):
+                    yield response_event(
+                        {
+                            "type": "response.output_item.added",
+                            "response_id": response_id,
+                            "output_index": state["output_index"],
+                            "item": item,
+                        }
+                    )
+                    state["added"] = True
+
+                if arguments_delta is not None:
                     state["arguments_parts"].append(arguments_delta)
                     item["arguments"] = "".join(state["arguments_parts"])
                     output_items[state["output_index"]] = item
-                    yield _sse_data(
+                    yield response_event(
                         {
                             "type": "response.function_call_arguments.delta",
                             "response_id": response_id,
@@ -187,7 +199,7 @@ async def openai_stream_to_responses_stream(
             if text_output_index is None and not output_items:
                 text_output_index = len(output_items)
                 output_items.append(build_message_item())
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.output_item.added",
                         "response_id": response_id,
@@ -195,7 +207,7 @@ async def openai_stream_to_responses_stream(
                         "item": output_items[text_output_index],
                     }
                 )
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.content_part.added",
                         "response_id": response_id,
@@ -212,7 +224,7 @@ async def openai_stream_to_responses_stream(
 
             if text_output_index is not None:
                 done_text = "".join(output_text_parts)
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.output_text.done",
                         "response_id": response_id,
@@ -227,7 +239,7 @@ async def openai_stream_to_responses_stream(
                     "text": done_text,
                     "annotations": [],
                 }
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.content_part.done",
                         "response_id": response_id,
@@ -239,7 +251,7 @@ async def openai_stream_to_responses_stream(
                 )
                 done_item = build_message_item(status="completed")
                 output_items[text_output_index] = done_item
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.output_item.done",
                         "response_id": response_id,
@@ -252,12 +264,23 @@ async def openai_stream_to_responses_stream(
                 if state.get("done"):
                     continue
                 item = state["item"]
+                if not state["added"]:
+                    yield response_event(
+                        {
+                            "type": "response.output_item.added",
+                            "response_id": response_id,
+                            "output_index": state["output_index"],
+                            "item": item,
+                        }
+                    )
+                    state["added"] = True
                 item["arguments"] = "".join(state["arguments_parts"])
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.function_call_arguments.done",
                         "response_id": response_id,
                         "item_id": item["id"],
+                        "name": item.get("name"),
                         "output_index": state["output_index"],
                         "arguments": item["arguments"],
                     }
@@ -265,7 +288,7 @@ async def openai_stream_to_responses_stream(
                 item["status"] = "completed"
                 output_items[state["output_index"]] = item
                 state["done"] = True
-                yield _sse_data(
+                yield response_event(
                     {
                         "type": "response.output_item.done",
                         "response_id": response_id,
@@ -274,7 +297,7 @@ async def openai_stream_to_responses_stream(
                     }
                 )
 
-            yield _sse_data(
+            yield response_event(
                 {
                     "type": "response.completed",
                     "response": build_completed_response(),
@@ -308,6 +331,7 @@ async def openai_stream_to_claude_stream(
     thinking_started = False
     thinking_stopped = False
     text_started = False
+    text_stopped = False
     next_content_index = 0
     text_index = None
     thinking_index = None
@@ -318,6 +342,45 @@ async def openai_stream_to_claude_stream(
         index = next_content_index
         next_content_index += 1
         return index
+
+    def stop_thinking_event() -> str | None:
+        nonlocal thinking_stopped
+        if thinking_started and not thinking_stopped:
+            thinking_stopped = True
+            return sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": thinking_index},
+            )
+        return None
+
+    def stop_text_event() -> str | None:
+        nonlocal text_stopped
+        if text_started and not text_stopped:
+            text_stopped = True
+            return sse_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": text_index},
+            )
+        return None
+
+    def build_tool_start_event(state: Dict[str, Any]) -> str:
+        state["started"] = True
+        content_block = {
+            "type": "tool_use",
+            "id": state["id"],
+            "name": state["name"] or "tool",
+            "input": {},
+        }
+        if state.get("thought_signature"):
+            content_block["thought_signature"] = state["thought_signature"]
+        return sse_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": state["index"],
+                "content_block": content_block,
+            },
+        )
 
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
@@ -355,12 +418,9 @@ async def openai_stream_to_claude_stream(
 
             text = delta.get("content")
             if text:
-                if thinking_started and not thinking_stopped:
-                    yield sse_event(
-                        "content_block_stop",
-                        {"type": "content_block_stop", "index": thinking_index},
-                    )
-                    thinking_stopped = True
+                stop_event = stop_thinking_event()
+                if stop_event:
+                    yield stop_event
                 if not text_started:
                     text_started = True
                     text_index = next_index()
@@ -388,38 +448,47 @@ async def openai_stream_to_claude_stream(
                 function_data = tool_call.get("function", {}) or {}
                 state = active_tool_calls.get(tool_index)
                 if state is None:
+                    stop_event = stop_thinking_event()
+                    if stop_event:
+                        yield stop_event
+                    stop_event = stop_text_event()
+                    if stop_event:
+                        yield stop_event
                     content_index = next_index()
                     tool_id = tool_call.get("id") or f"toolu_{_now_ts()}_{tool_index}"
+                    extra_content = tool_call.get("extra_content") or {}
+                    google_extra = extra_content.get("google", {})
                     state = {
                         "index": content_index,
                         "id": tool_id,
                         "name": function_data.get("name") or "",
                         "input_parts": [],
-                        "started": True,
+                        "thought_signature": google_extra.get("thought_signature")
+                        or google_extra.get("thoughtSignature"),
+                        "started": False,
                         "stopped": False,
                     }
                     active_tool_calls[tool_index] = state
-                    yield sse_event(
-                        "content_block_start",
-                        {
-                            "type": "content_block_start",
-                            "index": content_index,
-                            "content_block": {
-                                "type": "tool_use",
-                                "id": tool_id,
-                                "name": state["name"],
-                                "input": {},
-                            },
-                        },
-                    )
 
                 if tool_call.get("id"):
                     state["id"] = tool_call["id"]
                 if function_data.get("name"):
                     state["name"] = function_data["name"]
+                extra_content = tool_call.get("extra_content") or {}
+                google_extra = extra_content.get("google", {})
+                thought_signature = google_extra.get("thought_signature") or google_extra.get(
+                    "thoughtSignature"
+                )
+                if thought_signature:
+                    state["thought_signature"] = thought_signature
+                if not state["started"] and state["name"]:
+                    yield build_tool_start_event(state)
+
                 arguments_delta = function_data.get("arguments")
-                if arguments_delta:
+                if arguments_delta is not None:
                     state["input_parts"].append(arguments_delta)
+                    if not state["started"]:
+                        yield build_tool_start_event(state)
                     yield sse_event(
                         "content_block_delta",
                         {
@@ -438,23 +507,22 @@ async def openai_stream_to_claude_stream(
 
             if not choice.get("finish_reason"):
                 continue
-            stop_reason = "end_turn"
-            if choice.get("finish_reason") == "tool_calls":
-                stop_reason = "tool_use"
+            stop_reason = _openai_finish_reason_to_claude_stop_reason(
+                choice.get("finish_reason")
+            )
 
             if text_started:
-                yield sse_event(
-                    "content_block_stop",
-                    {"type": "content_block_stop", "index": text_index},
-                )
-            elif thinking_started and not thinking_stopped:
-                yield sse_event(
-                    "content_block_stop",
-                    {"type": "content_block_stop", "index": thinking_index},
-                )
-                thinking_stopped = True
+                stop_event = stop_text_event()
+                if stop_event:
+                    yield stop_event
+            else:
+                stop_event = stop_thinking_event()
+                if stop_event:
+                    yield stop_event
 
             for state in active_tool_calls.values():
+                if not state.get("started"):
+                    yield build_tool_start_event(state)
                 if not state.get("stopped"):
                     yield sse_event(
                         "content_block_stop",
