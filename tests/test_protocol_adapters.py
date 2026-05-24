@@ -464,6 +464,18 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(request.enable_thinking)
         self.assertEqual(request.thinking_budget, 0)
 
+    def test_claude_request_caps_large_thinking_budget_for_gemini(self):
+        request = claude_request_to_chat_request(
+            {
+                "model": "gemini-2.5-pro",
+                "thinking": {"type": "enabled", "budget_tokens": 31999},
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        )
+
+        self.assertTrue(request.enable_thinking)
+        self.assertEqual(request.thinking_budget, 24576)
+
     def test_claude_tool_result_image_uses_marker_text(self):
         request = claude_request_to_chat_request(
             {

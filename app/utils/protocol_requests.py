@@ -5,6 +5,17 @@ from app.models.schemas import ChatCompletionRequest
 from app.utils.protocol_common import _ensure_list
 
 
+GEMINI_MAX_THINKING_BUDGET = 24576
+
+
+def _clamp_gemini_thinking_budget(value: Any) -> int:
+    try:
+        budget = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(budget, GEMINI_MAX_THINKING_BUDGET))
+
+
 def _response_tools_to_openai_tools(tools: Any) -> Optional[List[Dict[str, Any]]]:
     """Convert Responses API function tools to OpenAI chat-completions tools."""
     openai_tools = []
@@ -451,7 +462,9 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
             thinking_budget = 0
         elif thinking_type == "enabled":
             enable_thinking = True
-            thinking_budget = thinking_config.get("budget_tokens", -1)
+            thinking_budget = _clamp_gemini_thinking_budget(
+                thinking_config.get("budget_tokens", 0)
+            )
 
     return ChatCompletionRequest(
         model=payload["model"],

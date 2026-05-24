@@ -14,6 +14,7 @@ from app.utils.sse import iter_sse_json
 
 
 GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+GEMINI_MAX_THINKING_BUDGET = 24576
 
 
 def generate_secure_random_string(length):
@@ -105,6 +106,14 @@ def _guess_mime_type_from_url(url: str) -> Optional[str]:
     if path.endswith(".gif"):
         return "image/gif"
     return None
+
+
+def _clamp_thinking_budget(value) -> int:
+    try:
+        budget = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(budget, GEMINI_MAX_THINKING_BUDGET))
 
 
 @dataclass
@@ -323,7 +332,9 @@ class GeminiClient:
         thinking_config = {}
         if settings.ENABLE_THINKING:
             if request.thinking_budget is not None:
-                thinking_config["thinkingBudget"] = request.thinking_budget
+                thinking_config["thinkingBudget"] = _clamp_thinking_budget(
+                    request.thinking_budget
+                )
             
             if getattr(request, "enable_thinking", False):
                 thinking_config["include_thoughts"] = True

@@ -199,6 +199,31 @@ class GeminiSchemaTestCase(unittest.TestCase):
             },
         )
 
+    def test_convert_openai_request_clamps_thinking_budget(self):
+        module = load_gemini_module()
+        module.settings.ENABLE_THINKING = True
+        client = module.GeminiClient("test-key")
+        request = types.SimpleNamespace(
+            model="gemini-2.5-pro",
+            temperature=0.7,
+            max_tokens=None,
+            top_p=None,
+            top_k=None,
+            stop=None,
+            n=1,
+            thinking_budget=31999,
+            enable_thinking=True,
+            tools=None,
+            tool_choice="auto",
+        )
+
+        _, data = client._convert_openAI_request(request, [], None, None)
+
+        self.assertEqual(
+            data["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            24576,
+        )
+
     def test_convert_messages_preserves_tool_call_thought_signature(self):
         module = load_gemini_module()
         client = module.GeminiClient("test-key")
