@@ -61,28 +61,17 @@ class ResponseTestCase(unittest.TestCase):
         self.assertEqual(converted["choices"][0]["message"]["content"], "answer")
         self.assertNotIn("reasoning_content", converted["choices"][0]["message"])
 
-    def test_protocol_reasoning_requires_opt_in_and_enabled_thinking(self):
+    def test_reasoning_follows_request_thinking_flag(self):
         module = load_response_module()
 
         request = types.SimpleNamespace(
             source_protocol="claude",
             enable_thinking=True,
         )
-        self.assertFalse(module.include_reasoning_for_request(request))
-        self.assertTrue(
-            module.include_reasoning_for_request(
-                request,
-                expose_protocol_thinking=True,
-            )
-        )
+        self.assertTrue(module.include_reasoning_for_request(request))
 
         request.enable_thinking = False
-        self.assertFalse(
-            module.include_reasoning_for_request(
-                request,
-                expose_protocol_thinking=True,
-            )
-        )
+        self.assertFalse(module.include_reasoning_for_request(request))
 
 
 if __name__ == "__main__":

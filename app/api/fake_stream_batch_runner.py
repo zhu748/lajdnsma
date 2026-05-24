@@ -82,10 +82,7 @@ async def run_fake_stream_batch_until_success(
                                 cached_response,
                                 stream=True,
                                 include_reasoning=include_reasoning_for_request(
-                                    chat_request,
-                                    expose_protocol_thinking=getattr(
-                                        settings, "CLAUDE_EXPOSE_THINKING", False
-                                    ),
+                                    chat_request
                                 ),
                             )
                         cancel_pending_tasks(tasks)

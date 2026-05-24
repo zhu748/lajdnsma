@@ -40,10 +40,7 @@ async def handle_nonstream_task_status(
                     cached_response,
                     stream=False,
                     include_reasoning=include_reasoning_for_request(
-                        chat_request,
-                        expose_protocol_thinking=getattr(
-                            settings, "CLAUDE_EXPOSE_THINKING", False
-                        ),
+                        chat_request
                     ),
                 )
             if serialize_json:

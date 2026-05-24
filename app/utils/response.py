@@ -83,13 +83,7 @@ def gemini_from_text(
         return gemini_response
 
 
-def include_reasoning_for_request(chat_request, *, expose_protocol_thinking=False):
-    source_protocol = getattr(chat_request, "source_protocol", None)
-    if source_protocol in {"claude", "responses"}:
-        return bool(
-            expose_protocol_thinking
-            and getattr(chat_request, "enable_thinking", False)
-        )
+def include_reasoning_for_request(chat_request):
     return bool(getattr(chat_request, "enable_thinking", True))
 
 

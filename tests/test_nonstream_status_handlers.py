@@ -21,7 +21,7 @@ def load_status_module():
     fake_response = types.ModuleType("app.utils.response")
     fake_response.ensure_gemini_timing_fields = lambda data: {**data, "timing": True}
     fake_response.include_reasoning_for_request = (
-        lambda request, expose_protocol_thinking=False: expose_protocol_thinking
+        lambda request: getattr(request, "enable_thinking", True)
     )
     fake_response.openAI_from_Gemini = lambda cached_response, stream=False, include_reasoning=True: {
         "converted": cached_response.data,
