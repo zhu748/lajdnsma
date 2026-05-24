@@ -4,7 +4,7 @@ from app.utils.protocol_common import (
     _ensure_list,
     _merge_stream_usage,
     _now_ts,
-    _parse_sse_json,
+    _parse_sse_json_events,
     _sse_data,
 )
 from app.utils.sse import sse_event
@@ -81,111 +81,109 @@ async def openai_stream_to_responses_stream(
 
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
-        parsed = _parse_sse_json(chunk)
-        if not parsed:
-            continue
-
-        choice = parsed.get("choices", [{}])[0]
-        delta = choice.get("delta", {})
-        text = delta.get("content")
-        if text:
-            if text_output_index is None:
-                text_output_index = len(output_items)
-                output_items.append(build_message_item())
+        for parsed in _parse_sse_json_events(chunk):
+            choice = parsed.get("choices", [{}])[0]
+            delta = choice.get("delta", {})
+            text = delta.get("content")
+            if text:
+                if text_output_index is None:
+                    text_output_index = len(output_items)
+                    output_items.append(build_message_item())
+                    yield _sse_data(
+                        {
+                            "type": "response.output_item.added",
+                            "response_id": response_id,
+                            "output_index": text_output_index,
+                            "item": output_items[text_output_index],
+                        }
+                    )
+                    yield _sse_data(
+                        {
+                            "type": "response.content_part.added",
+                            "response_id": response_id,
+                            "item_id": message_item_id,
+                            "output_index": text_output_index,
+                            "content_index": content_index,
+                            "part": {
+                                "type": "output_text",
+                                "text": "",
+                                "annotations": [],
+                            },
+                        }
+                    )
+                output_text_parts.append(text)
+                output_items[text_output_index] = build_message_item()
                 yield _sse_data(
                     {
-                        "type": "response.output_item.added",
-                        "response_id": response_id,
-                        "output_index": text_output_index,
-                        "item": output_items[text_output_index],
-                    }
-                )
-                yield _sse_data(
-                    {
-                        "type": "response.content_part.added",
+                        "type": "response.output_text.delta",
                         "response_id": response_id,
                         "item_id": message_item_id,
                         "output_index": text_output_index,
                         "content_index": content_index,
-                        "part": {
-                            "type": "output_text",
-                            "text": "",
-                            "annotations": [],
-                        },
+                        "delta": text,
                     }
                 )
-            output_text_parts.append(text)
-            output_items[text_output_index] = build_message_item()
-            yield _sse_data(
-                {
-                    "type": "response.output_text.delta",
-                    "response_id": response_id,
-                    "item_id": message_item_id,
-                    "output_index": text_output_index,
-                    "content_index": content_index,
-                    "delta": text,
-                }
-            )
 
-        for tool_call in _ensure_list(delta.get("tool_calls")):
-            if not isinstance(tool_call, dict):
-                continue
-            tool_index = int(tool_call.get("index", len(active_tool_calls)) or 0)
-            function_data = tool_call.get("function", {}) or {}
-            state = active_tool_calls.get(tool_index)
-            if state is None:
-                call_id = tool_call.get("id") or f"fc_{created_at}_{tool_index}"
-                item = {
-                    "id": call_id,
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": function_data.get("name"),
-                    "arguments": "",
-                    "status": "in_progress",
-                }
-                state = {
-                    "output_index": len(output_items),
-                    "item": item,
-                    "arguments_parts": [],
-                    "done": False,
-                }
-                active_tool_calls[tool_index] = state
-                output_items.append(item)
-                yield _sse_data(
-                    {
-                        "type": "response.output_item.added",
-                        "response_id": response_id,
-                        "output_index": state["output_index"],
+            for tool_call in _ensure_list(delta.get("tool_calls")):
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_index = int(tool_call.get("index", len(active_tool_calls)) or 0)
+                function_data = tool_call.get("function", {}) or {}
+                state = active_tool_calls.get(tool_index)
+                if state is None:
+                    call_id = tool_call.get("id") or f"fc_{created_at}_{tool_index}"
+                    item = {
+                        "id": call_id,
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": function_data.get("name"),
+                        "arguments": "",
+                        "status": "in_progress",
+                    }
+                    state = {
+                        "output_index": len(output_items),
                         "item": item,
+                        "arguments_parts": [],
+                        "done": False,
                     }
-                )
+                    active_tool_calls[tool_index] = state
+                    output_items.append(item)
+                    yield _sse_data(
+                        {
+                            "type": "response.output_item.added",
+                            "response_id": response_id,
+                            "output_index": state["output_index"],
+                            "item": item,
+                        }
+                    )
 
-            item = state["item"]
-            if tool_call.get("id"):
-                item["id"] = tool_call["id"]
-                item["call_id"] = tool_call["id"]
-            if function_data.get("name"):
-                item["name"] = function_data["name"]
+                item = state["item"]
+                if tool_call.get("id"):
+                    item["id"] = tool_call["id"]
+                    item["call_id"] = tool_call["id"]
+                if function_data.get("name"):
+                    item["name"] = function_data["name"]
 
-            arguments_delta = function_data.get("arguments")
-            if arguments_delta:
-                state["arguments_parts"].append(arguments_delta)
-                item["arguments"] = "".join(state["arguments_parts"])
-                output_items[state["output_index"]] = item
-                yield _sse_data(
-                    {
-                        "type": "response.function_call_arguments.delta",
-                        "response_id": response_id,
-                        "item_id": item["id"],
-                        "output_index": state["output_index"],
-                        "delta": arguments_delta,
-                    }
-                )
+                arguments_delta = function_data.get("arguments")
+                if arguments_delta:
+                    state["arguments_parts"].append(arguments_delta)
+                    item["arguments"] = "".join(state["arguments_parts"])
+                    output_items[state["output_index"]] = item
+                    yield _sse_data(
+                        {
+                            "type": "response.function_call_arguments.delta",
+                            "response_id": response_id,
+                            "item_id": item["id"],
+                            "output_index": state["output_index"],
+                            "delta": arguments_delta,
+                        }
+                    )
 
-        usage = parsed.get("usage", {})
-        latest_usage = _merge_stream_usage(latest_usage, usage)
+            usage = parsed.get("usage", {})
+            latest_usage = _merge_stream_usage(latest_usage, usage)
 
-        if choice.get("finish_reason"):
+            if not choice.get("finish_reason"):
+                continue
             if text_output_index is None and not output_items:
                 text_output_index = len(output_items)
                 output_items.append(build_message_item())
@@ -323,125 +321,123 @@ async def openai_stream_to_claude_stream(
 
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
-        parsed = _parse_sse_json(chunk)
-        if not parsed:
-            continue
-
-        choice = parsed.get("choices", [{}])[0]
-        delta = choice.get("delta", {})
-        reasoning_text = delta.get("reasoning_content")
-        if reasoning_text:
-            if not thinking_started:
-                thinking_started = True
-                thinking_index = next_index()
-                yield sse_event(
-                    "content_block_start",
-                    {
-                        "type": "content_block_start",
-                        "index": thinking_index,
-                        "content_block": {
-                            "type": "thinking",
-                            "thinking": "",
-                            "signature": "",
+        for parsed in _parse_sse_json_events(chunk):
+            choice = parsed.get("choices", [{}])[0]
+            delta = choice.get("delta", {})
+            reasoning_text = delta.get("reasoning_content")
+            if reasoning_text:
+                if not thinking_started:
+                    thinking_started = True
+                    thinking_index = next_index()
+                    yield sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": thinking_index,
+                            "content_block": {
+                                "type": "thinking",
+                                "thinking": "",
+                                "signature": "",
+                            },
                         },
-                    },
-                )
-            yield sse_event(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": thinking_index,
-                    "delta": {
-                        "type": "thinking_delta",
-                        "thinking": reasoning_text,
-                    },
-                },
-            )
-
-        text = delta.get("content")
-        if text:
-            if thinking_started and not thinking_stopped:
-                yield sse_event(
-                    "content_block_stop",
-                    {"type": "content_block_stop", "index": thinking_index},
-                )
-                thinking_stopped = True
-            if not text_started:
-                text_started = True
-                text_index = next_index()
-                yield sse_event(
-                    "content_block_start",
-                    {
-                        "type": "content_block_start",
-                        "index": text_index,
-                        "content_block": {"type": "text", "text": ""},
-                    },
-                )
-            yield sse_event(
-                "content_block_delta",
-                {
-                    "type": "content_block_delta",
-                    "index": text_index,
-                    "delta": {"type": "text_delta", "text": text},
-                },
-            )
-
-        for tool_call in _ensure_list(delta.get("tool_calls")):
-            if not isinstance(tool_call, dict):
-                continue
-            tool_index = int(tool_call.get("index", len(active_tool_calls)) or 0)
-            function_data = tool_call.get("function", {}) or {}
-            state = active_tool_calls.get(tool_index)
-            if state is None:
-                content_index = next_index()
-                tool_id = tool_call.get("id") or f"toolu_{_now_ts()}_{tool_index}"
-                state = {
-                    "index": content_index,
-                    "id": tool_id,
-                    "name": function_data.get("name") or "",
-                    "input_parts": [],
-                    "started": True,
-                    "stopped": False,
-                }
-                active_tool_calls[tool_index] = state
-                yield sse_event(
-                    "content_block_start",
-                    {
-                        "type": "content_block_start",
-                        "index": content_index,
-                        "content_block": {
-                            "type": "tool_use",
-                            "id": tool_id,
-                            "name": state["name"],
-                            "input": {},
-                        },
-                    },
-                )
-
-            if tool_call.get("id"):
-                state["id"] = tool_call["id"]
-            if function_data.get("name"):
-                state["name"] = function_data["name"]
-            arguments_delta = function_data.get("arguments")
-            if arguments_delta:
-                state["input_parts"].append(arguments_delta)
+                    )
                 yield sse_event(
                     "content_block_delta",
                     {
                         "type": "content_block_delta",
-                        "index": state["index"],
+                        "index": thinking_index,
                         "delta": {
-                            "type": "input_json_delta",
-                            "partial_json": arguments_delta,
+                            "type": "thinking_delta",
+                            "thinking": reasoning_text,
                         },
                     },
                 )
 
-        usage = parsed.get("usage", {})
-        if usage:
-            latest_usage = _merge_stream_usage(latest_usage, usage)
+            text = delta.get("content")
+            if text:
+                if thinking_started and not thinking_stopped:
+                    yield sse_event(
+                        "content_block_stop",
+                        {"type": "content_block_stop", "index": thinking_index},
+                    )
+                    thinking_stopped = True
+                if not text_started:
+                    text_started = True
+                    text_index = next_index()
+                    yield sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": text_index,
+                            "content_block": {"type": "text", "text": ""},
+                        },
+                    )
+                yield sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": text_index,
+                        "delta": {"type": "text_delta", "text": text},
+                    },
+                )
 
-        if choice.get("finish_reason"):
+            for tool_call in _ensure_list(delta.get("tool_calls")):
+                if not isinstance(tool_call, dict):
+                    continue
+                tool_index = int(tool_call.get("index", len(active_tool_calls)) or 0)
+                function_data = tool_call.get("function", {}) or {}
+                state = active_tool_calls.get(tool_index)
+                if state is None:
+                    content_index = next_index()
+                    tool_id = tool_call.get("id") or f"toolu_{_now_ts()}_{tool_index}"
+                    state = {
+                        "index": content_index,
+                        "id": tool_id,
+                        "name": function_data.get("name") or "",
+                        "input_parts": [],
+                        "started": True,
+                        "stopped": False,
+                    }
+                    active_tool_calls[tool_index] = state
+                    yield sse_event(
+                        "content_block_start",
+                        {
+                            "type": "content_block_start",
+                            "index": content_index,
+                            "content_block": {
+                                "type": "tool_use",
+                                "id": tool_id,
+                                "name": state["name"],
+                                "input": {},
+                            },
+                        },
+                    )
+
+                if tool_call.get("id"):
+                    state["id"] = tool_call["id"]
+                if function_data.get("name"):
+                    state["name"] = function_data["name"]
+                arguments_delta = function_data.get("arguments")
+                if arguments_delta:
+                    state["input_parts"].append(arguments_delta)
+                    yield sse_event(
+                        "content_block_delta",
+                        {
+                            "type": "content_block_delta",
+                            "index": state["index"],
+                            "delta": {
+                                "type": "input_json_delta",
+                                "partial_json": arguments_delta,
+                            },
+                        },
+                    )
+
+            usage = parsed.get("usage", {})
+            if usage:
+                latest_usage = _merge_stream_usage(latest_usage, usage)
+
+            if not choice.get("finish_reason"):
+                continue
             stop_reason = "end_turn"
             if choice.get("finish_reason") == "tool_calls":
                 stop_reason = "tool_use"

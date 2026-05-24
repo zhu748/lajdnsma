@@ -625,6 +625,27 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"input_tokens": 1', joined)
         self.assertIn('"output_tokens": 2', joined)
 
+    async def test_openai_stream_parser_supports_multiple_events_per_chunk(self):
+        chunks = [
+            (
+                'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}\n\n'
+                'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}\n\n'
+                'data: [DONE]\n\n'
+            ),
+        ]
+
+        result = []
+        async for item in openai_stream_to_claude_stream(
+            _iter_chunks(chunks), "gemini-2.5-pro"
+        ):
+            result.append(item)
+
+        joined = "".join(result)
+        self.assertIn("message_start", joined)
+        self.assertIn('"text": "hello"', joined)
+        self.assertIn('"stop_reason": "end_turn"', joined)
+        self.assertIn("message_stop", joined)
+
     async def test_openai_stream_to_claude_stream_tool_call(self):
         chunks = [
             'data: {"id":"chatcmpl_1","model":"gemini-2.5-pro","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"toolu_1","type":"function","function":{"name":"Bash","arguments":"{\\\"command\\\":\\\"pwd\\\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n\n',

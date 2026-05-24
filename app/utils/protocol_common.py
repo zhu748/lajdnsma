@@ -75,25 +75,40 @@ def _sse_data(payload: Dict[str, Any]) -> str:
     return sse_data(payload)
 
 
-def _parse_sse_json(chunk: str) -> Optional[Dict[str, Any]]:
-    """Parse SSE chunk and return JSON payload from one or more data lines."""
+def _parse_sse_json_events(chunk: str) -> List[Dict[str, Any]]:
+    """Parse one transport chunk that may contain one or more SSE events."""
+    events: List[Dict[str, Any]] = []
     data_lines: List[str] = []
+
+    def flush_event() -> None:
+        if not data_lines:
+            return
+
+        payload = "\n".join(data_lines).strip()
+        data_lines.clear()
+        if not payload or payload == "[DONE]":
+            return
+
+        try:
+            events.append(json.loads(payload))
+        except json.JSONDecodeError:
+            return
+
     for line in chunk.splitlines():
         line = line.strip()
-        if not line or line.startswith("event:"):
+        if not line:
+            flush_event()
+            continue
+        if line.startswith("event:"):
             continue
         if line.startswith("data:"):
             data_lines.append(line[5:].strip())
 
-    if not data_lines:
-        return None
+    flush_event()
+    return events
 
-    payload = "\n".join(data_lines).strip()
-    if not payload or payload == "[DONE]":
-        return None
 
-    try:
-        return json.loads(payload)
-    except json.JSONDecodeError:
-        return None
-
+def _parse_sse_json(chunk: str) -> Optional[Dict[str, Any]]:
+    """Parse SSE chunk and return the first JSON payload, if present."""
+    events = _parse_sse_json_events(chunk)
+    return events[0] if events else None
