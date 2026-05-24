@@ -21,6 +21,7 @@ class ChatCompletionRequest(BaseModel):
     thinking_budget: Optional[int] = -1
     enable_thinking: Optional[bool] = True
     reasoning_effort: Optional[str] = None
+    expose_reasoning: Optional[bool] = None
     source_protocol: Optional[str] = None
     # 函数调用
     tools: Optional[List[Dict[str, Any]]] = None

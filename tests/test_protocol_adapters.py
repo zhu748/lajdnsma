@@ -423,7 +423,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             {"type": "function_calling_config", "mode": "ANY"},
         )
 
-    def test_claude_request_to_chat_request_preserves_images_and_thinking(self):
+    def test_claude_request_to_chat_request_preserves_images_and_hides_thinking(self):
         request = claude_request_to_chat_request(
             {
                 "model": "gemini-2.5-pro",
@@ -449,6 +449,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(request.thinking_budget, 1024)
         self.assertTrue(request.enable_thinking)
+        self.assertFalse(request.expose_reasoning)
         self.assertEqual(request.messages[0]["content"][0]["text"], "看图")
         self.assertEqual(
             request.messages[0]["content"][1]["image_url"]["url"],
@@ -464,6 +465,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse(request.enable_thinking)
+        self.assertFalse(request.expose_reasoning)
         self.assertEqual(request.thinking_budget, 0)
 
     def test_claude_request_caps_large_thinking_budget_for_gemini(self):
@@ -476,6 +478,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(request.enable_thinking)
+        self.assertFalse(request.expose_reasoning)
         self.assertEqual(request.thinking_budget, 24576)
 
     def test_claude_tool_result_image_uses_marker_text(self):

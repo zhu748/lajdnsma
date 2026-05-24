@@ -61,15 +61,20 @@ class ResponseTestCase(unittest.TestCase):
         self.assertEqual(converted["choices"][0]["message"]["content"], "answer")
         self.assertNotIn("reasoning_content", converted["choices"][0]["message"])
 
-    def test_reasoning_follows_request_thinking_flag(self):
+    def test_reasoning_follows_request_exposure_flag(self):
         module = load_response_module()
 
         request = types.SimpleNamespace(
             source_protocol="claude",
             enable_thinking=True,
+            expose_reasoning=True,
         )
         self.assertTrue(module.include_reasoning_for_request(request))
 
+        request.expose_reasoning = False
+        self.assertFalse(module.include_reasoning_for_request(request))
+
+        request.expose_reasoning = None
         request.enable_thinking = False
         self.assertFalse(module.include_reasoning_for_request(request))
 

@@ -453,15 +453,13 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
             )
 
 
-    thinking_config = payload.get("thinking")
     enable_thinking = False
     thinking_budget = 0
+    expose_reasoning = False
+    thinking_config = payload.get("thinking")
     if isinstance(thinking_config, dict):
         thinking_type = thinking_config.get("type")
-        if thinking_type == "disabled":
-            enable_thinking = False
-            thinking_budget = 0
-        elif thinking_type == "enabled":
+        if thinking_type == "enabled":
             enable_thinking = True
             thinking_budget = _clamp_gemini_thinking_budget(
                 thinking_config.get("budget_tokens", 0)
@@ -477,6 +475,7 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
         stop=payload.get("stop_sequences"),
         thinking_budget=thinking_budget,
         enable_thinking=enable_thinking,
+        expose_reasoning=expose_reasoning,
         tools=openai_tools or None,
         tool_choice=mapped_tool_choice,
         source_protocol="claude",

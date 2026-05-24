@@ -84,6 +84,9 @@ def gemini_from_text(
 
 
 def include_reasoning_for_request(chat_request):
+    expose_reasoning = getattr(chat_request, "expose_reasoning", None)
+    if expose_reasoning is not None:
+        return bool(expose_reasoning)
     return bool(getattr(chat_request, "enable_thinking", True))
 
 
