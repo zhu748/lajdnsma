@@ -79,6 +79,9 @@ search = {
 # 随机字符串
 RANDOM_STRING = os.environ.get("RANDOM_STRING", "true").lower() in ["true", "1", "yes"]
 RANDOM_STRING_LENGTH = int(os.environ.get("RANDOM_STRING_LENGTH", "5"))
+CLAUDE_EXPOSE_THINKING = os.environ.get(
+    "CLAUDE_EXPOSE_THINKING", "false"
+).lower() in ["true", "1", "yes"]
 
 # 是否全局启用思考过程
 ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "true").lower() in [

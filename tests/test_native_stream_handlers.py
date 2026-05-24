@@ -42,6 +42,9 @@ def load_native_stream_module(chunks=None, raise_error=False):
 
     fake_response = types.ModuleType("app.utils.response")
     fake_response.ensure_gemini_timing_fields = lambda data: {**data, "timing": True}
+    fake_response.include_reasoning_for_request = (
+        lambda request, expose_protocol_thinking=False: expose_protocol_thinking
+    )
     fake_response.openAI_from_Gemini = lambda chunk, stream=True, include_reasoning=True: {
         "chunk": chunk.data,
         "stream": stream,

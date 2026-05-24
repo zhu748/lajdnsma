@@ -1,6 +1,10 @@
 import app.config.settings as settings
 from app.utils.error_handling import handle_gemini_error
-from app.utils.response import ensure_gemini_timing_fields, openAI_from_Gemini
+from app.utils.response import (
+    ensure_gemini_timing_fields,
+    include_reasoning_for_request,
+    openAI_from_Gemini,
+)
 from app.utils.response_loop_helpers import (
     dump_json_response,
     log_empty_response_count,
@@ -35,11 +39,12 @@ async def handle_nonstream_task_status(
                 response = openAI_from_Gemini(
                     cached_response,
                     stream=False,
-                    include_reasoning=bool(
-                        getattr(chat_request, "enable_thinking", True)
-                    )
-                    and getattr(chat_request, "source_protocol", None)
-                    not in {"claude", "responses"},
+                    include_reasoning=include_reasoning_for_request(
+                        chat_request,
+                        expose_protocol_thinking=getattr(
+                            settings, "CLAUDE_EXPOSE_THINKING", False
+                        ),
+                    ),
                 )
             if serialize_json:
                 response = dump_json_response(response)

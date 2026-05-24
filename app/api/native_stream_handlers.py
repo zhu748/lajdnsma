@@ -1,7 +1,11 @@
 from app.services import GeminiClient
 from app.utils import handle_gemini_error, update_api_call_stats
 from app.utils.gemini_response_processing import select_safety_settings
-from app.utils.response import ensure_gemini_timing_fields, openAI_from_Gemini
+from app.utils.response import (
+    ensure_gemini_timing_fields,
+    include_reasoning_for_request,
+    openAI_from_Gemini,
+)
 from app.utils.response_loop_helpers import (
     dump_json_response,
     log_empty_response_count,
@@ -51,11 +55,12 @@ async def generate_native_stream_chunks(
                     yield "chunk", openAI_from_Gemini(
                         chunk,
                         stream=True,
-                        include_reasoning=bool(
-                            getattr(chat_request, "enable_thinking", True)
-                        )
-                        and getattr(chat_request, "source_protocol", None)
-                        not in {"claude", "responses"},
+                        include_reasoning=include_reasoning_for_request(
+                            chat_request,
+                            expose_protocol_thinking=getattr(
+                                settings, "CLAUDE_EXPOSE_THINKING", False
+                            ),
+                        ),
                     )
             else:
                 log_empty_response_count(

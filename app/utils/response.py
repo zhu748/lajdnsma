@@ -83,6 +83,16 @@ def gemini_from_text(
         return gemini_response
 
 
+def include_reasoning_for_request(chat_request, *, expose_protocol_thinking=False):
+    source_protocol = getattr(chat_request, "source_protocol", None)
+    if source_protocol in {"claude", "responses"}:
+        return bool(
+            expose_protocol_thinking
+            and getattr(chat_request, "enable_thinking", False)
+        )
+    return bool(getattr(chat_request, "enable_thinking", True))
+
+
 def openAI_from_Gemini(response, stream=True, include_reasoning=True):
     """
     根据 GeminiResponseWrapper 对象创建 OpenAI 标准响应对象块。
