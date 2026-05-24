@@ -48,7 +48,13 @@ async def generate_native_stream_chunks(
                     )
                     yield "chunk", sse_text(json_payload)
                 else:
-                    yield "chunk", openAI_from_Gemini(chunk, stream=True)
+                    yield "chunk", openAI_from_Gemini(
+                        chunk,
+                        stream=True,
+                        include_reasoning=bool(
+                            getattr(chat_request, "enable_thinking", True)
+                        ),
+                    )
             else:
                 log_empty_response_count(
                     api_key,

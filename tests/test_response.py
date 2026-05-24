@@ -39,6 +39,28 @@ class ResponseTestCase(unittest.TestCase):
             [{"text": ""}],
         )
 
+    def test_openai_from_gemini_can_suppress_reasoning_content(self):
+        module = load_response_module()
+        response = types.SimpleNamespace(
+            model="gemini-2.5-pro",
+            finish_reason="STOP",
+            text="answer",
+            thoughts="hidden reasoning",
+            function_call=None,
+            prompt_token_count=1,
+            candidates_token_count=1,
+            total_token_count=2,
+        )
+
+        converted = module.openAI_from_Gemini(
+            response,
+            stream=False,
+            include_reasoning=False,
+        )
+
+        self.assertEqual(converted["choices"][0]["message"]["content"], "answer")
+        self.assertNotIn("reasoning_content", converted["choices"][0]["message"])
+
 
 if __name__ == "__main__":
     unittest.main()

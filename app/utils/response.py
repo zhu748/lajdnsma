@@ -83,7 +83,7 @@ def gemini_from_text(
         return gemini_response
 
 
-def openAI_from_Gemini(response, stream=True):
+def openAI_from_Gemini(response, stream=True, include_reasoning=True):
     """
     根据 GeminiResponseWrapper 对象创建 OpenAI 标准响应对象块。
 
@@ -141,9 +141,9 @@ def openAI_from_Gemini(response, stream=True):
             "content": None,  # 函数调用时 content 为 null
             "tool_calls": tool_calls,
         }
-    elif response.text or response.thoughts:
+    elif response.text or (include_reasoning and response.thoughts):
         content_chunk = {"role": "assistant", "content": response.text}
-        if response.thoughts:
+        if include_reasoning and response.thoughts:
             content_chunk["reasoning_content"] = response.thoughts
     
     if stream:

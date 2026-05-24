@@ -20,9 +20,10 @@ def load_status_module():
 
     fake_response = types.ModuleType("app.utils.response")
     fake_response.ensure_gemini_timing_fields = lambda data: {**data, "timing": True}
-    fake_response.openAI_from_Gemini = lambda cached_response, stream=False: {
+    fake_response.openAI_from_Gemini = lambda cached_response, stream=False, include_reasoning=True: {
         "converted": cached_response.data,
         "stream": stream,
+        "include_reasoning": include_reasoning,
     }
 
     fake_loop_helpers = types.ModuleType("app.utils.response_loop_helpers")

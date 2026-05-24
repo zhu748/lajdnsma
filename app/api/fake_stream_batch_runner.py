@@ -77,7 +77,13 @@ async def run_fake_stream_batch_until_success(
                             )
                             yield "chunk", sse_text(json_payload)
                         else:
-                            yield "chunk", openAI_from_Gemini(cached_response, stream=True)
+                            yield "chunk", openAI_from_Gemini(
+                                cached_response,
+                                stream=True,
+                                include_reasoning=bool(
+                                    getattr(chat_request, "enable_thinking", True)
+                                ),
+                            )
                         cancel_pending_tasks(tasks)
                         yield "summary", {
                             "success": True,

@@ -32,7 +32,13 @@ async def handle_nonstream_task_status(
             if is_gemini:
                 response = ensure_gemini_timing_fields(cached_response.data)
             else:
-                response = openAI_from_Gemini(cached_response, stream=False)
+                response = openAI_from_Gemini(
+                    cached_response,
+                    stream=False,
+                    include_reasoning=bool(
+                        getattr(chat_request, "enable_thinking", True)
+                    ),
+                )
             if serialize_json:
                 response = dump_json_response(response)
             return "success", response, empty_response_count
