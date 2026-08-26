@@ -45,7 +45,7 @@ function stopPolling() {
 
 async function unlock() {
   if (!pw.value) {
-    pwError.value = 'Please enter a password'
+    pwError.value = '请输入密码'
     return
   }
   pwLoading.value = true
@@ -54,13 +54,13 @@ async function unlock() {
   try {
     await dashboardStore.fetchDashboardData()
     if (dashboardStore.lastError === 'AUTH_FAILED' || dashboardStore.lastError === 'PASSWORD_REQUIRED') {
-      pwError.value = 'Authentication failed'
+      pwError.value = '密码验证失败'
       dashboardStore.setSessionPassword('')
     } else {
       startPolling()
     }
   } catch (e) {
-    pwError.value = e.message || 'Authentication failed'
+    pwError.value = e.message || '密码验证失败'
     dashboardStore.setSessionPassword('')
   } finally {
     pwLoading.value = false
@@ -108,8 +108,13 @@ function formatTime(t) {
     <!-- ============ Header ============ -->
     <header class="app-header">
       <div class="app-header__brand">
-        <span class="app-header__brand-icon">G</span>
-        <span class="app-header__brand-text">Gateway Console</span>
+        <span class="app-header__brand-icon">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </svg>
+        </span>
+        <span class="app-header__brand-text">网关控制台</span>
       </div>
 
       <div class="app-header__spacer" />
@@ -117,13 +122,13 @@ function formatTime(t) {
       <div class="app-header__actions">
         <span v-if="isUnlocked" class="pill pill--success hidden-sm">
           <span class="pill__dot pill__dot--pulse" />
-          Online
+          在线
         </span>
         <button
           v-if="isUnlocked"
           class="btn btn--secondary btn--sm"
           @click="toggleVertex"
-          :title="enableVertex ? 'Disable Vertex mode' : 'Enable Vertex mode'"
+          :title="enableVertex ? '关闭 Vertex 模式' : '开启 Vertex 模式'"
         >
           Vertex
           <span
@@ -131,13 +136,13 @@ function formatTime(t) {
             :class="enableVertex ? 'pill--accent' : ''"
             style="height:18px;padding:0 6px;font-size:10px;"
           >
-            {{ enableVertex ? 'ON' : 'OFF' }}
+            {{ enableVertex ? '开' : '关' }}
           </span>
         </button>
         <button
           class="btn btn--ghost btn--sm btn--icon"
           @click="toggleDarkMode"
-          :title="isDarkMode ? 'Switch to light' : 'Switch to dark'"
+          :title="isDarkMode ? '切换浅色模式' : '切换深色模式'"
         >
           <span v-if="isDarkMode">☀</span>
           <span v-else>☾</span>
@@ -146,7 +151,7 @@ function formatTime(t) {
           v-if="isUnlocked"
           class="btn btn--ghost btn--sm btn--icon"
           @click="handleRefresh"
-          title="Refresh"
+          title="刷新数据"
         >
           ↻
         </button>
@@ -154,9 +159,9 @@ function formatTime(t) {
           v-if="isUnlocked"
           class="btn btn--ghost btn--sm"
           @click="lock"
-          title="Lock session"
+          title="锁定会话"
         >
-          Lock
+          锁定
         </button>
       </div>
     </header>
@@ -165,24 +170,27 @@ function formatTime(t) {
     <main class="app-main">
       <!-- Password gate -->
       <div v-if="!isUnlocked" class="lock-card-wrap">
-        <div class="card" style="max-width:400px;width:100%;">
-          <div class="card__header">
-            <div>
-              <div class="card__title">Authentication required</div>
-              <div class="card__subtitle">
-                Enter the operator password to access the console.
-              </div>
+        <div class="card lock-card">
+          <div class="lock-card__header">
+            <div class="lock-card__icon">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
             </div>
+            <div class="lock-card__title">需要身份验证</div>
+            <div class="lock-card__subtitle">输入管理密码以访问控制台</div>
           </div>
-          <div class="card__body">
-            <form @submit.prevent="unlock" class="col" style="gap:12px;">
+          <div class="lock-card__body">
+            <form @submit.prevent="unlock" class="col" style="gap:14px;">
               <div class="field">
-                <label class="field__label">Password</label>
+                <label class="field__label" for="lock-pw">密码</label>
                 <input
+                  id="lock-pw"
                   v-model="pw"
                   type="password"
                   class="input"
-                  placeholder="Enter password"
+                  placeholder="请输入密码"
                   autofocus
                   autocomplete="current-password"
                 >
@@ -191,7 +199,7 @@ function formatTime(t) {
                 </div>
               </div>
               <button type="submit" class="btn btn--primary btn--lg" :disabled="pwLoading">
-                {{ pwLoading ? 'Verifying…' : 'Unlock' }}
+                {{ pwLoading ? '验证中…' : '解锁' }}
               </button>
             </form>
           </div>
@@ -201,8 +209,8 @@ function formatTime(t) {
       <!-- Console -->
       <template v-else>
         <div v-if="lastError === 'AUTH_FAILED'" class="banner banner--warning">
-          <strong>Session expired.</strong>
-          The saved password is no longer valid. Please lock and unlock again.
+          <strong>会话已过期。</strong>
+          保存的密码已失效，请锁定后重新解锁。
         </div>
 
         <StatusSection />
@@ -219,7 +227,47 @@ function formatTime(t) {
   align-items: center;
   justify-content: center;
   min-height: calc(100vh - var(--header-h) - 48px);
+  min-height: calc(100dvh - var(--header-h) - 48px);
   padding: var(--sp-6) 0;
+}
+
+/* 锁屏卡片：居中布局 + 顶部品牌化图标，比原来的左侧标题卡片更
+   有「登录页」的仪式感 */
+.lock-card {
+  max-width: 400px;
+  width: 100%;
+  box-shadow: var(--shadow-lg);
+}
+.lock-card__header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: var(--sp-8) var(--sp-6) var(--sp-4);
+}
+.lock-card__icon {
+  width: 48px;
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-full);
+  background: var(--accent-subtle);
+  color: var(--accent-strong);
+  margin-bottom: var(--sp-3);
+}
+.lock-card__title {
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-semibold);
+  color: var(--text-strong);
+}
+.lock-card__subtitle {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  margin-top: var(--sp-1);
+}
+.lock-card__body {
+  padding: 0 var(--sp-6) var(--sp-6);
 }
 
 .banner {

@@ -12,24 +12,24 @@ const hasUpdate = computed(() => dashboardStore.config.hasUpdate)
 <template>
   <div class="card mt-4">
     <div class="card__header">
-      <div class="card__title">Version</div>
+      <div class="card__title">版本信息</div>
       <span v-if="hasUpdate" class="pill pill--warning">
         <span class="pill__dot" />
-        Update available
+        有可用更新
       </span>
       <span v-else-if="localVersion !== '—'" class="pill pill--success">
         <span class="pill__dot" />
-        Up to date
+        已是最新
       </span>
     </div>
     <div class="card__body">
       <div class="grid grid--2">
         <div class="kpi-mini">
-          <div class="kpi-mini__label">Current</div>
+          <div class="kpi-mini__label">当前版本</div>
           <div class="kpi-mini__value mono">{{ localVersion }}</div>
         </div>
         <div class="kpi-mini">
-          <div class="kpi-mini__label">Latest</div>
+          <div class="kpi-mini__label">最新版本</div>
           <div class="kpi-mini__value mono">{{ remoteVersion }}</div>
         </div>
       </div>

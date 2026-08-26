@@ -133,18 +133,17 @@ console.log(`- 图片文件: ${Object.keys(imageFileMap).length} 个`);
 console.log(`- 其他文件: ${Object.keys(otherFileMap).length} 个`);
 
 // 创建一个简单的 index.html 文件，引用构建后的资源
-// Hardening: previously titled "Gemini API 代理服务" which leaked the
-// upstream provider identity in the browser tab and HTML source.  We
-// now use a neutral "Gateway Console" title.
+// 标题保持中性「网关控制台」，不泄露上游服务商身份；
+// lang=zh-CN 与前端中文化保持一致。
 const indexContent = `
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8">
     <link rel="icon" href="/assets/favicon.ico">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="color-scheme" content="light dark">
-    <title>Gateway Console</title>
+    <title>网关控制台</title>
     ${Object.values(jsFileMap).map(file => `<script type="module" crossorigin src="/assets/${file}"></script>`).join('\n    ')}
     ${Object.values(cssFileMap).map(file => `<link rel="stylesheet" href="/assets/${file}">`).join('\n    ')}
   </head>

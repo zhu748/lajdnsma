@@ -33,7 +33,7 @@ function buildOption() {
       },
     },
     legend: {
-      data: ['Calls', 'Tokens'],
+      data: ['调用次数', '令牌数'],
       bottom: 0,
       icon: 'circle',
       itemWidth: 6,
@@ -67,7 +67,7 @@ function buildOption() {
     ],
     series: [
       {
-        name: 'Calls',
+        name: '调用次数',
         type: 'line',
         smooth: true,
         showSymbol: false,
@@ -81,7 +81,7 @@ function buildOption() {
         },
       },
       {
-        name: 'Tokens',
+        name: '令牌数',
         type: 'line',
         yAxisIndex: 1,
         smooth: true,
@@ -147,12 +147,22 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="chartContainer" class="chart" style="height:200px;width:100%;"></div>
+  <div ref="chartContainer" class="chart"></div>
 </template>
 
 <style scoped>
 .chart {
+  height: 200px;
+  width: 100%;
   padding: var(--sp-3) var(--sp-4);
   border-bottom: 1px solid var(--border);
+}
+
+/* 移动端：图表降高，减少纵向占用 */
+@media (max-width: 768px) {
+  .chart {
+    height: 160px;
+    padding: var(--sp-2) var(--sp-3);
+  }
 }
 </style>

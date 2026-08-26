@@ -35,7 +35,7 @@ async function submitAdd() {
   addError.value = ''
   addSuccess.value = ''
   if (!newApiKeys.value.trim()) {
-    addError.value = 'Enter at least one key'
+    addError.value = '请至少输入一个密钥'
     return
   }
   const keys = newApiKeys.value
@@ -43,18 +43,18 @@ async function submitAdd() {
     .map((s) => s.trim())
     .filter(Boolean)
   if (keys.some((k) => k.length < 10)) {
-    addError.value = 'One or more keys look too short'
+    addError.value = '部分密钥长度过短，请检查后重试'
     return
   }
   isAdding.value = true
   try {
     await dashboardStore.updateConfig('geminiApiKeys', newApiKeys.value, dashboardStore.sessionPassword)
-    addSuccess.value = `Added ${keys.length} key(s)`
+    addSuccess.value = `已添加 ${keys.length} 个密钥`
     newApiKeys.value = ''
     await dashboardStore.fetchDashboardData()
     setTimeout(() => closeDialog('add'), 1500)
   } catch (e) {
-    addError.value = e.message || 'Failed to add keys'
+    addError.value = e.message || '添加密钥失败'
   } finally {
     isAdding.value = false
   }
@@ -85,7 +85,7 @@ onUnmounted(stopPolling)
 async function startTest() {
   testError.value = ''
   if (!testPassword.value) {
-    testError.value = 'Password required'
+    testError.value = '请输入密码'
     return
   }
   isTesting.value = true
@@ -102,7 +102,7 @@ async function startTest() {
     }
     testPollTimer = setInterval(pollTestProgress, 1500)
   } catch (e) {
-    testError.value = e.message || 'Failed to start test'
+    testError.value = e.message || '启动测试失败'
     isTesting.value = false
   }
 }
@@ -119,7 +119,7 @@ async function pollTestProgress() {
       if (++pollFailures >= MAX_POLL_FAILURES) {
         stopPolling()
         isTesting.value = false
-        testError.value = 'Progress polling failed repeatedly; test may have been interrupted'
+        testError.value = '进度轮询多次失败，测试可能已被中断'
       }
       return
     }
@@ -136,7 +136,7 @@ async function pollTestProgress() {
     if (++pollFailures >= MAX_POLL_FAILURES) {
       stopPolling()
       isTesting.value = false
-      testError.value = 'Progress polling failed repeatedly; test may have been interrupted'
+      testError.value = '进度轮询多次失败，测试可能已被中断'
     }
   }
 }
@@ -151,7 +151,7 @@ async function submitClear() {
   clearError.value = ''
   clearSuccess.value = ''
   if (!clearPassword.value) {
-    clearError.value = 'Password required'
+    clearError.value = '请输入密码'
     return
   }
   isClearing.value = true
@@ -162,13 +162,13 @@ async function submitClear() {
       body: JSON.stringify({ password: clearPassword.value }),
     })
     const data = await r.json()
-    if (!r.ok) throw new Error(data.detail || 'Failed')
-    clearSuccess.value = data.message || 'Cleared'
+    if (!r.ok) throw new Error(data.detail || '操作失败')
+    clearSuccess.value = data.message || '已清除'
     clearPassword.value = ''
     await dashboardStore.fetchDashboardData()
     setTimeout(() => closeDialog('clear'), 1500)
   } catch (e) {
-    clearError.value = e.message || 'Failed'
+    clearError.value = e.message || '操作失败'
   } finally {
     isClearing.value = false
   }
@@ -184,7 +184,7 @@ async function submitExport() {
   exportError.value = ''
   exportedKeys.value = []
   if (!exportPassword.value) {
-    exportError.value = 'Password required'
+    exportError.value = '请输入密码'
     return
   }
   isExporting.value = true
@@ -195,22 +195,31 @@ async function submitExport() {
       body: JSON.stringify({ password: exportPassword.value }),
     })
     const data = await r.json()
-    if (!r.ok) throw new Error(data.detail || 'Failed')
+    if (!r.ok) throw new Error(data.detail || '操作失败')
     exportedKeys.value = data.keys || []
     exportPassword.value = ''
   } catch (e) {
-    exportError.value = e.message || 'Failed'
+    exportError.value = e.message || '操作失败'
   } finally {
     isExporting.value = false
   }
 }
 
+// ---------- 复制反馈 ----------
+const copyToast = ref('')
+let copyToastTimer = null
+onUnmounted(() => clearTimeout(copyToastTimer))
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text)
+    copyToast.value = '已复制到剪贴板'
   } catch (e) {
     console.error('copy:', e)
+    copyToast.value = '复制失败，请手动复制'
   }
+  clearTimeout(copyToastTimer)
+  copyToastTimer = setTimeout(() => (copyToast.value = ''), 1600)
 }
 
 // ---------- Table ----------
@@ -262,20 +271,20 @@ function toggleModels(keyId) {
   <div class="card mt-4" v-if="!dashboardStore.status.enableVertex">
     <div class="card__header">
       <div>
-        <div class="card__title">API Keys</div>
+        <div class="card__title">API 密钥</div>
         <div class="card__subtitle">
-          {{ dashboardStore.apiKeyStats.length }} keys ·
-          {{ fmt(totalCalls) }} calls · {{ fmt(totalTokens) }} tokens (24h)
+          {{ dashboardStore.apiKeyStats.length }} 个密钥 ·
+          调用 {{ fmt(totalCalls) }} 次 · 令牌 {{ fmt(totalTokens) }}（24小时）
         </div>
       </div>
-      <div class="row">
-        <button class="btn btn--secondary btn--sm" @click="openDialog('add')">+ Add</button>
+      <div class="row card__actions">
+        <button class="btn btn--secondary btn--sm" @click="openDialog('add')">+ 添加</button>
         <button class="btn btn--secondary btn--sm" @click="openDialog('test')" :disabled="isTesting">
-          {{ isTesting ? 'Testing…' : 'Test' }}
+          {{ isTesting ? '测试中…' : '测试' }}
         </button>
-        <button class="btn btn--secondary btn--sm" @click="openDialog('clear')">Clear invalid</button>
-        <button class="btn btn--secondary btn--sm" @click="openDialog('export')">Export</button>
-        <button class="btn btn--ghost btn--sm btn--icon" @click="showTable = !showTable" :title="showTable ? 'Collapse' : 'Expand'">
+        <button class="btn btn--secondary btn--sm" @click="openDialog('clear')">清除无效</button>
+        <button class="btn btn--secondary btn--sm" @click="openDialog('export')">导出</button>
+        <button class="btn btn--ghost btn--sm btn--icon" @click="showTable = !showTable" :title="showTable ? '收起' : '展开'">
           {{ showTable ? '▾' : '▸' }}
         </button>
       </div>
@@ -290,10 +299,10 @@ function toggleModels(keyId) {
         <table class="table">
           <thead>
             <tr>
-              <th>Key</th>
-              <th style="text-align:right;">Calls 24h</th>
-              <th style="text-align:right;">Tokens</th>
-              <th>Models</th>
+              <th>密钥</th>
+              <th style="text-align:right;">24h 调用</th>
+              <th style="text-align:right;">令牌</th>
+              <th>模型</th>
             </tr>
           </thead>
           <tbody>
@@ -308,7 +317,7 @@ function toggleModels(keyId) {
                     class="btn btn--ghost btn--sm"
                     @click="toggleModels(stat.api_key)"
                   >
-                    {{ modelList(stat).length }} models {{ collapsedKeys[stat.api_key] ? '▴' : '▾' }}
+                    {{ modelList(stat).length }} 个模型 {{ collapsedKeys[stat.api_key] ? '▴' : '▾' }}
                   </button>
                   <span v-else class="text-subtle">—</span>
                 </td>
@@ -319,9 +328,9 @@ function toggleModels(keyId) {
                     <table class="table" style="background:transparent;">
                       <thead>
                         <tr>
-                          <th>Model</th>
-                          <th style="text-align:right;">Calls</th>
-                          <th style="text-align:right;">Tokens</th>
+                          <th>模型</th>
+                          <th style="text-align:right;">调用</th>
+                          <th style="text-align:right;">令牌</th>
                         </tr>
                       </thead>
                       <tbody>
@@ -340,8 +349,8 @@ function toggleModels(keyId) {
               <td colspan="4">
                 <div class="empty-state" style="padding:var(--sp-8);">
                   <div class="empty-state__icon">∅</div>
-                  <div class="empty-state__title">No keys in pool</div>
-                  <div class="empty-state__desc">Use “+ Add” to import keys.</div>
+                  <div class="empty-state__title">密钥池为空</div>
+                  <div class="empty-state__desc">点击「+ 添加」导入密钥。</div>
                 </div>
               </td>
             </tr>
@@ -352,7 +361,7 @@ function toggleModels(keyId) {
       <!-- ============== Pagination ============== -->
       <div v-if="totalPages > 1" class="row row--between" style="padding:var(--sp-3) var(--sp-5);border-top:1px solid var(--border);">
         <span class="text-muted" style="font-size:var(--fs-sm);">
-          Page {{ currentPage }} of {{ totalPages }}
+          第 {{ currentPage }} / {{ totalPages }} 页
         </span>
         <div class="row">
           <button class="btn btn--secondary btn--sm" @click="currentPage--" :disabled="currentPage === 1">‹</button>
@@ -366,21 +375,21 @@ function toggleModels(keyId) {
   <div v-if="dialogState.add" class="modal-overlay" @click.self="closeDialog('add')">
     <div class="modal">
       <div class="modal__header">
-        <div class="modal__title">Add API keys</div>
+        <div class="modal__title">添加 API 密钥</div>
         <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('add')">✕</button>
       </div>
       <div class="modal__body">
         <div class="field mb-4">
-          <label class="field__label">Keys (one per line or comma-separated)</label>
+          <label class="field__label">密钥（每行一个，或用逗号分隔）</label>
           <textarea v-model="newApiKeys" class="textarea" rows="6" placeholder="AIza…&#10;AIza…"></textarea>
         </div>
         <div v-if="addError" class="banner banner--danger">{{ addError }}</div>
         <div v-if="addSuccess" class="banner banner--success">{{ addSuccess }}</div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('add')">Cancel</button>
+        <button class="btn btn--secondary btn--sm" @click="closeDialog('add')">取消</button>
         <button class="btn btn--primary btn--sm" @click="submitAdd" :disabled="isAdding">
-          {{ isAdding ? 'Adding…' : 'Add keys' }}
+          {{ isAdding ? '添加中…' : '添加密钥' }}
         </button>
       </div>
     </div>
@@ -390,21 +399,21 @@ function toggleModels(keyId) {
   <div v-if="dialogState.test" class="modal-overlay" @click.self="!isTesting && closeDialog('test')">
     <div class="modal">
       <div class="modal__header">
-        <div class="modal__title">Test keys</div>
+        <div class="modal__title">测试密钥</div>
         <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('test')" :disabled="isTesting">✕</button>
       </div>
       <div class="modal__body">
         <p class="text-muted mb-4" style="font-size:var(--fs-sm);">
-          Probe every key in the pool to verify it still works. This counts against upstream rate limits.
+          逐个探测密钥池中的密钥以验证可用性。此操作会消耗上游速率配额。
         </p>
         <div class="field mb-4">
-          <label class="field__label">Password</label>
+          <label class="field__label">管理密码</label>
           <input v-model="testPassword" type="password" class="input" autocomplete="current-password">
         </div>
         <div v-if="testError" class="banner banner--danger">{{ testError }}</div>
         <div v-if="testProgress.total > 0" class="mt-4">
           <div class="row row--between mb-2" style="font-size:var(--fs-sm);">
-            <span class="text-muted">Progress</span>
+            <span class="text-muted">进度</span>
             <span class="mono">{{ testProgress.completed }} / {{ testProgress.total }}</span>
           </div>
           <div class="progress">
@@ -414,15 +423,15 @@ function toggleModels(keyId) {
             ></div>
           </div>
           <div class="row row--between mt-2" style="font-size:var(--fs-sm);">
-            <span class="text-success">✓ {{ testProgress.valid }} valid</span>
-            <span class="text-danger">✕ {{ testProgress.invalid }} invalid</span>
+            <span class="text-success">✓ {{ testProgress.valid }} 个有效</span>
+            <span class="text-danger">✕ {{ testProgress.invalid }} 个无效</span>
           </div>
         </div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('test')" :disabled="isTesting">Cancel</button>
+        <button class="btn btn--secondary btn--sm" @click="closeDialog('test')" :disabled="isTesting">取消</button>
         <button class="btn btn--primary btn--sm" @click="startTest" :disabled="isTesting">
-          {{ isTesting ? 'Testing…' : 'Start test' }}
+          {{ isTesting ? '测试中…' : '开始测试' }}
         </button>
       </div>
     </div>
@@ -432,24 +441,24 @@ function toggleModels(keyId) {
   <div v-if="dialogState.clear" class="modal-overlay" @click.self="closeDialog('clear')">
     <div class="modal">
       <div class="modal__header">
-        <div class="modal__title">Clear invalid keys</div>
+        <div class="modal__title">清除无效密钥</div>
         <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('clear')">✕</button>
       </div>
       <div class="modal__body">
         <p class="text-muted mb-4" style="font-size:var(--fs-sm);">
-          Remove every key previously marked as invalid. This cannot be undone.
+          将删除所有被标记为无效的密钥，此操作不可撤销。
         </p>
         <div class="field">
-          <label class="field__label">Password</label>
+          <label class="field__label">管理密码</label>
           <input v-model="clearPassword" type="password" class="input" autocomplete="current-password">
         </div>
         <div v-if="clearError" class="banner banner--danger mt-4">{{ clearError }}</div>
         <div v-if="clearSuccess" class="banner banner--success mt-4">{{ clearSuccess }}</div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('clear')">Cancel</button>
+        <button class="btn btn--secondary btn--sm" @click="closeDialog('clear')">取消</button>
         <button class="btn btn--primary btn--sm" @click="submitClear" :disabled="isClearing">
-          {{ isClearing ? 'Clearing…' : 'Clear invalid' }}
+          {{ isClearing ? '清除中…' : '确认清除' }}
         </button>
       </div>
     </div>
@@ -459,40 +468,51 @@ function toggleModels(keyId) {
   <div v-if="dialogState.export" class="modal-overlay" @click.self="closeDialog('export')">
     <div class="modal" style="max-width:560px;">
       <div class="modal__header">
-        <div class="modal__title">Export valid keys</div>
+        <div class="modal__title">导出有效密钥</div>
         <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('export')">✕</button>
       </div>
       <div class="modal__body">
         <div class="field mb-4">
-          <label class="field__label">Password</label>
+          <label class="field__label">管理密码</label>
           <input v-model="exportPassword" type="password" class="input" autocomplete="current-password">
         </div>
         <div v-if="exportError" class="banner banner--danger">{{ exportError }}</div>
         <div v-if="exportedKeys.length">
           <div class="row row--between mb-2">
-            <span class="section__title">{{ exportedKeys.length }} valid keys</span>
+            <span class="section__title">{{ exportedKeys.length }} 个有效密钥</span>
             <button class="btn btn--secondary btn--sm" @click="copyText(exportedKeys.join('\n'))">
-              Copy all
+              复制全部
             </button>
           </div>
           <div class="keys-list">
-            <div v-for="k in exportedKeys" :key="k" class="keys-list__row mono" @click="copyText(k)">
+            <div v-for="k in exportedKeys" :key="k" class="keys-list__row mono" title="点击复制" @click="copyText(k)">
               {{ k }}
             </div>
           </div>
         </div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('export')">Close</button>
+        <button class="btn btn--secondary btn--sm" @click="closeDialog('export')">关闭</button>
         <button class="btn btn--primary btn--sm" @click="submitExport" :disabled="isExporting">
-          {{ isExporting ? 'Exporting…' : 'Export' }}
+          {{ isExporting ? '导出中…' : '导出' }}
         </button>
       </div>
     </div>
   </div>
+
+  <!-- ============== Copy toast ============== -->
+  <Transition name="toast-fade">
+    <div v-if="copyToast" class="copy-toast">{{ copyToast }}</div>
+  </Transition>
 </template>
 
 <style scoped>
+/* 卡片操作按钮行：允许换行，窄屏不溢出 */
+.card__actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .model-subtable {
   background: var(--bg-subtle);
   border-top: 1px solid var(--border);
@@ -529,6 +549,32 @@ function toggleModels(keyId) {
 }
 .keys-list__row:last-child { border-bottom: none; }
 .keys-list__row:hover { background: var(--bg-subtle); }
+
+/* 复制反馈 toast：移动端居中显示 */
+.copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sp-8) + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 200;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--bg-inverse);
+  color: var(--text-inverse);
+  border-radius: var(--r-full);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.toast-fade-enter-active,
+.toast-fade-leave-active {
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+.toast-fade-enter-from,
+.toast-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
+}
 
 .banner--success {
   background: var(--success-subtle);

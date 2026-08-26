@@ -31,23 +31,28 @@ watch(
 )
 
 async function saveComponentConfigs(passwordFromParent) {
-  if (!passwordFromParent) return { success: false, message: 'Basic: password missing' }
+  if (!passwordFromParent) return { success: false, message: '基础配置：缺少密码' }
   let allSucceeded = true
   const messages = []
+  const labelMap = {
+    maxRequestsPerMinute: 'RPM 限制',
+    maxRequestsPerDayPerIp: '每日单 IP 限制',
+    keyRotationStrategy: '密钥轮换策略',
+  }
   for (const key of Object.keys(localConfig)) {
     if (localConfig[key] !== dashboardStore.config[key]) {
       try {
         await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent)
         dashboardStore.config[key] = localConfig[key]
-        messages.push(`${key} ok`)
+        messages.push(`${labelMap[key] || key}成功`)
       } catch (e) {
         allSucceeded = false
-        messages.push(`${key} fail: ${e.message}`)
+        messages.push(`${labelMap[key] || key}失败：${e.message}`)
       }
     }
   }
-  if (allSucceeded && !messages.length) return { success: true, message: 'Basic: no changes' }
-  return { success: allSucceeded, message: `Basic: ${messages.join('; ')}` }
+  if (allSucceeded && !messages.length) return { success: true, message: '基础配置：无变更' }
+  return { success: allSucceeded, message: `基础配置：${messages.join('；')}` }
 }
 
 defineExpose({ saveComponentConfigs, localConfig })
@@ -55,32 +60,32 @@ defineExpose({ saveComponentConfigs, localConfig })
 
 <template>
   <div class="sub-section">
-    <div class="sub-section__title">Basic</div>
+    <div class="sub-section__title">基础设置</div>
     <div class="grid grid--2">
       <div class="field">
-        <label class="field__label">RPM limit</label>
+        <label class="field__label">RPM 限制</label>
         <input
           v-model.number="localConfig.maxRequestsPerMinute"
           type="number"
           min="0"
           class="input"
         >
-        <div class="field__hint">Max inbound requests per IP per minute.</div>
+        <div class="field__hint">每个 IP 每分钟最大请求数。</div>
       </div>
       <div class="field">
-        <label class="field__label">Daily per-IP limit</label>
+        <label class="field__label">每日单 IP 限制</label>
         <input
           v-model.number="localConfig.maxRequestsPerDayPerIp"
           type="number"
           min="0"
           class="input"
         >
-        <div class="field__hint">Max inbound requests per IP per day.</div>
+        <div class="field__hint">每个 IP 每日最大请求数。</div>
       </div>
     </div>
 
     <div class="field">
-      <label class="field__label">Key rotation strategy</label>
+      <label class="field__label">密钥轮换策略</label>
       <div class="radio-row">
         <label class="radio-card" :class="{ 'radio-card--active': localConfig.keyRotationStrategy === 'fill' }">
           <input
@@ -89,11 +94,10 @@ defineExpose({ saveComponentConfigs, localConfig })
             v-model="localConfig.keyRotationStrategy"
             name="keyRotationStrategy"
           >
-          <span class="radio-card__title">Fill (sticky, default)</span>
+          <span class="radio-card__title">填充模式（粘性，默认）</span>
           <span class="radio-card__desc">
-            Keep using the same key until it hits quota/cooldown, then advance.
-            Produces a single-user RPM signature that is harder for Google risk
-            control to flag as a key pool.
+            持续使用同一密钥，直至其触发配额或进入冷却后再切换。对外呈现单一用户的 RPM
+            特征，不易被风控识别为密钥池。
           </span>
         </label>
         <label class="radio-card" :class="{ 'radio-card--active': localConfig.keyRotationStrategy === 'polling' }">
@@ -103,17 +107,15 @@ defineExpose({ saveComponentConfigs, localConfig })
             v-model="localConfig.keyRotationStrategy"
             name="keyRotationStrategy"
           >
-          <span class="radio-card__title">Polling (round-robin)</span>
+          <span class="radio-card__title">轮询模式（轮转）</span>
           <span class="radio-card__desc">
-            Original behaviour — rotate to a different key on every request.
-            Better for explicit per-key load balancing but creates a visible
-            multi-key fingerprint.
+            原始行为——每次请求轮换到不同密钥。适合明确的单密钥负载均衡，
+            但会暴露多密钥特征。
           </span>
         </label>
       </div>
       <div class="field__hint">
-        Switch takes effect immediately and resets the key stack so the next
-        request picks up the new strategy.
+        切换立即生效并重置密钥栈，下一次请求将按新策略选取密钥。
       </div>
     </div>
   </div>

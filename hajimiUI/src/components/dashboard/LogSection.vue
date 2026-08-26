@@ -7,6 +7,13 @@ const currentFilter = ref('ALL')
 const logContainer = ref(null)
 const isFirstLoad = ref(true)
 
+const filterLabels = {
+  ALL: '全部',
+  INFO: '信息',
+  WARNING: '警告',
+  ERROR: '错误',
+}
+
 const filters = ['ALL', 'INFO', 'WARNING', 'ERROR']
 
 function setFilter(level) {
@@ -67,8 +74,8 @@ onMounted(() => {
 <template>
   <section class="section">
     <div class="section__header">
-      <div class="section__title">Logs · {{ dashboardStore.logs.length }}</div>
-      <div class="row">
+      <div class="section__title">日志 · {{ dashboardStore.logs.length }}</div>
+      <div class="row log-filters">
         <button
           v-for="level in filters"
           :key="level"
@@ -76,7 +83,7 @@ onMounted(() => {
           :class="{ 'filter-chip--active': currentFilter === level }"
           @click="setFilter(level)"
         >
-          {{ level === 'ALL' ? 'All' : level === 'INFO' ? 'Info' : level === 'WARNING' ? 'Warn' : 'Error' }}
+          {{ filterLabels[level] || level }}
           <span v-if="level !== 'ALL'" class="filter-chip__count">{{ levelCounts[level] || 0 }}</span>
         </button>
       </div>
@@ -86,8 +93,8 @@ onMounted(() => {
       <div class="log-container" ref="logContainer">
         <div v-if="!filteredLogs.length" class="empty-state" style="padding:var(--sp-8);">
           <div class="empty-state__icon">∅</div>
-          <div class="empty-state__title">No log entries</div>
-          <div class="empty-state__desc">Logs will appear here as the service runs.</div>
+          <div class="empty-state__title">暂无日志</div>
+          <div class="empty-state__desc">服务运行时日志将显示在这里。</div>
         </div>
         <div
           v-for="(log, index) in filteredLogs"
@@ -124,6 +131,11 @@ onMounted(() => {
 </template>
 
 <style scoped>
+/* 日志筛选 chips：窄屏允许换行，不溢出 */
+.log-filters {
+  flex-wrap: wrap;
+}
+
 .filter-chip {
   display: inline-flex;
   align-items: center;
@@ -137,6 +149,16 @@ onMounted(() => {
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
   transition: all var(--dur-fast) var(--ease-out);
+  cursor: pointer;
+}
+
+/* 移动端：筛选 chip 加大触控高度 */
+@media (max-width: 768px) {
+  .filter-chip {
+    height: 30px;
+    padding: 0 12px;
+    font-size: var(--fs-sm);
+  }
 }
 .filter-chip:hover {
   background: var(--bg-subtle);
@@ -259,6 +281,10 @@ onMounted(() => {
   }
   .log-entry__time {
     width: 100%;
+  }
+  .log-container {
+    max-height: 360px;
+    font-size: 11px;
   }
 }
 </style>

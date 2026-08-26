@@ -42,8 +42,11 @@
   --info-strong: #1D4ED8;
 
   /* ---------- Typography ---------- */
+  /* 中文字体栈：优先系统级中文字体（苹方/微软雅黑/思源黑体），
+     保证中文渲染清晰、与 Inter 西文数字混排协调 */
   --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
+    'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Menlo, Monaco,
     Consolas, 'Liberation Mono', monospace;
 
@@ -232,6 +235,12 @@ button {
   color: inherit;
 }
 
+/* 移动端触控体验：去除 iOS 点按高亮 */
+html {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
 input,
 textarea,
 select {
@@ -273,4 +282,15 @@ a:hover {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
+}
+
+/* 移动端窄屏：滚动条变细，避免挤占内容宽度 */
+@media (max-width: 768px) {
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-thumb {
+    border: 1px solid var(--bg);
+  }
 }

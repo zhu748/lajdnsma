@@ -41,7 +41,7 @@ const isSaving = ref(false)
 
 async function saveAll() {
   if (!password.value) {
-    errorMsg.value = 'Operator password required'
+    errorMsg.value = '请输入管理密码'
     return
   }
   isSaving.value = true
@@ -54,11 +54,11 @@ async function saveAll() {
         initialConfig[key] = localConfig[key]
       }
     }
-    successMsg.value = 'Saved'
+    successMsg.value = '已保存'
     await dashboardStore.fetchDashboardData()
     setTimeout(() => (successMsg.value = ''), 2000)
   } catch (e) {
-    errorMsg.value = e.message || 'Save failed'
+    errorMsg.value = e.message || '保存失败'
   } finally {
     isSaving.value = false
   }
@@ -68,14 +68,14 @@ async function saveAll() {
 <template>
   <div class="card">
     <div class="card__header">
-      <div class="card__title">Vertex configuration</div>
+      <div class="card__title">Vertex 配置</div>
     </div>
     <div class="card__body" style="display:flex;flex-direction:column;gap:var(--sp-4);">
       <div class="grid grid--2">
         <div class="field">
-          <label class="field__label">Fake streaming</label>
+          <label class="field__label">伪流式</label>
           <div class="row row--between">
-            <span class="text-muted" style="font-size:var(--fs-sm);">Chunked SSE replay of non-streaming calls.</span>
+            <span class="text-muted" style="font-size:var(--fs-sm);">将非流式响应分块以 SSE 回放。</span>
             <button
               class="toggle"
               :class="{ 'toggle--on': localConfig.fakeStreaming }"
@@ -88,7 +88,7 @@ async function saveAll() {
         <div class="field">
           <label class="field__label">Vertex Express</label>
           <div class="row row--between">
-            <span class="text-muted" style="font-size:var(--fs-sm);">Enable Express mode.</span>
+            <span class="text-muted" style="font-size:var(--fs-sm);">启用 Express 模式。</span>
             <button
               class="toggle"
               :class="{ 'toggle--on': localConfig.enableVertexExpress }"
@@ -101,43 +101,43 @@ async function saveAll() {
       </div>
 
       <div class="field">
-        <label class="field__label">Vertex Express API key</label>
+        <label class="field__label">Vertex Express API 密钥</label>
         <input
           v-model="localConfig.vertexExpressApiKey"
           type="password"
           class="input"
-          placeholder="Paste Vertex Express API key"
+          placeholder="粘贴 Vertex Express API 密钥"
           autocomplete="off"
         >
       </div>
 
       <div class="field">
-        <label class="field__label">Google credentials JSON</label>
+        <label class="field__label">Google 凭证 JSON</label>
         <textarea
           v-model="localConfig.googleCredentialsJson"
           class="textarea"
           rows="6"
           placeholder='{ "type": "service_account", ... }'
         ></textarea>
-        <div class="field__hint">Paste one or more concatenated JSON credential objects.</div>
+        <div class="field__hint">粘贴一个或多个连续拼接的 JSON 凭证对象。</div>
       </div>
 
       <div v-if="errorMsg" class="banner banner--danger">{{ errorMsg }}</div>
       <div v-if="successMsg" class="banner banner--success">{{ successMsg }}</div>
 
-      <div class="row row--between" style="border-top:1px solid var(--border);padding-top:var(--sp-4);">
-        <div class="field" style="flex:1;max-width:280px;">
-          <label class="field__label">Operator password</label>
+      <div class="save-row">
+        <div class="field save-row__pw">
+          <label class="field__label">管理密码</label>
           <input
             v-model="password"
             type="password"
             class="input"
             autocomplete="current-password"
-            placeholder="Required to save"
+            placeholder="保存时必填"
           >
         </div>
         <button class="btn btn--primary btn--sm" @click="saveAll" :disabled="isSaving">
-          {{ isSaving ? 'Saving…' : 'Save' }}
+          {{ isSaving ? '保存中…' : '保存' }}
         </button>
       </div>
     </div>
@@ -145,6 +145,29 @@ async function saveAll() {
 </template>
 
 <style scoped>
+/* 底部保存行：窄屏自动堆叠 */
+.save-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  border-top: 1px solid var(--border);
+  padding-top: var(--sp-4);
+}
+.save-row__pw {
+  flex: 1;
+  max-width: 280px;
+}
+@media (max-width: 640px) {
+  .save-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .save-row__pw {
+    max-width: none;
+  }
+}
+
 .banner--success {
   background: var(--success-subtle);
   border: 1px solid var(--success);

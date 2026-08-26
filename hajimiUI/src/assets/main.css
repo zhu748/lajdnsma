@@ -73,14 +73,27 @@
 
 @media (max-width: 768px) {
   .app-header {
-    padding: 0 var(--sp-4);
+    padding: 0 var(--sp-3);
     height: 52px;
+    gap: var(--sp-2);
   }
   .app-header__brand-text {
     font-size: var(--fs-base);
   }
+  .app-header__actions {
+    gap: var(--sp-1);
+  }
   .app-main {
-    padding: var(--sp-4) var(--sp-4) var(--sp-8);
+    padding: var(--sp-4) var(--sp-3) var(--sp-8);
+    /* iOS 刘海屏/底部手势条安全区 */
+    padding-bottom: calc(var(--sp-8) + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+/* 超窄屏（<400px）：隐藏品牌文字只留图标，给操作按钮留空间 */
+@media (max-width: 400px) {
+  .app-header__brand-text {
+    display: none;
   }
 }
 
@@ -102,6 +115,24 @@
   transition: all var(--dur-fast) var(--ease-out);
   white-space: nowrap;
   user-select: none;
+}
+
+/* 移动端：提升触控目标尺寸（Apple HIG 建议 ≥44px，这里取 36px
+   折中，保持信息密度不至于注水） */
+@media (max-width: 768px) {
+  .btn {
+    height: 36px;
+    font-size: var(--fs-md);
+  }
+  .btn--sm {
+    height: 32px;
+  }
+  .btn--icon {
+    width: 36px;
+  }
+  .btn--sm.btn--icon {
+    width: 32px;
+  }
 }
 
 .btn:disabled {
@@ -245,6 +276,17 @@
   border-bottom: 1px solid var(--border);
 }
 
+/* 移动端：卡片头部允许换行，操作按钮掉到下一行避免溢出 */
+@media (max-width: 768px) {
+  .card__header {
+    flex-wrap: wrap;
+    padding: var(--sp-3) var(--sp-4);
+  }
+  .card__body {
+    padding: var(--sp-4);
+  }
+}
+
 .card__title {
   font-size: var(--fs-md);
   font-weight: var(--fw-semibold);
@@ -312,6 +354,14 @@
   font-family: var(--font-mono);
 }
 
+/* 移动端：输入框加大高度便于触控聚焦 */
+@media (max-width: 768px) {
+  .input,
+  .select {
+    height: 36px;
+  }
+}
+
 .input:hover,
 .textarea:hover,
 .select:hover {
@@ -342,6 +392,21 @@
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out);
   flex-shrink: 0;
+}
+
+/* 移动端：开关加大到 42x24，易点易拨 */
+@media (max-width: 768px) {
+  .toggle {
+    width: 42px;
+    height: 24px;
+  }
+  .toggle__thumb {
+    width: 20px;
+    height: 20px;
+  }
+  .toggle--on .toggle__thumb {
+    transform: translateX(18px);
+  }
 }
 
 .toggle--on {
@@ -490,6 +555,16 @@
   padding: 0 var(--sp-1);
 }
 
+/* 移动端：区块标题与筛选 chips 允许换行，防止溢出屏幕 */
+@media (max-width: 768px) {
+  .section__header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--sp-2);
+  }
+}
+
 .section__title {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
@@ -584,6 +659,30 @@
   display: flex;
   flex-direction: column;
   animation: modal-in var(--dur-base) var(--ease-out);
+}
+
+/* 移动端：弹窗几乎全宽，底部留出安全区 */
+@media (max-width: 640px) {
+  .modal {
+    max-width: none;
+    max-height: calc(100vh - 32px);
+    max-height: calc(100dvh - 32px);
+    border-radius: var(--r-lg);
+  }
+  .modal-overlay {
+    padding: var(--sp-3);
+    align-items: flex-end;
+  }
+  .modal__header {
+    padding: var(--sp-3) var(--sp-4);
+  }
+  .modal__body {
+    padding: var(--sp-4);
+  }
+  .modal__footer {
+    padding: var(--sp-3) var(--sp-4);
+    padding-bottom: calc(var(--sp-3) + env(safe-area-inset-bottom, 0px));
+  }
 }
 
 @keyframes modal-in {

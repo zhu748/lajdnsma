@@ -45,32 +45,31 @@ function fmt(n) {
   <div class="card">
     <div class="card__body" style="padding:0;">
       <div class="stats-grid" v-if="!dashboardStore.status.enableVertex">
-        <!-- 4 KPI cards — each card carries a small accent strip on the
-             left edge so operators can scan status at a glance without
-             reading the labels. -->
+        <!-- 4 KPI 卡片 — 每张卡片左侧带彩色小色条，运维人员不读
+             文字也能快速扫出各项状态。 -->
         <div class="kpi kpi--info">
           <span class="kpi__accent kpi__accent--info" aria-hidden="true"></span>
-          <div class="kpi__label">Keys</div>
+          <div class="kpi__label">密钥数</div>
           <div class="kpi__value">{{ dashboardStore.status.keyCount }}</div>
-          <div class="kpi__hint">valid in pool</div>
+          <div class="kpi__hint">池内有效</div>
         </div>
         <div class="kpi kpi--clickable kpi--accent-2" @click="showModelsModal = true">
           <span class="kpi__accent kpi__accent--accent" aria-hidden="true"></span>
-          <div class="kpi__label">Models</div>
+          <div class="kpi__label">模型</div>
           <div class="kpi__value">{{ dashboardStore.status.modelCount }}</div>
-          <div class="kpi__hint">click to view list →</div>
+          <div class="kpi__hint">点击查看列表 →</div>
         </div>
         <div class="kpi kpi--success">
           <span class="kpi__accent kpi__accent--success" aria-hidden="true"></span>
-          <div class="kpi__label">Calls · 24h</div>
+          <div class="kpi__label">调用 · 24小时</div>
           <div class="kpi__value">{{ fmt(dashboardStore.status.last24hCalls) }}</div>
-          <div class="kpi__hint">{{ fmt(dashboardStore.status.hourlyCalls) }} / hour · {{ fmt(dashboardStore.status.minuteCalls) }} / min</div>
+          <div class="kpi__hint">每小时 {{ fmt(dashboardStore.status.hourlyCalls) }} · 每分钟 {{ fmt(dashboardStore.status.minuteCalls) }}</div>
         </div>
         <div class="kpi kpi--warning">
           <span class="kpi__accent kpi__accent--warning" aria-hidden="true"></span>
-          <div class="kpi__label">Tokens · 24h</div>
+          <div class="kpi__label">令牌 · 24小时</div>
           <div class="kpi__value">{{ fmt(dashboardStore.status.last24hTokens) }}</div>
-          <div class="kpi__hint">{{ fmt(dashboardStore.status.hourlyTokens) }} / hour · {{ fmt(dashboardStore.status.minuteTokens) }} / min</div>
+          <div class="kpi__hint">每小时 {{ fmt(dashboardStore.status.hourlyTokens) }} · 每分钟 {{ fmt(dashboardStore.status.minuteTokens) }}</div>
         </div>
       </div>
 
@@ -78,9 +77,9 @@ function fmt(n) {
       <div v-else class="vertex-info">
         <div class="vertex-info__icon">ℹ</div>
         <div class="vertex-info__body">
-          <div class="vertex-info__title">Vertex mode is active</div>
+          <div class="vertex-info__title">Vertex 模式已启用</div>
           <div class="vertex-info__text">
-            The service is currently routing through the Vertex AI backend. Stats and per-key counters are reported separately in that mode.
+            当前服务正通过 Vertex AI 后端路由。该模式下，统计信息与各密钥计数将单独上报。
           </div>
         </div>
       </div>
@@ -91,32 +90,32 @@ function fmt(n) {
       <div class="modal" style="max-width:560px;">
         <div class="modal__header">
           <div>
-            <div class="modal__title">Available models</div>
-            <div class="card__subtitle">{{ modelsList.total }} total</div>
+            <div class="modal__title">可用模型</div>
+            <div class="card__subtitle">共 {{ modelsList.total }} 个</div>
           </div>
           <button class="btn btn--ghost btn--icon btn--sm" @click="showModelsModal = false">✕</button>
         </div>
         <div class="modal__body" style="max-height:60vh;overflow-y:auto;">
           <div v-if="modelsList.standard.length" class="mb-4">
-            <div class="section__title mb-2">Standard</div>
+            <div class="section__title mb-2">标准模型</div>
             <div class="chip-grid">
               <span v-for="m in modelsList.standard" :key="m" class="chip mono">{{ m }}</span>
             </div>
           </div>
           <div v-if="modelsList.search.length">
-            <div class="section__title mb-2">Search</div>
+            <div class="section__title mb-2">搜索模型</div>
             <div class="chip-grid">
               <span v-for="m in modelsList.search" :key="m" class="chip chip--accent mono">{{ m }}</span>
             </div>
           </div>
           <div v-if="!modelsList.total" class="empty-state">
             <div class="empty-state__icon">∅</div>
-            <div class="empty-state__title">No models loaded</div>
-            <div class="empty-state__desc">Check the API key configuration.</div>
+            <div class="empty-state__title">未加载模型</div>
+            <div class="empty-state__desc">请检查 API 密钥配置。</div>
           </div>
         </div>
         <div class="modal__footer">
-          <button class="btn btn--secondary btn--sm" @click="showModelsModal = false">Close</button>
+          <button class="btn btn--secondary btn--sm" @click="showModelsModal = false">关闭</button>
         </div>
       </div>
     </div>
@@ -211,6 +210,13 @@ function fmt(n) {
   font-size: var(--fs-xs);
   color: var(--text-subtle);
   margin-top: 4px;
+}
+
+/* 中文提示在小屏可能换行，需保证行高舒展 */
+@media (max-width: 640px) {
+  .kpi__hint {
+    line-height: var(--lh-base);
+  }
 }
 
 .kpi--clickable {
