@@ -1,12 +1,40 @@
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from app.utils.sse import sse_data
+from app.utils.stealth import (
+    gen_openai_response_id,
+    gen_openai_message_id,
+    gen_responses_function_call_id,
+    gen_anthropic_message_id,
+    gen_anthropic_tool_use_id,
+    gen_anthropic_thinking_signature,
+)
 
 
 def _now_ts() -> int:
     return int(time.time())
+
+
+def _now_iso_rfc3339() -> str:
+    """RFC 3339 UTC timestamp, e.g. `2024-01-01T00:00:00.000Z`.
+
+    Used by Anthropic `ping` events which carry a `timestamp` field.
+    """
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# Re-exported strong-random ID generators so protocol_streams.py has a
+# single import surface for all ID helpers (avoids circular imports and
+# keeps protocol_common.py the canonical place for protocol helpers).
+_gen_response_id = gen_openai_response_id
+_gen_message_id = gen_openai_message_id
+_gen_function_call_id = gen_responses_function_call_id
+_gen_anthropic_message_id = gen_anthropic_message_id
+_gen_anthropic_tool_use_id = gen_anthropic_tool_use_id
+_gen_anthropic_thinking_signature = gen_anthropic_thinking_signature
 
 
 def _extract_openai_usage(usage: Dict[str, Any]) -> Dict[str, int]:

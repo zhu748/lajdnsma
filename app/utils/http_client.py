@@ -2,13 +2,24 @@ import asyncio
 
 import httpx
 
+from app.utils.stealth import pick_user_agent
+
 
 _async_client: httpx.AsyncClient | None = None
 _client_lock = asyncio.Lock()
 
 
 def _build_async_client() -> httpx.AsyncClient:
-    """Create the shared outbound HTTP client with connection pooling enabled."""
+    """Create the shared outbound HTTP client with connection pooling enabled.
+
+    Hardening (anti-fingerprint):
+    * Sets a process-level default User-Agent so any call that forgets to
+      override `headers=` still presents a realistic UA instead of httpx's
+      default `python-httpx/x.x.x`.
+    * Keeps connection pool size moderate.  50 keepalive connections is
+      plenty for a single-instance proxy and avoids the "TLS session
+      pinned to one client identity" smell of much larger pools.
+    """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(600.0),
         limits=httpx.Limits(
@@ -16,6 +27,11 @@ def _build_async_client() -> httpx.AsyncClient:
             max_keepalive_connections=50,
             keepalive_expiry=30.0,
         ),
+        headers={
+            "User-Agent": pick_user_agent(None),
+            "Accept-Encoding": "gzip, deflate",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
     )
 
 

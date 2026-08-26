@@ -1,28 +1,50 @@
 import json
 import requests
-import httpx  # 添加 httpx 导入
+import httpx
 import logging
 import asyncio
 import re
+import random
 from fastapi import HTTPException
 from app.utils.logging import log
+from app.utils.stealth import full_jitter_backoff
 
 logger = logging.getLogger("my_logger")
 
 
+def _key_id(api_key: str) -> str:
+    """Return a stable hash-based key identifier for logging.
+
+    Previously this returned api_key[:4]...api_key[-6:], but the first 4
+    chars of a Gemini key are always "AIza" — logging that prefix is
+    effectively equivalent to logging "this is a Gemini key" to anyone
+    reading the logs.  Switch to a hash identifier.
+    """
+    if not api_key:
+        return "key#unknown"
+    return "key#" + str(hash(api_key) & 0xFFFFFF)
+
+
 def sanitize_string(text: str) -> str:
+    """Redact suspected API keys embedded in upstream error strings.
+
+    Hardening: previously this returned `AIza.....abcdef` (preserving
+    the `AIza` prefix and 6 trailing chars) for every matched key.
+    But `AIza` is exactly the 4-char prefix that marks a string as a
+    Google Gemini API key — keeping it in client-facing messages is
+    effectively equivalent to telling the client "this is a Gemini
+    key".  We now replace matched keys with a hash identifier so no
+    part of the real key reaches the client.
     """
-    清洗字符串，对其中可能包含的Gemini API密钥进行打码。
-    它会查找所有符合Gemini API密钥格式的字符串，并将其替换为
-    保留前4位和后6位的格式，例如 'AIza.....abcdef'。
-    """
-    # 正则表达式匹配以 "AIza" 开头，后跟35个字母、数字、下划线或短横线的字符串
     api_key_pattern = re.compile(r"(AIza[A-Za-z0-9\-_]{35})")
 
     def redact_key(match):
         key = match.group(1)
-        # 保留前4位和后6位
-        return f"{key[:4]}.....{key[-6:]}"
+        # Use a stable hash identifier — no part of the real key is
+        # preserved, and the `key#` prefix mirrors the logging format
+        # used elsewhere so logs and client-facing messages stay
+        # consistent.
+        return f"key#{hash(key) & 0xFFFFFF:06x}"
 
     return api_key_pattern.sub(redact_key, text)
 
@@ -30,10 +52,13 @@ def sanitize_string(text: str) -> str:
 def handle_gemini_error(error, current_api_key) -> str:
     """
     统一处理来自Gemini的错误，并返回一个对用户友好的、清洗过的错误信息。
+
+    所有返回给客户端的错误信息都不再包含 "Gemini API" 字样，避免
+    暴露上游服务供应商的身份。
     """
     # 清洗完整的错误字符串
     sanitized_full_error_str = sanitize_string(str(error))
-    key_for_log = f"{current_api_key[:4]}.....{current_api_key[-6:]}"
+    key_for_log = _key_id(current_api_key)
 
     # 同时检查 requests 和 httpx 的 HTTPError
     if isinstance(error, (requests.exceptions.HTTPError, httpx.HTTPStatusError)):
@@ -46,10 +71,10 @@ def handle_gemini_error(error, current_api_key) -> str:
                 error_data = error.response.json()
                 if "error" in error_data:
                     if error_data["error"].get("code") == "invalid_argument":
-                        error_message = "无效的 API 密钥"
+                        error_message = "Invalid request argument"
                         log(
                             "ERROR",
-                            f"{key_for_log} → 无效，可能已过期或被删除",
+                            f"{key_for_log} → 无效参数",
                             extra=log_extra,
                         )
                         return error_message
@@ -58,44 +83,45 @@ def handle_gemini_error(error, current_api_key) -> str:
                     detail_message = sanitize_string(
                         error_data["error"].get("message", "Bad Request")
                     )
-                    error_message = f"400 错误请求: {detail_message}"
+                    error_message = f"400 Bad Request: {detail_message}"
                     log("WARNING", error_message, extra=log_extra)
                     return error_message
                 # 如果 'error' 键不存在，提供一个通用的400错误信息
-                error_message = "400 错误请求：响应格式不符合预期"
+                error_message = "400 Bad Request: unexpected response shape"
                 log("WARNING", error_message, extra=log_extra)
                 return error_message
             except (ValueError, json.JSONDecodeError):
-                error_message = "400 错误请求：响应不是有效的JSON格式"
+                error_message = "400 Bad Request: response was not valid JSON"
                 log("WARNING", error_message, extra=log_extra)
                 return error_message
 
         elif status_code == 403:
-            error_message = "权限被拒绝"
+            error_message = "Permission denied"
             log(
                 "ERROR",
                 error_message,
-                extra={"key": current_api_key[:8], "status_code": status_code},
+                extra={"key": key_for_log, "status_code": status_code},
             )
             return error_message
 
         elif status_code == 429:
-            error_message = "API 密钥配额已用尽或其他原因"
+            error_message = "Rate limited or quota exhausted"
             log("WARNING", error_message, extra=log_extra)
             return error_message
 
         elif status_code == 500:
-            error_message = "Gemini API 内部错误"
+            # 不再在返回给客户端的消息里写 "Gemini API 内部错误"
+            error_message = "Upstream internal error"
             log("WARNING", error_message, extra=log_extra)
             return error_message
 
         elif status_code == 503:
-            error_message = "Gemini API 服务繁忙"
+            error_message = "Upstream service unavailable"
             log("WARNING", error_message, extra=log_extra)
             return error_message
 
         else:
-            error_message = f"未知HTTP错误: {status_code}"
+            error_message = f"Upstream HTTP error: {status_code}"
             log(
                 "WARNING",
                 f"{error_message} - {sanitized_full_error_str}",
@@ -104,7 +130,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
     elif isinstance(error, (httpx.TimeoutException, requests.exceptions.Timeout)):
-        error_message = "请求超时"
+        error_message = "Request timed out"
         log(
             "WARNING",
             f"{error_message}: {sanitized_full_error_str}",
@@ -113,7 +139,7 @@ def handle_gemini_error(error, current_api_key) -> str:
         return error_message
 
     elif isinstance(error, (httpx.ConnectError, requests.exceptions.ConnectionError)):
-        error_message = "连接错误"
+        error_message = "Connection error"
         log(
             "WARNING",
             f"{error_message}: {sanitized_full_error_str}",
@@ -123,20 +149,26 @@ def handle_gemini_error(error, current_api_key) -> str:
 
     else:
         # 处理所有其他未知异常
-        error_message = f"发生未知错误: {sanitized_full_error_str}"
+        error_message = f"Unexpected error: {sanitized_full_error_str}"
         log("ERROR", error_message, extra={"key": key_for_log})
         return error_message
 
 
 def translate_error(message: str) -> str:
-    if "quota exceeded" in message.lower():
-        return "API 密钥配额已用尽"
-    if "invalid argument" in message.lower():
-        return "无效参数"
-    if "internal server error" in message.lower():
-        return "服务器内部错误"
-    if "service unavailable" in message.lower():
-        return "服务不可用"
+    """Translate well-known error fragments to client-facing messages.
+
+    Returned messages intentionally avoid naming the upstream provider so
+    that an API consumer can't trivially detect that this is a proxy.
+    """
+    lower = message.lower()
+    if "quota exceeded" in lower:
+        return "Rate limited or quota exhausted"
+    if "invalid argument" in lower:
+        return "Invalid request argument"
+    if "internal server error" in lower:
+        return "Upstream internal error"
+    if "service unavailable" in lower:
+        return "Upstream service unavailable"
     return message
 
 
@@ -148,66 +180,105 @@ async def handle_api_error(
     model: str,
     retry_count: int = 0,
 ):
-    """统一处理API错误"""
+    """统一处理API错误。
+
+    Hardening:
+    * 用 full-jitter 退避代替指数退避（无抖动版本会让并发重试同步风暴）
+    * 429 时把该 key 加冷却 60s（通过 mark_key_failure）
+    * 401/403 时把该 key 永久拉黑
+    * 500/503 时把该 key 加冷却 5s
+    * 抛给客户端的 HTTPException detail 不再含 "Gemini API" 字样
+    """
+    key_id = _key_id(api_key)
 
     # 同时检查 requests 和 httpx 的 HTTPError
     if isinstance(e, (requests.exceptions.HTTPError, httpx.HTTPStatusError)):
         status_code = e.response.status_code
-        # 对500和503错误实现自动重试机制, 最多重试3次
-        if retry_count < 3 and (status_code == 500 or status_code == 503):
-            error_message = (
-                "Gemini API 内部错误"
-                if (status_code == 500)
-                else "Gemini API 服务目前不可用"
-            )
 
-            # 等待时间 : MIN_RETRY_DELAY=1, MAX_RETRY_DELAY=16
-            wait_time = min(1 * (2**retry_count), 16)
-            log(
-                "warning",
-                f"{error_message}，将等待{wait_time}秒后重试 ({retry_count + 1}/3)",
-                extra={
-                    "key": api_key[:8],
-                    "request_type": request_type,
-                    "model": model,
-                    "status_code": int(status_code),
-                },
-            )
-            # 等待后返回重试信号
-            await asyncio.sleep(wait_time)
-            return {"remove_cache": False}
-
-        elif status_code == 429:
-            error_message = "API 密钥配额已用尽或其他原因"
+        # 429 -> 切换 key + 冷却当前 key
+        if status_code == 429:
+            error_message = "Rate limited or quota exhausted"
             log(
                 "WARNING",
-                "429 官方资源耗尽或其他原因",
+                f"{key_id} 429 resource exhausted, switching key",
                 extra={
-                    "key": api_key[:8],
+                    "key": key_id,
                     "status_code": status_code,
                     "error_message": error_message,
                 },
             )
-            # key_manager.blacklist_key(api_key)
-
+            # 把这个 key 加冷却 60s（如果 key_manager 支持）
+            try:
+                from app.utils.api_key import mark_key_failure
+                await mark_key_failure(api_key, 429)
+            except Exception:
+                pass
             return {
                 "remove_cache": False,
                 "error": error_message,
                 "should_switch_key": True,
             }
 
-        else:
-            error_detail = handle_gemini_error(e, api_key)
-
-            # # 重试次数用尽，在日志中输出错误状态码
-            # log('error', f"Gemini 服务器错误({status_code})",
-            #     extra={'key': api_key[:8], 'request_type': request_type, 'model': model, 'status_code': int(status_code)})
-
-            # 不再切换密钥，直接向客户端抛出HTTP异常
-            raise HTTPException(
-                status_code=int(status_code),
-                detail=f"Gemini API 服务器错误({status_code})，请稍后重试",
+        # 401/403 -> 永久拉黑当前 key + 切换
+        if status_code in (401, 403):
+            error_message = "Permission denied" if status_code == 403 else "Unauthorized"
+            log(
+                "ERROR",
+                f"{key_id} {status_code} {error_message}, marking key invalid",
+                extra={
+                    "key": key_id,
+                    "status_code": status_code,
+                },
             )
+            try:
+                from app.utils.api_key import mark_key_failure
+                await mark_key_failure(api_key, status_code)
+            except Exception:
+                pass
+            return {
+                "remove_cache": False,
+                "error": error_message,
+                "should_switch_key": True,
+            }
+
+        # 500/503 -> 加冷却 5s + 用 full-jitter 退避重试
+        if retry_count < 3 and status_code in (500, 503):
+            error_message = (
+                "Upstream internal error"
+                if status_code == 500
+                else "Upstream service unavailable"
+            )
+            # AWS-recommended full jitter — spreads concurrent retriers
+            # uniformly across [0, 2**attempt] so they don't retry at
+            # the exact same instant (which is a bot fingerprint).
+            wait_time = full_jitter_backoff(retry_count, base=1.0, cap=16.0)
+            log(
+                "warning",
+                f"{key_id} {error_message}, waiting {wait_time:.1f}s before retry ({retry_count + 1}/3)",
+                extra={
+                    "key": key_id,
+                    "request_type": request_type,
+                    "model": model,
+                    "status_code": int(status_code),
+                },
+            )
+            # 加短冷却防止重试期间该 key 又被打
+            try:
+                from app.utils.api_key import mark_key_failure
+                await mark_key_failure(api_key, status_code)
+            except Exception:
+                pass
+            await asyncio.sleep(wait_time)
+            return {"remove_cache": False}
+
+        # 其它 HTTP 错误 -> 透传状态码 + 通用消息（不含 "Gemini API"）
+        error_detail = handle_gemini_error(e, api_key)
+        raise HTTPException(
+            status_code=int(status_code),
+            # 之前是 "Gemini API 服务器错误({status_code})，请稍后重试"
+            # 现在不再泄露上游身份
+            detail=f"Upstream service error ({status_code}). Please retry later.",
+        )
 
     # 对于其他错误，返回切换密钥的信号，并输出错误信息到日志中
     error_detail = handle_gemini_error(e, api_key)

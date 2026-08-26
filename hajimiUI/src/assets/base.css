@@ -1,200 +1,276 @@
-/* color palette from <https://github.com/vuejs/theme> */
+/* ==========================================================================
+   Design tokens — modern, neutral, professional
+   Inspired by Linear / Vercel / Stripe dashboards
+   ========================================================================== */
+
 :root {
-  --vt-c-white: #ffffff;
-  --vt-c-white-soft: #f8f8f8;
-  --vt-c-white-mute: #f2f2f2;
+  /* ---------- Neutral palette (light) ---------- */
+  --bg: #FAFAFA;
+  --bg-elevated: #FFFFFF;
+  --bg-subtle: #F4F4F5;
+  --bg-muted: #E4E4E7;
+  --bg-inverse: #18181B;
 
-  --vt-c-black: #181818;
-  --vt-c-black-soft: #222222;
-  --vt-c-black-mute: #282828;
+  --border: #E4E4E7;
+  --border-strong: #D4D4D8;
+  --border-subtle: #F4F4F5;
 
-  --vt-c-indigo: #2c3e50;
+  --text: #18181B;
+  --text-strong: #09090B;
+  --text-muted: #71717A;
+  --text-subtle: #A1A1AA;
+  --text-inverse: #FAFAFA;
 
-  --vt-c-divider-light-1: rgba(60, 60, 60, 0.29);
-  --vt-c-divider-light-2: rgba(60, 60, 60, 0.12);
-  --vt-c-divider-dark-1: rgba(84, 84, 84, 0.65);
-  --vt-c-divider-dark-2: rgba(84, 84, 84, 0.48);
+  /* ---------- Accent (indigo) ---------- */
+  --accent: #6366F1;
+  --accent-strong: #4F46E5;
+  --accent-subtle: #EEF2FF;
+  --accent-hover: #4338CA;
 
-  --vt-c-text-light-1: var(--vt-c-indigo);
-  --vt-c-text-light-2: rgba(60, 60, 60, 0.66);
-  --vt-c-text-dark-1: var(--vt-c-white);
-  --vt-c-text-dark-2: rgba(235, 235, 235, 0.64);
+  /* ---------- Status colors ---------- */
+  --success: #10B981;
+  --success-subtle: #ECFDF5;
+  --success-strong: #047857;
+  --warning: #F59E0B;
+  --warning-subtle: #FFFBEB;
+  --warning-strong: #B45309;
+  --danger: #EF4444;
+  --danger-subtle: #FEF2F2;
+  --danger-strong: #B91C1C;
+  --info: #3B82F6;
+  --info-subtle: #EFF6FF;
+  --info-strong: #1D4ED8;
+
+  /* ---------- Typography ---------- */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Menlo, Monaco,
+    Consolas, 'Liberation Mono', monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+  --fs-3xl: 28px;
+
+  --lh-tight: 1.25;
+  --lh-base: 1.5;
+  --lh-relaxed: 1.625;
+
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+
+  /* ---------- Spacing scale ---------- */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+
+  /* ---------- Radii ---------- */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
+  --r-2xl: 16px;
+  --r-full: 9999px;
+
+  /* ---------- Shadows (subtle, professional) ---------- */
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.06), 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.06), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+  --shadow-lg: 0 12px 24px -6px rgba(0, 0, 0, 0.08), 0 4px 8px -2px rgba(0, 0, 0, 0.04);
+  --shadow-xl: 0 24px 48px -12px rgba(0, 0, 0, 0.10), 0 8px 16px -4px rgba(0, 0, 0, 0.05);
+
+  /* ---------- Motion ---------- */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur-base: 200ms;
+  --dur-slow: 320ms;
+
+  /* ---------- Layout ---------- */
+  --max-w: 1280px;
+  --header-h: 56px;
 }
 
-/* semantic color variables for this project */
-:root {
-  --color-background: var(--vt-c-white);
-  --color-background-soft: var(--vt-c-white-soft);
-  --color-background-mute: var(--vt-c-white-mute);
-
-  --color-border: var(--vt-c-divider-light-2);
-  --color-border-hover: var(--vt-c-divider-light-1);
-
-  --color-heading: var(--vt-c-text-light-1);
-  --color-text: var(--vt-c-text-light-1);
-
-  --section-gap: 160px;
-  
-  /* 自定义颜色变量 - 浅色模式 */
-  --card-background: #ffffff;
-  --card-border: #e0e0e0;
-  --button-primary: #4f46e5;
-  --button-primary-hover: #4338ca;
-  --button-secondary: #f3f4f6;
-  --button-secondary-hover: #e5e7eb;
-  --button-secondary-text: #4b5563;
-  --button-text: #ffffff;
-  --stats-item-bg: #f8f9fa;
-  --log-entry-bg: #f8f9fa;
-  --log-entry-border: #e9ecef;
-  --toggle-bg: #ccc;
-  --toggle-active: #4f46e5;
-  
-  /* 新增渐变色变量 */
-  --gradient-primary: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-  --gradient-secondary: linear-gradient(135deg, #3b82f6 0%, #2dd4bf 100%);
-  --gradient-success: linear-gradient(135deg, #10b981 0%, #059669 100%);
-  --gradient-warning: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-  --gradient-danger: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
-  --gradient-info: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-  
-  /* 新增阴影效果 */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  
-  /* 新增圆角变量 */
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.75rem;
-  --radius-2xl: 1rem;
-  --radius-full: 9999px;
-  
-  /* 新增动画变量 */
-  --transition-fast: 150ms;
-  --transition-normal: 300ms;
-  --transition-slow: 500ms;
-}
-
-/* 夜间模式变量 */
+/* ---------- Dark mode tokens ---------- */
 .dark-mode {
-  --color-background: var(--vt-c-black);
-  --color-background-soft: var(--vt-c-black-soft);
-  --color-background-mute: var(--vt-c-black-mute);
+  --bg: #09090B;
+  --bg-elevated: #18181B;
+  --bg-subtle: #1F1F23;
+  --bg-muted: #27272A;
+  --bg-inverse: #FAFAFA;
 
-  --color-border: var(--vt-c-divider-dark-2);
-  --color-border-hover: var(--vt-c-divider-dark-1);
+  --border: #27272A;
+  --border-strong: #3F3F46;
+  --border-subtle: #1F1F23;
 
-  --color-heading: var(--vt-c-text-dark-1);
-  --color-text: rgba(255, 255, 255, 0.85);
-  
-  /* 自定义夜间模式颜色 */
-  --card-background: #1a1a1a;
-  --card-border: #2a2a2a;
-  --button-primary: #8b5cf6;
-  --button-primary-hover: #7c3aed;
-  --button-secondary: #2a2a2a;
-  --button-secondary-hover: #3a3a3a;
-  --button-secondary-text: #f1f5f9;
-  --button-text: #ffffff;
-  --stats-item-bg: #151515;
-  --log-entry-bg: #151515;
-  --log-entry-border: #2a2a2a;
-  --toggle-bg: #3a3a3a;
-  --toggle-active: #8b5cf6;
-  
-  /* 深色模式渐变色 */
-  --gradient-primary: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);
-  --gradient-secondary: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-  --gradient-success: linear-gradient(135deg, #10b981 0%, #047857 100%);
-  --gradient-warning: linear-gradient(135deg, #f59e0b 0%, #b45309 100%);
-  --gradient-danger: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
-  --gradient-info: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%);
-  
-  /* 深色模式阴影 */
-  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
-  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+  --text: #FAFAFA;
+  --text-strong: #FFFFFF;
+  --text-muted: #A1A1AA;
+  --text-subtle: #71717A;
+  --text-inverse: #18181B;
+
+  --accent: #818CF8;
+  --accent-strong: #6366F1;
+  --accent-subtle: #1E1B4B;
+  --accent-hover: #A5B4FC;
+
+  --success: #34D399;
+  --success-subtle: #052E1B;
+  --success-strong: #6EE7B7;
+  --warning: #FBBF24;
+  --warning-subtle: #2A1A05;
+  --warning-strong: #FCD34D;
+  --danger: #F87171;
+  --danger-subtle: #2A0A0A;
+  --danger-strong: #FCA5A5;
+  --info: #60A5FA;
+  --info-subtle: #0B1A30;
+  --info-strong: #93C5FD;
+
+  --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.40), 0 1px 2px 0 rgba(0, 0, 0, 0.20);
+  --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.40), 0 2px 4px -1px rgba(0, 0, 0, 0.20);
+  --shadow-lg: 0 12px 24px -6px rgba(0, 0, 0, 0.50), 0 4px 8px -2px rgba(0, 0, 0, 0.25);
+  --shadow-xl: 0 24px 48px -12px rgba(0, 0, 0, 0.60), 0 8px 16px -4px rgba(0, 0, 0, 0.30);
 }
 
-/* 保留系统偏好设置的支持 */
+/* Respect system preference when user hasn't explicitly toggled */
 @media (prefers-color-scheme: dark) {
   :root:not(.dark-mode):not(.light-mode) {
-    --color-background: var(--vt-c-black);
-    --color-background-soft: var(--vt-c-black-soft);
-    --color-background-mute: var(--vt-c-black-mute);
+    --bg: #09090B;
+    --bg-elevated: #18181B;
+    --bg-subtle: #1F1F23;
+    --bg-muted: #27272A;
+    --bg-inverse: #FAFAFA;
 
-    --color-border: var(--vt-c-divider-dark-2);
-    --color-border-hover: var(--vt-c-divider-dark-1);
+    --border: #27272A;
+    --border-strong: #3F3F46;
+    --border-subtle: #1F1F23;
 
-    --color-heading: var(--vt-c-text-dark-1);
-    --color-text: rgba(255, 255, 255, 0.85);
-    
-    /* 自定义夜间模式颜色 */
-    --card-background: #1a1a1a;
-    --card-border: #2a2a2a;
-    --button-primary: #8b5cf6;
-    --button-primary-hover: #7c3aed;
-    --button-secondary: #2a2a2a;
-    --button-secondary-hover: #3a3a3a;
-    --button-secondary-text: #f1f5f9;
-    --button-text: #ffffff;
-    --stats-item-bg: #151515;
-    --log-entry-bg: #151515;
-    --log-entry-border: #2a2a2a;
-    --toggle-bg: #3a3a3a;
-    --toggle-active: #8b5cf6;
-    
-    /* 深色模式渐变色 */
-    --gradient-primary: linear-gradient(135deg, #7c3aed 0%, #5b21b6 100%);
-    --gradient-secondary: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-    --gradient-success: linear-gradient(135deg, #10b981 0%, #047857 100%);
-    --gradient-warning: linear-gradient(135deg, #f59e0b 0%, #b45309 100%);
-    --gradient-danger: linear-gradient(135deg, #ef4444 0%, #b91c1c 100%);
-    --gradient-info: linear-gradient(135deg, #3b82f6 0%, #1e40af 100%);
-    
-    /* 深色模式阴影 */
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.4), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
-    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.4), 0 10px 10px -5px rgba(0, 0, 0, 0.2);
+    --text: #FAFAFA;
+    --text-strong: #FFFFFF;
+    --text-muted: #A1A1AA;
+    --text-subtle: #71717A;
+    --text-inverse: #18181B;
+
+    --accent: #818CF8;
+    --accent-strong: #6366F1;
+    --accent-subtle: #1E1B4B;
+    --accent-hover: #A5B4FC;
+
+    --success: #34D399;
+    --success-subtle: #052E1B;
+    --success-strong: #6EE7B7;
+    --warning: #FBBF24;
+    --warning-subtle: #2A1A05;
+    --warning-strong: #FCD34D;
+    --danger: #F87171;
+    --danger-subtle: #2A0A0A;
+    --danger-strong: #FCA5A5;
+    --info: #60A5FA;
+    --info-subtle: #0B1A30;
+    --info-strong: #93C5FD;
+
+    --shadow-xs: 0 1px 2px 0 rgba(0, 0, 0, 0.30);
+    --shadow-sm: 0 1px 3px 0 rgba(0, 0, 0, 0.40), 0 1px 2px 0 rgba(0, 0, 0, 0.20);
+    --shadow-md: 0 4px 8px -2px rgba(0, 0, 0, 0.40), 0 2px 4px -1px rgba(0, 0, 0, 0.20);
+    --shadow-lg: 0 12px 24px -6px rgba(0, 0, 0, 0.50), 0 4px 8px -2px rgba(0, 0, 0, 0.25);
+    --shadow-xl: 0 24px 48px -12px rgba(0, 0, 0, 0.60), 0 8px 16px -4px rgba(0, 0, 0, 0.30);
   }
 }
+
+/* ==========================================================================
+   Reset & base typography
+   ========================================================================== */
 
 *,
 *::before,
 *::after {
   box-sizing: border-box;
   margin: 0;
-  font-weight: normal;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
-  min-height: 100vh;
-  color: var(--color-text);
-  background: var(--color-background);
-  transition:
-    color 0.5s,
-    background-color 0.5s;
-  line-height: 1.6;
-  font-family:
-    Inter,
-    -apple-system,
-    BlinkMacSystemFont,
-    'Segoe UI',
-    Roboto,
-    Oxygen,
-    Ubuntu,
-    Cantarell,
-    'Fira Sans',
-    'Droid Sans',
-    'Helvetica Neue',
-    sans-serif;
-  font-size: 15px;
-  text-rendering: optimizeLegibility;
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: var(--lh-base);
+  color: var(--text);
+  background: var(--bg);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  transition: background-color var(--dur-base) var(--ease-out),
+    color var(--dur-base) var(--ease-out);
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+  border: none;
+  background: none;
+  color: inherit;
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+
+a:hover {
+  color: var(--accent-hover);
+}
+
+::selection {
+  background: var(--accent-subtle);
+  color: var(--accent-strong);
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-muted);
+  border-radius: var(--r-full);
+  border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
 }

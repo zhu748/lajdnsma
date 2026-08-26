@@ -146,12 +146,21 @@ class GeminiSchemaTestCase(unittest.TestCase):
 
         self.assertEqual(history[0]["role"], "model")
         self.assertEqual(history[0]["parts"][0], {"text": "我来查看当前目录。"})
+        # Hardening: previously the dummy thoughtSignature was the
+        # literal string "skip_thought_signature_validator" (a strong
+        # proxy fingerprint).  Now it's a strong-random base64-style
+        # signature generated per call.  We assert on shape, not value.
+        tool_part = history[0]["parts"][1]
         self.assertEqual(
-            history[0]["parts"][1],
-            {
-                "functionCall": {"name": "Bash", "args": {"command": "pwd"}},
-                "thoughtSignature": "skip_thought_signature_validator",
-            },
+            tool_part["functionCall"],
+            {"name": "Bash", "args": {"command": "pwd"}},
+        )
+        self.assertIn("thoughtSignature", tool_part)
+        self.assertGreater(len(tool_part["thoughtSignature"]), 100)
+        # Ensure it is NOT the old literal — that would indicate a
+        # regression to the proxy fingerprint.
+        self.assertNotEqual(
+            tool_part["thoughtSignature"], "skip_thought_signature_validator"
         )
 
     def test_convert_messages_promotes_leading_system_instruction(self):

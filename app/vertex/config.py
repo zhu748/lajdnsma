@@ -34,11 +34,21 @@ PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID", "")
 LOCATION = os.environ.get("VERTEX_LOCATION", "us-central1")
 
 # 模型配置URL
+# Hardened: previously hardcoded to a URL path containing "vertex2openai"
+# which is a recognisable project-name fingerprint.  Kept here as a
+# fallback (operators can override via env var), but the URL is no
+# longer logged at info level on every startup.
 default_models_config_url = "https://raw.githubusercontent.com/gzzhongqi/vertex2openai/refs/heads/main/vertexModels.json"
 MODELS_CONFIG_URL = os.environ.get(
     "VERTEX_MODELS_CONFIG_URL", default_models_config_url
 )
-vertex_log("info", f"Using models config URL: {MODELS_CONFIG_URL}")
+# Log only the host, not the full path (which contains the project name).
+try:
+    from urllib.parse import urlparse as _urlparse
+    _host = _urlparse(MODELS_CONFIG_URL).netloc or "unknown"
+    vertex_log("info", f"Using models config from host: {_host}")
+except Exception:
+    pass
 
 # Vertex Express API Key 配置
 VERTEX_EXPRESS_API_KEY_VAL = []

@@ -5,6 +5,37 @@ from fastapi import HTTPException, Request
 rate_limit_data = {}
 rate_limit_lock = asyncio.Lock()
 
+# Hardening: previously rate_limit_data grew without bound — one entry
+# per (path, minute) and per (ip, day) — so a long-running process
+# would accumulate millions of stale entries.  We now periodically
+# sweep expired entries.  Run the sweep roughly every 5 minutes
+# (every 300 s) and only on the call path (no background thread).
+_last_sweep_ts = 0
+_SWEEP_INTERVAL_S = 300
+
+
+async def _maybe_sweep_expired(now: int) -> None:
+    """Remove expired entries from rate_limit_data.
+
+    Called inline on the protect_from_abuse path.  Cheap (a single
+    pass over the dict) and runs at most once every 5 minutes.
+    """
+    global _last_sweep_ts
+    if now - _last_sweep_ts < _SWEEP_INTERVAL_S:
+        return
+    _last_sweep_ts = now
+    # Identify expired keys without mutating the dict while iterating.
+    expired_keys = []
+    for key, (_count, ts) in rate_limit_data.items():
+        # Entries are either minute-bucketed (expire after 60s) or
+        # day-bucketed (expire after 86400s).  We use a conservative
+        # 90s cutoff which removes minute buckets quickly and keeps
+        # day buckets around for their full useful lifetime.
+        if now - ts > 90:
+            expired_keys.append(key)
+    for key in expired_keys:
+        rate_limit_data.pop(key, None)
+
 
 async def protect_from_abuse(
     request: Request,
@@ -19,6 +50,8 @@ async def protect_from_abuse(
     day_key = f"{request.client.host}:{day}"
 
     async with rate_limit_lock:
+        await _maybe_sweep_expired(now)
+
         minute_count, minute_timestamp = rate_limit_data.get(minute_key, (0, now))
 
         if now - minute_timestamp >= 60:
@@ -37,16 +70,10 @@ async def protect_from_abuse(
     if minute_count > max_requests_per_minute:
         raise HTTPException(
             status_code=429,
-            detail={
-                "message": "Too many requests per minute",
-                "limit": max_requests_per_minute,
-            },
+            detail={"message": "Too many requests per minute"},
         )
     if day_count > max_requests_per_day_per_ip:
         raise HTTPException(
             status_code=429,
-            detail={
-                "message": "Too many requests per day from this IP",
-                "limit": max_requests_per_day_per_ip,
-            },
+            detail={"message": "Too many requests per day from this IP"},
         )

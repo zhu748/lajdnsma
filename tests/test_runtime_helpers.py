@@ -224,6 +224,15 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
         fake_settings = types.ModuleType("app.config.settings")
         fake_settings.api_call_stats = {}
 
+        # Hardened: gemini_response_processing now imports
+        # `from app.config.safety import get_safety_settings`, so we
+        # provide a fake `app.config.safety` module that returns None
+        # (matching the new default SAFETY_MODE="default" behaviour).
+        fake_safety = types.ModuleType("app.config.safety")
+        def _fake_get_safety_settings(is_gemini_2: bool = False):
+            return None
+        fake_safety.get_safety_settings = _fake_get_safety_settings
+
         fake_utils = types.ModuleType("app.utils")
         update_calls = []
 
@@ -252,6 +261,7 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
                 "app": fake_app,
                 "app.config": fake_config,
                 "app.config.settings": fake_settings,
+                "app.config.safety": fake_safety,
                 "app.utils": fake_utils,
                 "app.utils.empty_response": fake_empty_response,
                 "app.utils.logging": fake_logging,

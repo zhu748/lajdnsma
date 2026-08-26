@@ -46,6 +46,14 @@ async def vector_query(
     _du=Depends(route_runtime.verify_user_agent),
     _dp=Depends(custom_verify_password),
 ):
+    # Hardening: previously missing — these routes had no abuse
+    # protection while `/v1/embeddings` did, allowing an attacker to
+    # bypass the per-IP rate limit by using the vector endpoints.
+    await protect_from_abuse(
+        request,
+        settings.MAX_REQUESTS_PER_MINUTE,
+        settings.MAX_REQUESTS_PER_DAY_PER_IP,
+    )
     try:
         assert route_runtime.key_manager is not None
         return await handle_vector_query(
@@ -66,6 +74,12 @@ async def vector_insert(
     _du=Depends(route_runtime.verify_user_agent),
     _dp=Depends(custom_verify_password),
 ):
+    # Hardening: same as above.
+    await protect_from_abuse(
+        request,
+        settings.MAX_REQUESTS_PER_MINUTE,
+        settings.MAX_REQUESTS_PER_DAY_PER_IP,
+    )
     try:
         assert route_runtime.key_manager is not None
         return await handle_vector_insert(

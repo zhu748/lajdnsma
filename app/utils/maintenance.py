@@ -30,6 +30,12 @@ def handle_exception(exc_type, exc_value, exc_traceback):
     )
 
 
+# Module-level handle to the scheduler so the FastAPI shutdown event
+# can stop it cleanly (previously the scheduler was a local variable
+# that escaped scope on shutdown, leaving background jobs orphaned).
+_scheduler: AsyncIOScheduler | None = None
+
+
 def schedule_cache_cleanup(response_cache_manager, active_requests_manager):
     """
     设置定期清理缓存和活跃请求的定时任务
@@ -38,15 +44,16 @@ def schedule_cache_cleanup(response_cache_manager, active_requests_manager):
         response_cache_manager: 响应缓存管理器实例
         active_requests_manager: 活跃请求管理器实例
     """
+    global _scheduler
     beijing_tz = ZoneInfo("Asia/Shanghai")
-    scheduler = AsyncIOScheduler(
+    _scheduler = AsyncIOScheduler(
         timezone=beijing_tz
     )  # 使用 AsyncIOScheduler 替代 BackgroundScheduler
 
     # 添加任务时直接传递异步函数（无需额外包装）
-    scheduler.add_job(response_cache_manager.clean_expired, "interval", minutes=1)
-    scheduler.add_job(active_requests_manager.clean_completed, "interval", seconds=30)
-    scheduler.add_job(
+    _scheduler.add_job(response_cache_manager.clean_expired, "interval", minutes=1)
+    _scheduler.add_job(active_requests_manager.clean_completed, "interval", seconds=30)
+    _scheduler.add_job(
         active_requests_manager.clean_long_running, "interval", minutes=5, args=[300]
     )
 
@@ -66,7 +73,7 @@ def schedule_cache_cleanup(response_cache_manager, active_requests_manager):
             loop.close()
 
     # 添加同步的清理任务
-    scheduler.add_job(run_cleanup, "interval", minutes=5)
+    _scheduler.add_job(run_cleanup, "interval", minutes=5)
 
     # 同样修改定时重置函数
     def run_reset():
@@ -79,10 +86,28 @@ def schedule_cache_cleanup(response_cache_manager, active_requests_manager):
         finally:
             loop.close()
 
-    scheduler.add_job(check_version, "interval", hours=4)
-    scheduler.add_job(run_reset, "cron", hour=15, minute=0)
-    scheduler.start()
-    return scheduler
+    _scheduler.add_job(check_version, "interval", hours=4)
+    _scheduler.add_job(run_reset, "cron", hour=15, minute=0)
+    _scheduler.start()
+    return _scheduler
+
+
+async def shutdown_scheduler():
+    """Stop the background scheduler cleanly.
+
+    Called from the FastAPI shutdown event.  Without this, the
+    AsyncIOScheduler would keep running background jobs after the
+    HTTP server stopped accepting connections, which raises
+    `RuntimeError: Event loop is closed` on the next tick.
+    """
+    global _scheduler
+    if _scheduler is not None and _scheduler.running:
+        _scheduler.shutdown(wait=False)
+    # Also signal the stats manager's worker thread to stop.
+    try:
+        api_stats_manager.shutdown()
+    except Exception as e:
+        log("error", f"Stats manager shutdown error: {str(e)}")
 
 
 async def api_call_stats_clean():

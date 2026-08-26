@@ -24,6 +24,7 @@ from app.utils.response_loop_helpers import (
 )
 from app.utils.retry_state import (
     increase_concurrency,
+    decrease_concurrency,
     next_batch_size,
     reached_empty_response_limit,
     should_continue_retry,
@@ -89,11 +90,21 @@ async def process_request(
             return batch_result["response"]
 
         if valid_keys:
-            current_concurrent = increase_concurrency(
-                current_concurrent,
-                settings.INCREASE_CONCURRENT_ON_FAILURE,
-                settings.MAX_CONCURRENT_REQUESTS,
-            )
+            # Hardening: previously this called increase_concurrency on
+            # failure, which from the upstream provider's perspective looks
+            # exactly like a request-rate doubling DDoS pattern.  We now do
+            # the opposite: reduce concurrency on failure to let upstream
+            # recover.  The old "increase" path is preserved only for the
+            # explicit case where the operator set
+            # INCREASE_CONCURRENT_ON_FAILURE > 0 (legacy opt-in).
+            if settings.INCREASE_CONCURRENT_ON_FAILURE > 0:
+                current_concurrent = increase_concurrency(
+                    current_concurrent,
+                    settings.INCREASE_CONCURRENT_ON_FAILURE,
+                    settings.MAX_CONCURRENT_REQUESTS,
+                )
+            else:
+                current_concurrent = decrease_concurrency(current_concurrent, 1)
             log_concurrency_increase(
                 request_type="non-stream",
                 model=chat_request.model,
@@ -205,11 +216,14 @@ async def process_nonstream_with_keepalive_stream(
                     return
 
                 if valid_keys:
-                    current_concurrent = increase_concurrency(
-                        current_concurrent,
-                        settings.INCREASE_CONCURRENT_ON_FAILURE,
-                        settings.MAX_CONCURRENT_REQUESTS,
-                    )
+                    if settings.INCREASE_CONCURRENT_ON_FAILURE > 0:
+                        current_concurrent = increase_concurrency(
+                            current_concurrent,
+                            settings.INCREASE_CONCURRENT_ON_FAILURE,
+                            settings.MAX_CONCURRENT_REQUESTS,
+                        )
+                    else:
+                        current_concurrent = decrease_concurrency(current_concurrent, 1)
                     log_concurrency_increase(
                         request_type="non-stream",
                         model=chat_request.model,

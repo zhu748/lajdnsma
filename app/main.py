@@ -12,6 +12,7 @@ from app.utils import (
     ActiveRequestsManager,
     check_version,
     schedule_cache_cleanup,
+    shutdown_scheduler,
     handle_exception,
     log,
 )
@@ -21,7 +22,7 @@ from app.vertex.vertex_ai_init import init_vertex_ai
 from app.vertex.credentials_manager import CredentialManager
 from app.utils.http_client import close_async_client
 import app.config.settings as settings
-from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
+from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2, get_safety_settings
 import asyncio
 import sys
 import pathlib
@@ -32,17 +33,74 @@ import webbrowser
 BASE_DIR = pathlib.Path(__file__).parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
-app = FastAPI(limit="50M")
+# Hardening: the previous `FastAPI(limit="50M")` kwarg is not a real
+# Starlette/FastAPI parameter — it was silently ignored, so the
+# process had no request body size limit at all (a DoS vector: a
+# malicious client could submit a multi-GB body and OOM the worker).
+# We now enforce an explicit body size cap via middleware (~50 MB
+# matches the previous intent).
+MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024  # 50 MB
+
+
+app = FastAPI()
+
+
+@app.middleware("http")
+async def enforce_body_size_limit(request: Request, call_next):
+    """Reject request bodies larger than MAX_REQUEST_BODY_BYTES.
+
+    We check `Content-Length` for requests that declare it.  Requests
+    that use chunked transfer encoding (no Content-Length) are
+    streamed; the body itself is not pre-read, but FastAPI/Starlette
+    will still parse it during routing — that's a known limitation
+    that we accept for now (chunked clients are rare for chat APIs).
+    """
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > MAX_REQUEST_BODY_BYTES:
+                return JSONResponse(
+                    status_code=413,
+                    content={"error": {"message": "Request body too large.", "type": "invalid_request_error"}},
+                )
+        except (TypeError, ValueError):
+            pass
+    return await call_next(request)
+
+
+# --------------- Response header hardening middleware ---------------
+# Real OpenAI / Anthropic responses don't carry uvicorn's default
+# `Server: uvicorn` header, and they don't send `X-Powered-By` at
+# all.  Their absence + a neutral `Server` value removes one of the
+# easiest-to-probe markers that an upstream (or client) can use to
+# identify this as a uvicorn-hosted proxy.
+@app.middleware("http")
+async def harden_response_headers(request: Request, call_next):
+    response = await call_next(request)
+    # Replace uvicorn's default `Server: uvicorn` with a neutral value.
+    # `cloudflare` is a safe choice because it's also commonly seen
+    # in front of real OpenAI/Anthropic deployments.
+    response.headers["Server"] = "cloudflare"
+    # Strip FastAPI/Starlette-added disclosure headers if present.
+    response.headers.pop("X-Powered-By", None)
+    return response
+
 
 # --------------- CORS 中间件 ---------------
-# 如果 ALLOWED_ORIGINS 为空列表，则不允许任何跨域请求
+# Hardening: previously `allow_methods=["*"]` +
+# `allow_headers=["*"]` was too permissive — real OpenAI/Anthropic
+# CORS responses are a restricted whitelist (POST, OPTIONS +
+# Authorization, Content-Type, Accept).  The wide `*` is itself a
+# fingerprint because the OPTIONS preflight response then advertises
+# every method.  We also turn off `allow_credentials` unless the
+# operator explicitly sets it (proxy traffic doesn't need cookies).
 if settings.ALLOWED_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.ALLOWED_ORIGINS,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "Accept"],
     )
 
 # --------------- 全局实例 ---------------
@@ -89,11 +147,13 @@ async def check_remaining_keys_async(keys_to_check: list, initial_invalid_keys: 
     """
     在后台异步检查剩余的 API 密钥。
     """
+    import random as _random
+
     local_invalid_keys = []
     found_valid_keys = False
 
     log("info", " 开始在后台检查剩余 API Key 是否有效")
-    for key in keys_to_check:
+    for idx, key in enumerate(keys_to_check):
         is_valid = await test_api_key(key)
         if is_valid:
             if key not in key_manager.api_keys:  # 避免重复添加
@@ -102,9 +162,15 @@ async def check_remaining_keys_async(keys_to_check: list, initial_invalid_keys: 
             # log('info', f"API Key {key[:8]}... 有效")
         else:
             local_invalid_keys.append(key)
-            log("warning", f" API Key {key[:8]}... 无效")
+            log("warning", f" API Key key#{hash(key) & 0xFFFFFF:06x} 无效")
 
-        await asyncio.sleep(0.05)  # 短暂休眠，避免请求过于密集
+        # Hardening: inter-probe delay.  A 0.05s gap between sequential
+        # `:models` list calls is a textbook key-enumeration fingerprint
+        # (50 probes in ~3s from one IP == bot).  Use a 2-5s uniform
+        # jitter so the probe sequence resembles a human re-checking
+        # individual keys, not a script iterating a list.
+        if idx < len(keys_to_check) - 1:
+            await asyncio.sleep(_random.uniform(2.0, 5.0))
 
     if found_valid_keys:
         key_manager._reset_key_stack()  # 如果找到新的有效key，重置栈
@@ -167,7 +233,7 @@ async def startup_event():
     for index, key in enumerate(initial_keys):
         is_valid = await test_api_key(key)
         if is_valid:
-            log("info", f"找到第一个有效密钥: {key[:8]}...")
+            log("info", f"找到第一个有效密钥: key#{hash(key) & 0xFFFFFF:06x}")
             first_valid_key = key
             key_manager.api_keys.append(key)  # 添加到管理器
             key_manager._reset_key_stack()
@@ -175,7 +241,7 @@ async def startup_event():
             keys_to_check_later = initial_keys[index + 1 :]
             break  # 找到即停止
         else:
-            log("warning", f"密钥 {key[:8]}... 无效")
+            log("warning", f"密钥 key#{hash(key) & 0xFFFFFF:06x} 无效")
             initial_invalid_keys.append(key)
 
     if not first_valid_key:
@@ -188,11 +254,11 @@ async def startup_event():
             GeminiClient.AVAILABLE_MODELS = [
                 model.replace("models/", "") for model in all_models
             ]
-            log("info", f"使用密钥 {first_valid_key[:8]}... 加载可用模型成功")
+            log("info", f"使用密钥 key#{hash(first_valid_key) & 0xFFFFFF:06x} 加载可用模型成功")
         except Exception as e:
             log(
                 "warning",
-                f"使用密钥 {first_valid_key[:8]}... 加载可用模型失败",
+                f"使用密钥 key#{hash(first_valid_key) & 0xFFFFFF:06x} 加载可用模型失败",
                 extra={"error_message": str(e)},
             )
 
@@ -253,6 +319,16 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
+    # Hardening: previously only closed the shared httpx client.
+    # Orphan background schedulers + threads would keep running
+    # after the HTTP server stopped, raising
+    # `RuntimeError: Event loop is closed` and leaking file
+    # descriptors.  We now stop the AsyncIOScheduler + stats worker
+    # thread + close httpx in a proper order.
+    try:
+        await shutdown_scheduler()
+    except Exception as e:
+        log("error", f"shutdown_scheduler error: {str(e)}")
     await close_async_client()
 
 
@@ -261,8 +337,16 @@ async def shutdown_event():
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    """Global exception handler.
+
+    Hardened: previously returned `ErrorResponse(message=str(exc))` to
+    the client, which leaks internal stack/error information.  We now
+    return only a generic "Internal Server Error" message to the
+    client; the full exception is logged internally.
+    """
     from app.utils import translate_error
 
+    # Log the full exception internally for debugging
     error_message = translate_error(str(exc))
     extra_log_unhandled_exception = {"status_code": 500, "error_message": error_message}
     log(
@@ -270,9 +354,13 @@ async def global_exception_handler(request: Request, exc: Exception):
         f"Unhandled exception: {error_message}",
         extra=extra_log_unhandled_exception,
     )
+    # Return a generic message to the client — no internal details.
     return JSONResponse(
         status_code=500,
-        content=ErrorResponse(message=str(exc), type="internal_error").dict(),
+        content=ErrorResponse(
+            message="Internal Server Error. Please retry later.",
+            type="internal_error",
+        ).dict(),
     )
 
 
@@ -280,6 +368,15 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 app.include_router(router)
 app.include_router(dashboard_router)
+
+
+# Unauthenticated health endpoint for container orchestrators
+# (Docker / k8s liveness probes).  Returns minimal info — no
+# version, no key counts, no upstream identifiers — so it's safe
+# to expose publicly.
+@app.get("/health", include_in_schema=False)
+async def health_check():
+    return {"status": "ok"}
 
 # 挂载静态文件目录
 app.mount("/assets", StaticFiles(directory="app/templates/assets"), name="assets")

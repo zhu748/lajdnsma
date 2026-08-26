@@ -2,6 +2,7 @@ import json
 import time
 import math
 import asyncio
+import random
 from typing import List, Dict, Any, Callable, Union, Optional
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -20,6 +21,7 @@ from app.vertex.message_processing import (
 )  # Changed from relative
 import app.vertex.config as app_config  # Changed from relative
 from app.config import settings  # 导入settings模块
+from app.utils.stealth import gen_openai_chunk_id
 
 
 def create_openai_error_response(
@@ -55,17 +57,23 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
         config["frequency_penalty"] = request.frequency_penalty
     if request.n is not None:
         config["candidate_count"] = request.n
-    config["safety_settings"] = [
-        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="OFF"),
-        types.SafetySetting(
-            category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="OFF"
-        ),
-        types.SafetySetting(
-            category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="OFF"
-        ),
-        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="OFF"),
-        types.SafetySetting(category="HARM_CATEGORY_CIVIC_INTEGRITY", threshold="OFF"),
-    ]
+    # Hardened: previously hardcoded all 5 categories to OFF.  Real
+    # clients almost never do that, and sending 5-OFF safetySettings on
+    # every request is a strong proxy fingerprint.  Now we omit
+    # safety_settings entirely (let Vertex use its defaults), unless
+    # the operator explicitly sets SAFETY_MODE!=default (see
+    # app/config/safety.py:get_safety_settings).
+    from app.config.safety import get_safety_settings
+    safety_list = get_safety_settings(is_gemini_2=True)
+    if safety_list:
+        # Convert plain dict form to google.genai.types.SafetySetting
+        config["safety_settings"] = [
+            types.SafetySetting(
+                category=entry.get("category", ""),
+                threshold=entry.get("threshold", "BLOCK_NONE"),
+            )
+            for entry in safety_list
+        ]
     return config
 
 
@@ -131,23 +139,42 @@ async def _base_fake_stream_engine(
 ):
     api_call_task = api_call_task_creator()
 
+    # OpenAI streams share a single `created` Unix timestamp across all
+    # chunks of the same response (keepalive + content + final).  We
+    # also share the `response_id` so the keepalive chunks are clearly
+    # part of the same response — previously each keepalive chunk got
+    # a new random id + new timestamp, which is detectable as
+    # non-OpenAI behaviour.
+    created_ts = int(time.time())
+
     if keep_alive_interval_seconds > 0:
         while not api_call_task.done():
+            # Hardened: previously sent `delta: {reasoning_content: ""}`
+            # which is a non-standard OpenAI stream pattern (real OpenAI
+            # never emits empty reasoning_content deltas).  We now use an
+            # empty delta object (no content field at all) which is the
+            # closest thing to a real "no-content" heartbeat chunk OpenAI
+            # ever emits.
             keep_alive_data = {
-                "id": "chatcmpl-keepalive",
+                # Use the shared response_id so keepalive chunks are
+                # clearly part of the same stream (was: new random id
+                # per keepalive, which is detectable).
+                "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
                     {
-                        "delta": {"reasoning_content": ""},
+                        "delta": {},
                         "index": 0,
                         "finish_reason": None,
                     }
                 ],
             }
             yield f"data: {json.dumps(keep_alive_data)}\n\n"
-            await asyncio.sleep(keep_alive_interval_seconds)
+            # Jittered interval (was fixed `keep_alive_interval_seconds`).
+            jittered = keep_alive_interval_seconds * random.uniform(0.75, 1.25)
+            await asyncio.sleep(jittered)
 
     try:
         full_api_response = await api_call_task
@@ -186,7 +213,7 @@ async def _base_fake_stream_engine(
             reasoning_delta_data = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
                     {
@@ -201,18 +228,27 @@ async def _base_fake_stream_engine(
                 await asyncio.sleep(0.05)
 
         content_to_chunk = final_actual_content_text or ""
+        # Hardened: previously split into exactly 10 equal chunks at 50ms
+        # interval.  A 10-bucket/50ms pattern in the SSE byte-stream is
+        # trivially detectable as a fake-stream proxy.  We now use a
+        # randomised chunk size (between 24-96 chars) and randomised
+        # inter-chunk delay (20-150ms) so the distribution looks like
+        # real token-bound streaming.
         chunk_size = (
-            max(20, math.ceil(len(content_to_chunk) / 10)) if content_to_chunk else 0
+            max(20, random.randint(24, 96)) if content_to_chunk else 0
         )
 
         if not content_to_chunk and content_to_chunk != "":
+            # Real OpenAI never emits `delta: {"content": ""}`.  We
+            # emit an empty delta object instead — the closest legal
+            # shape for a no-content heartbeat.
             empty_delta_data = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
-                    {"index": 0, "delta": {"content": ""}, "finish_reason": None}
+                    {"index": 0, "delta": {}, "finish_reason": None}
                 ],
             }
             yield f"data: {json.dumps(empty_delta_data)}\n\n"
@@ -222,7 +258,7 @@ async def _base_fake_stream_engine(
                 content_delta_data = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
-                    "created": int(time.time()),
+                    "created": created_ts,
                     "model": sse_model_name,
                     "choices": [
                         {
@@ -234,19 +270,22 @@ async def _base_fake_stream_engine(
                 }
                 yield f"data: {json.dumps(content_delta_data)}\n\n"
                 if len(content_to_chunk) > chunk_size:
-                    await asyncio.sleep(0.05)
+                    await asyncio.sleep(random.uniform(0.02, 0.15))
 
-        yield create_final_chunk(sse_model_name, response_id)
+        yield create_final_chunk(sse_model_name, response_id, created_ts=created_ts)
         yield "data: [DONE]\n\n"
 
     except Exception as e:
-        err_msg_detail = f"Error in _base_fake_stream_engine (model: '{sse_model_name}'): {type(e).__name__} - {str(e)}"
-        print(f"ERROR: {err_msg_detail}")
-        sse_err_msg_display = str(e)
-        if len(sse_err_msg_display) > 512:
-            sse_err_msg_display = sse_err_msg_display[:512] + "..."
+        # Hardening: previously embedded `type(e).__name__ - str(e)`
+        # directly into the SSE error message sent to the client.  We
+        # now log the full exception internally and emit a neutral
+        # upstream-error message to the client.
+        vertex_log(
+            "error",
+            f"_base_fake_stream_engine error (internal only, model: {sse_model_name}): {type(e).__name__}: {e}",
+        )
         err_resp_for_sse = create_openai_error_response(
-            500, sse_err_msg_display, "server_error"
+            500, "Upstream service error during streaming.", "server_error"
         )
         json_payload_for_fake_stream_error = json.dumps(err_resp_for_sse)
         if not is_auto_attempt:
@@ -269,7 +308,7 @@ async def gemini_fake_stream_generator(
     print(
         f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with reasoning separation."
     )
-    response_id = f"chatcmpl-{int(time.time())}"
+    response_id = gen_openai_chunk_id()
 
     # 1. Create and await the API call task
     api_call_task = asyncio.create_task(
@@ -284,21 +323,25 @@ async def gemini_fake_stream_generator(
     outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
     if outer_keep_alive_interval > 0:
         while not api_call_task.done():
+            # Hardened: empty delta (no content fields at all) instead of
+            # empty reasoning_content.  Strong random chunk id instead of
+            # the fixed "chatcmpl-keepalive" string.  Jittered interval.
             keep_alive_data = {
-                "id": "chatcmpl-keepalive",
+                "id": gen_openai_chunk_id(),
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": request_obj.model,
                 "choices": [
                     {
-                        "delta": {"reasoning_content": ""},
+                        "delta": {},
                         "index": 0,
                         "finish_reason": None,
                     }
                 ],
             }
             yield f"data: {json.dumps(keep_alive_data)}\n\n"
-            await asyncio.sleep(outer_keep_alive_interval)
+            jittered = outer_keep_alive_interval * random.uniform(0.75, 1.25)
+            await asyncio.sleep(jittered)
 
     try:
         raw_response = await api_call_task  # Get the full Gemini response
@@ -338,7 +381,7 @@ async def gemini_fake_stream_generator(
                 and hasattr(response_to_check.prompt_feedback, "block_reason")
                 and response_to_check.prompt_feedback.block_reason
             ):
-                block_message = f"Response blocked by Gemini safety filter: {response_to_check.prompt_feedback.block_reason}"
+                block_message = f"Response blocked by safety filter: {response_to_check.prompt_feedback.block_reason}"
                 if (
                     hasattr(response_to_check.prompt_feedback, "block_reason_message")
                     and response_to_check.prompt_feedback.block_reason_message
@@ -365,13 +408,16 @@ async def gemini_fake_stream_generator(
             yield chunk
 
     except Exception as e_outer_gemini:
-        err_msg_detail = f"Error in gemini_fake_stream_generator (model: '{request_obj.model}'): {type(e_outer_gemini).__name__} - {str(e_outer_gemini)}"
-        print(f"ERROR: {err_msg_detail}")
-        sse_err_msg_display = str(e_outer_gemini)
-        if len(sse_err_msg_display) > 512:
-            sse_err_msg_display = sse_err_msg_display[:512] + "..."
+        # Hardening: previously embedded `type(e).__name__ - str(e)`
+        # into the SSE error message sent to the client.  We now log
+        # the full exception internally and emit a neutral upstream-
+        # error message to the client.
+        vertex_log(
+            "error",
+            f"gemini_fake_stream_generator error (internal only, model: {request_obj.model}): {type(e_outer_gemini).__name__}: {e_outer_gemini}",
+        )
         err_resp_sse = create_openai_error_response(
-            500, sse_err_msg_display, "server_error"
+            500, "Upstream service error during streaming.", "server_error"
         )
         json_payload_error = json.dumps(err_resp_sse)
         if not is_auto_attempt:
@@ -422,8 +468,13 @@ async def execute_gemini_call(
                 media_type="text/event-stream",
             )
 
-        response_id_for_stream = f"chatcmpl-{int(time.time())}"
+        response_id_for_stream = gen_openai_chunk_id()
         cand_count_stream = request_obj.n or 1
+        # Share a single `created` timestamp across the whole stream so
+        # all chunks (including the final chunk) carry the same value —
+        # matching real OpenAI streaming behaviour (previously each
+        # chunk re-computed int(time.time())).
+        created_ts_for_stream = int(time.time())
 
         async def _gemini_real_stream_generator_inner():
             try:
@@ -435,18 +486,24 @@ async def execute_gemini_call(
                     config=gen_config_for_call,
                 ):
                     yield convert_chunk_to_openai(
-                        chunk_item_call, request_obj.model, response_id_for_stream, 0
+                        chunk_item_call, request_obj.model, response_id_for_stream, 0,
+                        created_ts=created_ts_for_stream,
                     )
                 yield create_final_chunk(
-                    request_obj.model, response_id_for_stream, cand_count_stream
+                    request_obj.model, response_id_for_stream, cand_count_stream,
+                    created_ts=created_ts_for_stream,
                 )
                 yield "data: [DONE]\n\n"
             except Exception as e_stream_call:
-                err_msg_detail_stream = f"Streaming Error (Gemini API, model string: '{model_to_call}'): {type(e_stream_call).__name__} - {str(e_stream_call)}"
-                print(f"ERROR: {err_msg_detail_stream}")
-                s_err = str(e_stream_call)
-                s_err = s_err[:1024] + "..." if len(s_err) > 1024 else s_err
-                err_resp = create_openai_error_response(500, s_err, "server_error")
+                # Hardening: previously embedded "Streaming Error (Gemini
+                # API, model string: ...)" into the SSE error message
+                # sent to the client.  Now logs internally and emits a
+                # neutral upstream-error message.
+                vertex_log(
+                    "error",
+                    f"Streaming call error (internal only, model: {model_to_call}): {type(e_stream_call).__name__}: {e_stream_call}",
+                )
+                err_resp = create_openai_error_response(500, "Upstream service error during streaming.", "server_error")
                 j_err = json.dumps(err_resp)
                 if not is_auto_attempt:
                     yield f"data: {j_err}\n\n"
@@ -468,7 +525,7 @@ async def execute_gemini_call(
             and response_obj_call.prompt_feedback.block_reason
         ):
             block_msg = (
-                f"Blocked (Gemini): {response_obj_call.prompt_feedback.block_reason}"
+                f"Blocked by safety filter: {response_obj_call.prompt_feedback.block_reason}"
             )
             if (
                 hasattr(response_obj_call.prompt_feedback, "block_reason_message")

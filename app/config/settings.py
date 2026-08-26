@@ -7,7 +7,12 @@ import json
 # ---------- 以下是基础配置信息 ----------
 
 # 调用本项目时使用的密码
-PASSWORD = os.environ.get("PASSWORD", "123").strip('"')
+# Hardening: previously defaulted to "123" — an operator who forgot to
+# set PASSWORD would silently expose the gateway to anyone who knew the
+# project.  We now default to empty string, which causes
+# `custom_verify_password` to reject every inbound request until an
+# operator sets a real password.  This is fail-closed.
+PASSWORD = os.environ.get("PASSWORD", "").strip('"')
 
 # 网页配置密码，设置后，在网页修改配置时使用 WEB_PASSWORD 而不是上面的 PASSWORD
 WEB_PASSWORD = os.environ.get("WEB_PASSWORD", PASSWORD).strip('"')
@@ -15,15 +20,39 @@ WEB_PASSWORD = os.environ.get("WEB_PASSWORD", PASSWORD).strip('"')
 # API密钥
 GEMINI_API_KEYS = os.environ.get("GEMINI_API_KEYS", "")
 
+# Key rotation strategy.
+#   "fill"     (default, sticky) — use the same key until it hits a
+#              cooldown / daily-limit / invalidation, then advance to
+#              the next. Produces the lowest possible RPM-per-key
+#              signature, which is closer to a real single-user client
+#              and harder for Google risk control to flag as a pool.
+#   "polling"  (round-robin)    — distribute requests evenly across all
+#              keys (original behaviour). Higher per-key RPM dispersion;
+#              useful when individual keys have very low RPM limits and
+#              the operator wants to load-balance across them.
+KEY_ROTATION_STRATEGY = os.environ.get(
+    "KEY_ROTATION_STRATEGY", "fill"
+).lower().strip()
+
 # 假流式是否开启
-FAKE_STREAMING = os.environ.get("FAKE_STREAMING", "true").lower() in [
+# Hardening default: previously "true".  Fake-stream (non-streaming
+# upstream call + chunked SSE replay to the client) has detectable
+# timing patterns (fixed 1s keepalive, fixed 10-chunk split, fixed
+# 50ms inter-chunk delay) that real OpenAI/Anthropic streams don't
+# exhibit.  Default to false; operators who need it can re-enable
+# via FAKE_STREAMING=true.
+FAKE_STREAMING = os.environ.get("FAKE_STREAMING", "false").lower() in [
     "true",
     "1",
     "yes",
 ]
 
 # 配置持久化存储目录
-STORAGE_DIR = os.environ.get("STORAGE_DIR", "/hajimi/settings/")
+# Hardening: previously defaulted to `/hajimi/settings/` — the path
+# itself contains the upstream project name.  Operators migrating from
+# the old default should set STORAGE_DIR explicitly.  We now use a
+# neutral `/data/settings/` default.
+STORAGE_DIR = os.environ.get("STORAGE_DIR", "/data/settings/")
 ENABLE_STORAGE = os.environ.get("ENABLE_STORAGE", "false").lower() in [
     "true",
     "1",
@@ -195,8 +224,11 @@ FAKE_STREAMING_DELAY_PER_CHUNK = float(
 )
 
 # 非流式请求TCP保活配置
+# Hardening default: previously true.  Sending empty-content delta
+# keepalive chunks at fixed 5s intervals is a non-standard OpenAI SSE
+# pattern that real clients don't emit.
 NONSTREAM_KEEPALIVE_ENABLED = os.environ.get(
-    "NONSTREAM_KEEPALIVE_ENABLED", "true"
+    "NONSTREAM_KEEPALIVE_ENABLED", "false"
 ).lower() in ["true", "1", "yes"]
 NONSTREAM_KEEPALIVE_INTERVAL = float(
     os.environ.get("NONSTREAM_KEEPALIVE_INTERVAL", "5.0")

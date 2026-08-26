@@ -1,6 +1,7 @@
 from app.models.schemas import EmbeddingRequest, EmbeddingData, EmbeddingResponse, Usage
 from app.utils.http_client import get_async_client
 from app.utils.logging import log
+from app.utils.stealth import build_embedding_headers
 
 class EmbeddingClient:
     def __init__(self, api_key: str):
@@ -10,10 +11,8 @@ class EmbeddingClient:
         model_name = request.model
         
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:batchEmbedContents"
-        headers = {
-            "Content-Type": "application/json",
-            "x-goog-api-key": self.api_key,
-        }
+        headers = build_embedding_headers(self.api_key)
+        headers["x-goog-api-key"] = self.api_key
 
         if isinstance(request.input, str):
             inputs = [request.input]
@@ -33,7 +32,7 @@ class EmbeddingClient:
         }
         
         extra_log = {
-            "key": self.api_key[:8],
+            "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
             "model": model_name,
         }
         log("INFO", "Embedding request started", extra=extra_log)

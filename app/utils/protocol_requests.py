@@ -153,16 +153,14 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
 
     previous_response_id = payload.get("previous_response_id")
     if previous_response_id:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "Compatibility note: previous_response_id="
-                    f"{previous_response_id} was supplied, but this gateway is stateless. "
-                    "The client must include the required conversation and tool history in input."
-                ),
-            }
-        )
+        # Previously we injected a system message saying
+        # "this gateway is stateless" — that string immediately tells
+        # upstream Gemini that we're a stateless proxy.
+        # Now we just ignore the field silently; clients that depend on
+        # previous_response_id semantics will get an empty server-side
+        # state, which is the honest behaviour of a stateless adapter
+        # without naming itself.
+        pass
 
     if isinstance(input_value, str):
         messages.append({"role": "user", "content": input_value})
@@ -231,6 +229,21 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
     if instructions:
         messages.insert(0, {"role": "system", "content": instructions})
 
+    # Pass through `parallel_tool_calls` from the request payload.
+    # The OpenAI Responses API spec accepts this field; the previous
+    # implementation silently dropped it, which caused clients that
+    # sent `parallel_tool_calls=false` to still see Gemini emit
+    # parallel tool calls (Gemini's default behaviour).
+    parallel_tool_calls = payload.get("parallel_tool_calls")
+
+    # `previous_response_id` is intentionally not round-tripped: the
+    # upstream Gemini API does not support server-side conversation
+    # state, so we cannot honour the contract that the field implies.
+    # Clients that depend on it will get an empty server-side state,
+    # which is the honest behaviour of a stateless adapter.  We do
+    # NOT inject a system message advertising this (the previous
+    # "stateless gateway" string was a self-identifying fingerprint).
+
     return ChatCompletionRequest(
         model=payload["model"],
         messages=messages,
@@ -242,6 +255,7 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
         tools=_response_tools_to_openai_tools(payload.get("tools")),
         tool_choice=_response_tool_choice_to_openai(payload.get("tool_choice", "auto")),
         source_protocol="responses",
+        parallel_tool_calls=parallel_tool_calls,
     )
 
 

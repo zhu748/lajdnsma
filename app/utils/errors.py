@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from app.utils.protocol_common import _now_ts
+from app.utils.stealth import gen_openai_response_id
 
 
 def openai_error_response(
@@ -26,15 +27,34 @@ def openai_error_response(
 def responses_error_response(
     message: str, status_code: int = 500, code: str | None = None
 ) -> Dict[str, Any]:
+    """Build a Responses API error payload.
+
+    Hardening notes:
+    * `id` previously used `resp_error_{int(time.time())}` — non-standard
+      prefix and a second-level timestamp fingerprint.  We now reuse the
+      strong-random `gen_openai_response_id()` (resp_ + 30 alphanumerics)
+      that real OpenAI Responses payloads use.
+    * `error.type` previously was the literal `"gateway_error"` which
+      directly disclosed that this is a gateway.  We now use OpenAI's
+      canonical `server_error` (for 5xx) / `invalid_request_error` (4xx)
+      / `rate_limit_exceeded` (429) types, which is exactly what the
+      real OpenAI Responses API returns.
+    """
+    if status_code == 429:
+        err_type = "rate_limit_exceeded"
+    elif 400 <= status_code < 500:
+        err_type = "invalid_request_error"
+    else:
+        err_type = "server_error"
     now = _now_ts()
     return {
-        "id": f"resp_error_{now}",
+        "id": gen_openai_response_id(),
         "object": "response",
         "created_at": now,
         "status": "failed",
         "error": {
             "message": message,
-            "type": "gateway_error",
+            "type": err_type,
             "code": code or str(status_code),
         },
         "incomplete_details": None,

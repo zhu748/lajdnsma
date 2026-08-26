@@ -9,6 +9,7 @@ import app.config.settings as settings
 from app.utils.http_client import get_async_client
 from app.utils.logging import log
 from app.utils.sse import iter_sse_json
+from app.utils.stealth import build_openai_compat_headers
 
 
 def generate_secure_random_string(length):
@@ -82,7 +83,7 @@ class OpenAIClient:
             log(
                 "INFO",
                 "开启联网搜索模式",
-                extra={"key": self.api_key[:8], "model": request.model},
+                extra={"key": "key#" + str(hash(self.api_key) & 0xFFFFFF), "model": request.model},
             )
             data.setdefault("tools", []).append({"google_search": {}})
 
@@ -90,17 +91,15 @@ class OpenAIClient:
 
         # 真流式请求处理逻辑
         extra_log = {
-            "key": self.api_key[:8],
+            "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
             "request_type": "stream",
             "model": request.model,
         }
         log("INFO", "流式请求开始", extra=extra_log)
 
         url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.api_key}",
-        }
+        headers = build_openai_compat_headers(self.api_key, streaming=True)
+        headers["Authorization"] = f"Bearer {self.api_key}"
 
         client = await get_async_client()
         async with client.stream(
@@ -114,7 +113,7 @@ class OpenAIClient:
                     "ERROR",
                     "流式处理期间发生错误",
                     extra={
-                        "key": self.api_key[:8],
+                        "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
                         "request_type": "stream",
                         "model": request.model,
                     },

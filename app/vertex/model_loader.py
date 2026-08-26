@@ -4,6 +4,7 @@ import json
 from typing import List, Dict, Optional
 from app.utils.http_client import get_async_client
 from app.utils.logging import vertex_log
+from app.utils.stealth import full_jitter_backoff
 
 # 导入settings和app_config
 from app.config import settings
@@ -36,8 +37,12 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
     vertex_log("info", f"Fetching model configuration from: {models_config_url}")
 
     # 添加重试机制
+    # Hardening: previously used classic exponential backoff
+    # (1s, 2s, 4s) with no jitter — concurrent retriers retry at the
+    # exact same instant, which upstream rate-limiters identify as bot
+    # behaviour.  We now use AWS-recommended full-jitter backoff.
     max_retries = 3
-    retry_delay = 1  # 初始延迟1秒
+    retry_attempt = 0
 
     for retry in range(max_retries):
         try:
@@ -57,20 +62,20 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
             # 更详细的验证和日志
             if not isinstance(data, dict):
                 vertex_log("error", f"模型配置不是有效的JSON对象: {type(data)}")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # 指数退避
+                retry_attempt += 1
+                await asyncio.sleep(full_jitter_backoff(retry_attempt, base=1.0, cap=4.0))
                 continue
 
             if "vertex_models" not in data:
                 vertex_log("error", "模型配置缺少'vertex_models'字段")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_attempt += 1
+                await asyncio.sleep(full_jitter_backoff(retry_attempt, base=1.0, cap=4.0))
                 continue
 
             if "vertex_express_models" not in data:
                 vertex_log("error", "模型配置缺少'vertex_express_models'字段")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_attempt += 1
+                await asyncio.sleep(full_jitter_backoff(retry_attempt, base=1.0, cap=4.0))
                 continue
 
             if not isinstance(data["vertex_models"], list):
@@ -78,8 +83,8 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
                     "error",
                     f"'vertex_models'不是列表: {type(data['vertex_models'])}",
                 )
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_attempt += 1
+                await asyncio.sleep(full_jitter_backoff(retry_attempt, base=1.0, cap=4.0))
                 continue
 
             if not isinstance(data["vertex_express_models"], list):
@@ -87,8 +92,8 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
                     "error",
                     f"'vertex_express_models'不是列表: {type(data['vertex_express_models'])}",
                 )
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_attempt += 1
+                await asyncio.sleep(full_jitter_backoff(retry_attempt, base=1.0, cap=4.0))
                 continue
 
             vertex_log(
@@ -110,9 +115,10 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
         except httpx.RequestError as e:
             vertex_log("error", f"HTTP请求失败({retry + 1}/{max_retries}): {e}")
             if retry < max_retries - 1:
-                vertex_log("info", f"将在{retry_delay}秒后重试...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2  # 指数退避
+                retry_attempt += 1
+                delay = full_jitter_backoff(retry_attempt, base=1.0, cap=4.0)
+                vertex_log("info", f"将在{delay:.2f}秒后重试...")
+                await asyncio.sleep(delay)
             else:
                 vertex_log(
                     "error", f"HTTP请求在{max_retries}次尝试后仍然失败，放弃尝试"
@@ -122,9 +128,10 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
         except json.JSONDecodeError as e:
             vertex_log("error", f"JSON解析失败({retry + 1}/{max_retries}): {e}")
             if retry < max_retries - 1:
-                vertex_log("info", f"将在{retry_delay}秒后重试...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_attempt += 1
+                delay = full_jitter_backoff(retry_attempt, base=1.0, cap=4.0)
+                vertex_log("info", f"将在{delay:.2f}秒后重试...")
+                await asyncio.sleep(delay)
             else:
                 vertex_log(
                     "error", f"JSON解析在{max_retries}次尝试后仍然失败，放弃尝试"
@@ -137,9 +144,10 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
                 f"获取/解析模型配置时发生意外错误({retry + 1}/{max_retries}): {str(e)}",
             )
             if retry < max_retries - 1:
-                vertex_log("info", f"将在{retry_delay}秒后重试...")
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+                retry_attempt += 1
+                delay = full_jitter_backoff(retry_attempt, base=1.0, cap=4.0)
+                vertex_log("info", f"将在{delay:.2f}秒后重试...")
+                await asyncio.sleep(delay)
             else:
                 vertex_log(
                     "error", f"获取/解析在{max_retries}次尝试后仍然失败，放弃尝试"

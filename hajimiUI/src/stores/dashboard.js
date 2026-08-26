@@ -1,8 +1,25 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { ref, watch, computed } from 'vue'
 
 export const useDashboardStore = defineStore('dashboard', () => {
-  // 状态
+  // ---------- Session password (post-hardening: every dashboard-data
+  // fetch now requires the operator password, so we keep it in memory
+  // for the lifetime of the tab and persist it in sessionStorage to
+  // survive a page reload). ----------
+  const sessionPassword = ref(sessionStorage.getItem('gw_pw') || '')
+
+  function setSessionPassword(pw) {
+    sessionPassword.value = pw || ''
+    if (pw) {
+      sessionStorage.setItem('gw_pw', pw)
+    } else {
+      sessionStorage.removeItem('gw_pw')
+    }
+  }
+
+  const isUnlocked = computed(() => Boolean(sessionPassword.value))
+
+  // ---------- Stats ----------
   const status = ref({
     keyCount: 0,
     modelCount: 0,
@@ -10,16 +27,15 @@ export const useDashboardStore = defineStore('dashboard', () => {
     last24hCalls: 0,
     hourlyCalls: 0,
     minuteCalls: 0,
-    // Token消耗统计
     last24hTokens: 0,
     hourlyTokens: 0,
-    minuteTokens: 0
+    minuteTokens: 0,
+    enableVertex: false,
   })
 
-  // 添加图表相关的时间序列数据
   const timeSeriesData = ref({
-    calls: [],  // API调用时间序列
-    tokens: []  // Token使用时间序列
+    calls: [],
+    tokens: [],
   })
 
   const config = ref({
@@ -29,6 +45,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
     fakeStreaming: false,
     fakeStreamingInterval: 0,
     randomString: false,
+    randomStringLength: 0,
+    searchMode: false,
+    searchPrompt: '',
     localVersion: '',
     remoteVersion: '',
     hasUpdate: false,
@@ -36,66 +55,94 @@ export const useDashboardStore = defineStore('dashboard', () => {
     increaseConcurrentOnFailure: 0,
     maxConcurrentRequests: 0,
     maxRetryNum: 0,
-    searchPrompt: '',
     maxEmptyResponses: 0,
     responsesDefaultModel: '',
     responsesModelAliases: {},
     claudeDefaultModel: '',
-    claudeModelAliases: {}
+    claudeModelAliases: {},
+    enableVertex: false,
+    enableVertexExpress: false,
+    vertexExpressApiKey: false,
+    googleCredentialsJson: false,
   })
 
   const apiKeyStats = ref([])
   const logs = ref([])
+  const availableModels = ref([])
+  const selectedModel = ref('all')
+
   const isRefreshing = ref(false)
   const isConfigLoaded = ref(false)
-  
-  // 添加模型相关状态
-  const selectedModel = ref('all')
-  const availableModels = ref([])
-  
-  // 夜间模式状态
+  const lastError = ref('')
+
+  // ---------- Dark mode ----------
   const isDarkMode = ref(localStorage.getItem('darkMode') === 'true')
-  
-  // 监听夜间模式变化，保存到localStorage
-  watch(isDarkMode, (newValue) => {
-    localStorage.setItem('darkMode', newValue)
-    applyDarkMode(newValue)
-  })
-  
-  // 应用夜间模式
+
   function applyDarkMode(isDark) {
     if (isDark) {
       document.documentElement.classList.add('dark-mode')
+      document.documentElement.classList.remove('light-mode')
     } else {
       document.documentElement.classList.remove('dark-mode')
+      document.documentElement.classList.add('light-mode')
     }
   }
-  
-  // 初始应用夜间模式
+
+  watch(isDarkMode, (v) => {
+    localStorage.setItem('darkMode', v)
+    applyDarkMode(v)
+  })
   applyDarkMode(isDarkMode.value)
 
-  // 获取仪表盘数据
+  // ---------- Auth helper ----------
+  // Appends ?password=... to GET endpoints that now require auth.
+  function authQuery() {
+    if (!sessionPassword.value) return ''
+    return `?password=${encodeURIComponent(sessionPassword.value)}`
+  }
+
+  function authHeaders(extra = {}) {
+    const h = { ...extra }
+    if (sessionPassword.value) {
+      h['Authorization'] = `Bearer ${sessionPassword.value}`
+    }
+    return h
+  }
+
+  // ---------- Data fetching ----------
   async function fetchDashboardData() {
-    if (isRefreshing.value) return // 防止重复请求
-    
+    if (!sessionPassword.value) {
+      lastError.value = 'PASSWORD_REQUIRED'
+      return
+    }
+    if (isRefreshing.value) return
     isRefreshing.value = true
+    lastError.value = ''
     try {
-      const response = await fetch('/api/dashboard-data')
+      const response = await fetch(`/api/dashboard-data${authQuery()}`, {
+        headers: authHeaders(),
+      })
+      if (response.status === 401) {
+        // Session password is wrong/expired — drop it so the lock
+        // screen reappears.
+        setSessionPassword('')
+        lastError.value = 'AUTH_FAILED'
+        return
+      }
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`)
+        throw new Error(`HTTP ${response.status}`)
       }
       const data = await response.json()
       updateDashboardData(data)
-    } catch (error) {
-      console.error('获取数据失败:', error)
+    } catch (err) {
+      console.error('fetch dashboard-data:', err)
+      lastError.value = err.message || 'NETWORK'
     } finally {
       isRefreshing.value = false
     }
   }
 
-  // 更新仪表盘数据
   function updateDashboardData(data) {
-    // 更新状态数据
     status.value = {
       keyCount: data.key_count || 0,
       modelCount: data.model_count || 0,
@@ -103,24 +150,17 @@ export const useDashboardStore = defineStore('dashboard', () => {
       last24hCalls: data.last_24h_calls || 0,
       hourlyCalls: data.hourly_calls || 0,
       minuteCalls: data.minute_calls || 0,
-      // Token消耗统计
       last24hTokens: data.last_24h_tokens || 0,
       hourlyTokens: data.hourly_tokens || 0,
       minuteTokens: data.minute_tokens || 0,
-      enableVertex: data.enable_vertex || false
+      enableVertex: data.enable_vertex || false,
     }
 
-    // 更新时间序列数据
-    if (data.calls_time_series) {
-      timeSeriesData.value.calls = data.calls_time_series
-    }
-    
-    if (data.tokens_time_series) {
-      timeSeriesData.value.tokens = data.tokens_time_series
-    }
+    if (data.calls_time_series) timeSeriesData.value.calls = data.calls_time_series
+    if (data.tokens_time_series) timeSeriesData.value.tokens = data.tokens_time_series
 
-    // 更新配置数据
     config.value = {
+      ...config.value,
       maxRequestsPerMinute: data.max_requests_per_minute || 0,
       maxRequestsPerDayPerIp: data.max_requests_per_day_per_ip || 0,
       currentTime: data.current_time || '',
@@ -145,123 +185,94 @@ export const useDashboardStore = defineStore('dashboard', () => {
       responsesDefaultModel: data.responses_default_model || '',
       responsesModelAliases: data.responses_model_aliases || {},
       claudeDefaultModel: data.claude_default_model || '',
-      claudeModelAliases: data.claude_model_aliases || {}
+      claudeModelAliases: data.claude_model_aliases || {},
     }
 
-    // 更新API密钥统计
     if (data.api_key_stats) {
-      apiKeyStats.value = data.api_key_stats.map(stat => ({
+      apiKeyStats.value = data.api_key_stats.map((stat) => ({
         ...stat,
-        // 确保model_stats的每个模型都有calls和tokens两个指标
-        model_stats: Object.entries(stat.model_stats || {}).reduce((acc, [model, data]) => {
-          acc[model] = {
-            calls: typeof data === 'object' ? data.calls : data, // 兼容旧格式
-            tokens: typeof data === 'object' ? data.tokens : 0
-          }
-          return acc
-        }, {})
+        model_stats: Object.entries(stat.model_stats || {}).reduce(
+          (acc, [model, d]) => {
+            acc[model] = {
+              calls: typeof d === 'object' ? d.calls : d,
+              tokens: typeof d === 'object' ? d.tokens : 0,
+            }
+            return acc
+          },
+          {}
+        ),
       }))
-      
-      // 从后端API直接获取可用模型列表
+
       if (data.available_models && Array.isArray(data.available_models)) {
         availableModels.value = data.available_models
       } else {
-        // 如果后端没有提供模型列表，从model_stats提取（向后兼容）
         const models = new Set(['all'])
-        if (data.api_key_stats && data.api_key_stats.length > 0) {
-          data.api_key_stats.forEach(stat => {
-            if (stat.model_stats) {
-              Object.keys(stat.model_stats).forEach(model => {
-                models.add(model)
-              })
-            }
-          })
-        }
+        data.api_key_stats.forEach((stat) => {
+          if (stat.model_stats) {
+            Object.keys(stat.model_stats).forEach((m) => models.add(m))
+          }
+        })
         availableModels.value = Array.from(models)
       }
-      
-      // 如果当前选择的模型不在可用模型列表中，重置为"all"
+
       if (!availableModels.value.includes(selectedModel.value)) {
         selectedModel.value = 'all'
       }
     }
 
-    // 更新日志
-    if (data.logs) {
-      logs.value = data.logs
-    }
-
+    if (data.logs) logs.value = data.logs
     isConfigLoaded.value = true
   }
-  
-  // 设置选择的模型
+
   function setSelectedModel(model) {
     selectedModel.value = model
   }
 
-  // 切换夜间模式
   function toggleDarkMode() {
     isDarkMode.value = !isDarkMode.value
   }
 
-  // 切换Vertex AI配置
-  async function toggleVertex() {
-    try {
-      const newValue = !config.value.enableVertex
-      await updateConfig('enableVertex', newValue, '123') // 使用默认密码
-      // 更新本地状态
-      config.value.enableVertex = newValue
-    } catch (error) {
-      console.error('切换Vertex AI失败:', error)
-    }
-  }
-
-  // 更新配置项
+  // ---------- Config update ----------
   async function updateConfig(key, value, password) {
-    try {
-      // 将驼峰命名转换为下划线命名
-      const snakeCaseKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-      
-      const response = await fetch('/api/update-config', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          key: snakeCaseKey,
-          value,
-          password
-        })
-      })
-      
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.detail || '更新配置失败')
-      }
-      
-      const data = await response.json()
-      return data
-    } catch (error) {
-      console.error('更新配置失败:', error)
-      throw error
+    const snakeCaseKey = key.replace(/[A-Z]/g, (l) => `_${l.toLowerCase()}`)
+    const response = await fetch('/api/update-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        key: snakeCaseKey,
+        value,
+        password: password || sessionPassword.value,
+      }),
+    })
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}))
+      throw new Error(err.detail || `HTTP ${response.status}`)
     }
+    return response.json()
   }
 
   return {
+    // state
     status,
     config,
     apiKeyStats,
     logs,
-    isRefreshing,
-    timeSeriesData,  // 导出时间序列数据
-    fetchDashboardData,
-    selectedModel,
+    timeSeriesData,
     availableModels,
-    setSelectedModel,
+    selectedModel,
+    isRefreshing,
+    isConfigLoaded,
     isDarkMode,
+    isUnlocked,
+    sessionPassword,
+    lastError,
+    // actions
+    setSessionPassword,
+    fetchDashboardData,
+    setSelectedModel,
     toggleDarkMode,
     updateConfig,
-    toggleVertex,
-    isConfigLoaded
+    authQuery,
+    authHeaders,
   }
 })

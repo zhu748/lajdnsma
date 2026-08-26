@@ -4,11 +4,23 @@ from app.utils.error_response import build_error_response
 from app.utils.logging import log
 
 
-ALL_KEYS_FAILED_CONTENT = "当前 API 密钥已全部失效\n请联系管理员查看查询日志"
+# Previously this string was "当前 API 密钥已全部失效\n请联系管理员查看查询日志"
+# which leaks two internal facts: (1) there's a key pool behind this endpoint,
+# (2) there's a "query log" that an admin can read.  Real OpenAI/Anthropic
+# responses never say such things.  The new message is a generic upstream
+# unavailability message that matches what real OpenAI/Anthropic return on
+# upstream outages.
+ALL_KEYS_FAILED_CONTENT = (
+    "The model is currently overloaded. Please try again later."
+)
 
 
 def key_preview(api_key: str) -> str:
-    return api_key[:8]
+    # Previously this returned api_key[:8], but the first 8 characters of a
+    # Gemini key are always the highly-recognisable prefix "AIzaSy12".
+    # Logging that prefix anywhere effectively announces "this is a Gemini
+    # key" to anyone reading the logs.  Switch to a stable hash identifier.
+    return "key#" + str(hash(api_key) & 0xFFFFFF)
 
 
 def dump_json_response(response) -> str:

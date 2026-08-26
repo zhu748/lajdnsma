@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header, Query
 from datetime import datetime
+from typing import Optional
 import asyncio
 import threading
 from app.utils import log_manager
@@ -145,8 +146,28 @@ async def run_blocking_init_vertex():
 
 
 @dashboard_router.get("/dashboard-data")
-async def get_dashboard_data():
-    """获取仪表盘数据的API端点，用于动态刷新"""
+async def get_dashboard_data(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    password: Optional[str] = Query(None),
+):
+    """Get dashboard data (stats / logs / config / model list).
+
+    Hardening: previously had no authentication.  Anyone hitting this
+    endpoint could pull statistics, recent logs, model list and feature
+    flags — which together uniquely identify this as a Gemini proxy.
+    We now require the same `password` used by the rest of the
+    dashboard endpoints, supplied either as `Authorization: Bearer
+    <password>` header or `?password=<password>` query parameter.
+    """
+    token = None
+    if authorization:
+        token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+    if not token and password:
+        token = password
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not verify_web_password(token):
+        raise HTTPException(status_code=401, detail="Authentication failed")
     # 先清理过期数据，确保统计数据是最新的
     await api_stats_manager.maybe_cleanup()
     await response_cache_manager.clean_expired()  # 使用管理器清理缓存
@@ -244,6 +265,10 @@ async def get_dashboard_data():
         "concurrent_requests": settings.CONCURRENT_REQUESTS,
         "increase_concurrent_on_failure": settings.INCREASE_CONCURRENT_ON_FAILURE,
         "max_concurrent_requests": settings.MAX_CONCURRENT_REQUESTS,
+        # Key rotation strategy: "fill" (sticky, default) or "polling" (round-robin)
+        "key_rotation_strategy": getattr(
+            settings, "KEY_ROTATION_STRATEGY", "fill"
+        ),
         # 启用vertex
         "enable_vertex": settings.ENABLE_VERTEX,
         # 添加Vertex Express配置
@@ -452,7 +477,7 @@ async def update_config(config_data: dict):
                 key_manager._reset_key_stack()
                 # 获取一个随机API密钥
                 for key in key_manager.api_keys:
-                    log("info", f"使用API密钥 {key[:8]}... 刷新可用模型列表")
+                    log("info", f"使用API密钥 key#{hash(key) & 0xFFFFFF:06x} 刷新可用模型列表")
                     # 使用随机密钥获取可用模型
                     all_models = await GeminiClient.list_available_models(key)
                     GeminiClient.AVAILABLE_MODELS = [
@@ -706,7 +731,7 @@ async def update_config(config_data: dict):
                     # 使用新添加的密钥之一尝试获取可用模型
                     for key in new_keys:
                         log(
-                            "info", f"使用新添加的API密钥 {key[:8]}... 获取可用模型列表"
+                            "info", f"使用新添加的API密钥 key#{hash(key) & 0xFFFFFF:06x} 获取可用模型列表"
                         )
                         all_models = await GeminiClient.list_available_models(key)
                         GeminiClient.AVAILABLE_MODELS = [
@@ -763,6 +788,30 @@ async def update_config(config_data: dict):
             )
             settings.CLAUDE_MODEL_ALIASES = aliases
             log("info", f"Claude model aliases updated, count: {len(aliases)}")
+
+        elif config_key == "key_rotation_strategy":
+            # Toggle between "fill" (sticky, anti-fingerprint default) and
+            # "polling" (round-robin, legacy behaviour).
+            if not isinstance(config_value, str):
+                raise HTTPException(
+                    status_code=422,
+                    detail="参数类型错误：key_rotation_strategy 应为字符串 'fill' 或 'polling'",
+                )
+            normalized = config_value.strip().lower()
+            if normalized not in ("fill", "polling"):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"不支持的 key_rotation_strategy 值：{config_value}（仅支持 'fill' 或 'polling'）",
+                )
+            settings.KEY_ROTATION_STRATEGY = normalized
+            # Reset key stack so the new strategy takes effect immediately
+            # rather than continuing with the previously-popped stack state.
+            key_manager._reset_key_stack()
+            log(
+                "info",
+                f"Key rotation strategy updated to: {normalized} "
+                f"({'粘住一个 key 直到额度耗尽' if normalized == 'fill' else '轮询轮换所有 key'})",
+            )
 
         else:
             raise HTTPException(status_code=400, detail=f"不支持的配置项：{config_key}")
@@ -898,13 +947,26 @@ async def test_api_keys(password_data: dict):
 
 
 @dashboard_router.get("/test-api-keys/progress")
-async def get_test_api_keys_progress():
-    """
-    获取API密钥检测进度
+async def get_test_api_keys_progress(
+    authorization: Optional[str] = Header(None, alias="Authorization"),
+    password: Optional[str] = Query(None),
+):
+    """Get API key check progress.
 
-    Returns:
-        dict: 进度信息
+    Hardening: previously had no authentication.  Anyone could poll
+    this endpoint to count valid vs invalid keys — directly exposing
+    the key pool size.  We now require the same auth as
+    `/api/dashboard-data`.
     """
+    token = None
+    if authorization:
+        token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+    if not token and password:
+        token = password
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if not verify_web_password(token):
+        raise HTTPException(status_code=401, detail="Authentication failed")
     return api_key_test_progress
 
 
@@ -915,10 +977,10 @@ def check_api_key_in_thread(key):
     try:
         is_valid = loop.run_until_complete(test_api_key(key))
         if is_valid:
-            log("info", f"API密钥 {key[:8]}... 有效")
+            log("info", f"API密钥 key#{hash(key) & 0xFFFFFF:06x} 有效")
             return key, True
         else:
-            log("warning", f"API密钥 {key[:8]}... 无效")
+            log("warning", f"API密钥 key#{hash(key) & 0xFFFFFF:06x} 无效")
             return key, False
     finally:
         loop.close()
@@ -931,7 +993,7 @@ async def test_api_key(key):
         all_models = await GeminiClient.list_available_models(key)
         return len(all_models) > 0
     except Exception as e:
-        log("error", f"测试API密钥 {key[:8]}... 时出错: {str(e)}")
+        log("error", f"测试API密钥 key#{hash(key) & 0xFFFFFF:06x} 时出错: {str(e)}")
         return False
 
 
@@ -969,8 +1031,23 @@ def start_api_key_test_in_thread(keys):
         valid_keys = []
         invalid_keys = []
 
-        # 检查每个密钥
-        for key in all_keys_to_test:
+        # Hardening: probe bursts are a clear key-enumeration fingerprint.
+        # If we fire 50 sequential `:models` list calls at Google from one
+        # IP within seconds, Google's risk control sees that as a key
+        # enumeration attack against the Gemini API.  We add a jittered
+        # delay between probes (2-6s uniform jitter) so the probe
+        # sequence looks like real human-driven testing of individual
+        # keys, not a script iterating through a list.  Operators with
+        # many keys should expect the batch to take a few minutes.
+        import time as _time
+        import random as _random
+
+        for idx, key in enumerate(all_keys_to_test):
+            # Skip the delay before the very first probe so the first
+            # result is delivered quickly; only inter-probe delay matters.
+            if idx > 0:
+                _time.sleep(_random.uniform(2.0, 6.0))
+
             # 检查密钥
             _, is_valid = check_api_key_in_thread(key)
 

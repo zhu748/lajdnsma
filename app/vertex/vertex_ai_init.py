@@ -1,4 +1,5 @@
 import json
+import time
 from google import genai
 from app.vertex.credentials_manager import (
     CredentialManager,
@@ -17,11 +18,46 @@ from app.utils.logging import vertex_log
 # 全局客户端，用于作为回退
 global_fallback_client = None
 
+# Hardened: client pool keyed by project_id, so we don't re-create the
+# genai.Client (and re-negotiate TLS) on every request.  TTL is 50
+# minutes — tokens last 1h, so we refresh well before expiry.
+_client_pool: dict[str, tuple] = {}  # {project_id: (client, created_at)}
+_CLIENT_TTL_SECONDS = 50 * 60
+
+
+def _get_client_from_pool(project_id: str, creds, location: str = "global"):
+    """Get or create a cached genai.Client for a given project_id.
+
+    Returns the cached client if it's still fresh (< TTL old), otherwise
+    creates and caches a new one.  This dramatically reduces both CPU
+    (RSA key parsing) and the number of distinct TLS sessions we open
+    against Vertex — both of which are anti-fingerprint improvements.
+    """
+    now = time.time()
+    cached = _client_pool.get(project_id)
+    if cached is not None:
+        client, created_at = cached
+        if now - created_at < _CLIENT_TTL_SECONDS:
+            return client
+    try:
+        client = genai.Client(
+            vertexai=True,
+            credentials=creds,
+            project=project_id,
+            location=location,
+        )
+        _client_pool[project_id] = (client, now)
+        return client
+    except Exception as e:
+        vertex_log("error", f"Error creating Vertex AI client for {project_id}: {e}")
+        return None
+
 
 def reset_global_fallback_client():
     """重置全局回退客户端"""
     global global_fallback_client
     global_fallback_client = None
+    _client_pool.clear()
     vertex_log("info", "全局回退客户端已重置")
 
 
@@ -219,6 +255,10 @@ async def get_vertex_ai_client(credential_manager=None):
     Get a Vertex AI client using a credential from the manager.
     If no credential manager is passed, checks for a global fallback client.
     Returns None if no client could be created.
+
+    Hardened: uses an in-process client pool keyed by project_id so the
+    same project reuses the same client (and TLS session) instead of
+    re-negotiating TLS on every request.
     """
     global global_fallback_client
 
@@ -240,25 +280,20 @@ async def get_vertex_ai_client(credential_manager=None):
         vertex_log("error", "No valid credentials available in credential manager")
         return None
 
-    try:
-        # Create a client with the credentials
-        vertex_log(
-            "info",
-            f"Creating Vertex AI client with credentials for project: {project_id}",
-        )
-        client = genai.Client(
-            vertexai=True, credentials=creds, project=project_id, location="global"
-        )
-
-        # If we don't have a global fallback client, set this as the fallback
-        if global_fallback_client is None:
-            vertex_log("info", "Setting new client as global fallback client")
-            global_fallback_client = client
-
-        return client
-    except Exception as e:
-        vertex_log("error", f"Error creating Vertex AI client: {e}")
+    client = _get_client_from_pool(project_id, creds, location="global")
+    if client is None:
         return None
+    vertex_log(
+        "info",
+        f"Using Vertex AI client (cached) for project: {project_id}",
+    )
+
+    # If we don't have a global fallback client, set this as the fallback
+    if global_fallback_client is None:
+        vertex_log("info", "Setting new client as global fallback client")
+        global_fallback_client = client
+
+    return client
 
 
 async def re_init_vertex_ai(credential_manager=None) -> bool:

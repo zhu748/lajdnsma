@@ -29,6 +29,7 @@ from app.vertex.api_helpers import (
     create_openai_error_response,
     execute_gemini_call,
 )
+from app.utils.stealth import gen_openai_chunk_id, full_jitter_backoff
 
 router = APIRouter()
 
@@ -332,18 +333,56 @@ async def chat_completions(
             # base_model_name is already extracted (e.g., "gemini-1.5-pro-exp-v1")
             UNDERLYING_MODEL_ID = f"google/{base_model_name}"
 
+            # Hardening: previously constructed a bare `openai.AsyncOpenAI`
+            # client which (a) leaks the SDK's default UA
+            # `AsyncOpenAI/Python/x.x.x` plus a full set of
+            # `X-Stainless-*` introspection headers (Lang/Package-Version/
+            # OS/Arch/Runtime/Async) on every request — a very strong
+            # "this is a python OpenAI-SDK client" fingerprint — and
+            # (b) constructed a new client per request, bypassing the
+            # shared httpx connection pool.  We now inject stealth UA +
+            # Content-Type/Accept headers via `default_headers` and strip
+            # the X-Stainless family by setting them to empty strings
+            # (the SDK explicitly allows overriding/blanking them).
+            from app.utils.stealth import pick_user_agent
+
+            stealth_headers = {
+                "User-Agent": pick_user_agent(gcp_token),
+                "Accept": "text/event-stream" if request.stream else "application/json",
+                "Accept-Encoding": "gzip, deflate",
+                "Accept-Language": "en-US,en;q=0.9",
+                # Blank the X-Stainless-* introspection headers that the
+                # OpenAI Python SDK sets by default.  An empty string
+                # tells the SDK "don't send this header".
+                "X-Stainless-Lang": "",
+                "X-Stainless-Package-Version": "",
+                "X-Stainless-OS": "",
+                "X-Stainless-Arch": "",
+                "X-Stainless-Runtime": "",
+                "X-Stainless-Runtime-Version": "",
+                "X-Stainless-Async": "",
+                "X-Stainless-Retry-Count": "",
+            }
             openai_client = openai.AsyncOpenAI(
                 base_url=VERTEX_AI_OPENAI_ENDPOINT_URL,
                 api_key=gcp_token,  # OAuth token
+                default_headers=stealth_headers,
+                # Use a long timeout for chat completions (10 minutes)
+                # but force the SDK's own httpx client to share our
+                # process-wide connection pool limits.
+                timeout=600.0,
+                max_retries=0,  # we handle retries ourselves with jitter
             )
 
-            openai_safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "OFF"},
-                {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "OFF"},
-            ]
+            # Hardening: previously hardcoded all 5 safety categories
+            # to "OFF" on every OpenAI Direct path request — the same
+            # "all-OFF safetySettings" fingerprint already fixed on
+            # the Gemini path.  We now respect SAFETY_MODE (default =
+            # don't send safety_settings at all).  See
+            # app/config/safety.py:get_safety_settings.
+            from app.config.safety import get_safety_settings
+
+            openai_safety_settings = get_safety_settings()
 
             openai_params = {
                 "model": UNDERLYING_MODEL_ID,
@@ -360,7 +399,13 @@ async def chat_completions(
             }
             openai_params = {k: v for k, v in openai_params.items() if v is not None}
 
-            openai_extra_body = {"google": {"safety_settings": openai_safety_settings}}
+            # Only attach safety_settings when SAFETY_MODE != "default"
+            # (None means "don't send the field at all").  Sending an
+            # all-OFF block on every request is a fingerprint.
+            if openai_safety_settings:
+                openai_extra_body = {"google": {"safety_settings": openai_safety_settings}}
+            else:
+                openai_extra_body = None
 
             if request.stream:
                 # 每次调用时直接从settings获取最新的FAKE_STREAMING值
@@ -436,22 +481,49 @@ async def chat_completions(
                                                 google_content = extra_content.get(
                                                     "google"
                                                 )
-                                                if (
-                                                    isinstance(google_content, dict)
-                                                    and google_content.get("thought")
-                                                    is True
-                                                ):
-                                                    reasoning_text = delta.get(
-                                                        "content"
-                                                    )
-                                                    if reasoning_text is not None:
-                                                        delta["reasoning_content"] = (
-                                                            reasoning_text
+                                                if isinstance(google_content, dict):
+                                                    # When the upstream
+                                                    # chunk carried a
+                                                    # `thought: true`
+                                                    # marker, treat its
+                                                    # `content` as
+                                                    # reasoning and
+                                                    # strip the
+                                                    # `extra_content`
+                                                    # envelope (real
+                                                    # OpenAI chunks
+                                                    # never carry
+                                                    # `extra_content`).
+                                                    if google_content.get("thought") is True:
+                                                        reasoning_text = delta.get(
+                                                            "content"
                                                         )
-                                                    if "content" in delta:
-                                                        del delta["content"]
-                                                    if "extra_content" in delta:
-                                                        del delta["extra_content"]
+                                                        if reasoning_text is not None:
+                                                            delta["reasoning_content"] = (
+                                                                reasoning_text
+                                                            )
+                                                        if "content" in delta:
+                                                            del delta["content"]
+                                                        if "extra_content" in delta:
+                                                            del delta["extra_content"]
+                                                    else:
+                                                        # Even when no
+                                                        # `thought` flag
+                                                        # is set, real
+                                                        # OpenAI chunks
+                                                        # never carry
+                                                        # `extra_content.google.*`
+                                                        # — strip it
+                                                        # from the
+                                                        # client-visible
+                                                        # chunk so the
+                                                        # downstream
+                                                        # client can't
+                                                        # detect this
+                                                        # is a Vertex
+                                                        # passthrough.
+                                                        if "extra_content" in delta:
+                                                            del delta["extra_content"]
 
                                     # vertex_log('debug', f"DEBUG OpenAI Stream Chunk: {chunk_as_dict}") # Potential verbose log
                                     yield f"data: {json.dumps(chunk_as_dict)}\n\n"
@@ -598,10 +670,21 @@ async def chat_completions(
                         "info",
                         f"Auto-attempt '{attempt['name']}' for model {attempt['model']} failed: {e_auto}",
                     )
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(random.uniform(0.5, 2.0))
 
-            vertex_log("info", f"All auto attempts failed. Last error: {last_err}")
-            err_msg = f"All auto-mode attempts failed for model {request.model}. Last error: {str(last_err)}"
+            vertex_log("info", "All auto attempts failed.")
+            # Hardening: previously returned `str(last_err)` directly to
+            # the client.  Upstream error messages often contain
+            # "Gemini API", "Vertex", "generativelanguage.googleapis.com",
+            # internal gRPC status text etc. — directly exposing that
+            # this is a proxy.  We now return a neutral upstream-error
+            # message and only log the full error internally.
+            err_msg = "Upstream service error. All auto-mode attempts failed."
+            if last_err is not None:
+                vertex_log(
+                    "warning",
+                    f"Last auto-attempt error (internal only): {type(last_err).__name__}: {last_err}",
+                )
             if not request.stream and last_err:
                 return JSONResponse(
                     status_code=500,
@@ -717,6 +800,14 @@ async def _base_fake_stream_engine(
             yield "data: [DONE]\n\n"
             return
 
+        # OpenAI streams share a single `created` Unix timestamp across
+        # all chunks of the same response.  Per-chunk `int(time.time())`
+        # previously produced chunks that all had a slightly different
+        # timestamp within the same second — which is detectable when
+        # streamed over >1s as "all chunks within one second all share
+        # the same `created`" is the official behaviour.
+        created_ts = int(time.time())
+
         # Get the full text from the response
         full_text = ""
         if reasoning_text_to_yield or actual_content_text_to_yield:
@@ -726,7 +817,7 @@ async def _base_fake_stream_engine(
                 reasoning_chunk = {
                     "id": response_id,
                     "object": "chat.completion.chunk",
-                    "created": int(time.time()),
+                    "created": created_ts,
                     "model": sse_model_name,
                     "choices": [
                         {
@@ -745,29 +836,37 @@ async def _base_fake_stream_engine(
             full_text = extract_text_from_response_func(api_response)
 
         if not full_text:
-            # If there's no text to stream, just send an empty delta and finish
+            # If there's no text to stream, send an empty delta (no
+            # content field at all) and finish.  Hardening: previously
+            # emitted `delta: {"content": ""}` — real OpenAI never
+            # emits empty-content deltas, so the empty string was a
+            # fingerprint.
             empty_chunk = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
-                    {"index": 0, "delta": {"content": ""}, "finish_reason": "stop"}
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
                 ],
             }
             yield f"data: {json.dumps(empty_chunk)}\n\n"
             yield "data: [DONE]\n\n"
             return
 
-        # Simulate streaming by yielding chunks of the full text
-        chunk_size = app_config.FAKE_STREAMING_CHUNK_SIZE
-        delay_per_chunk = app_config.FAKE_STREAMING_DELAY_PER_CHUNK
-
+        # Simulate streaming by yielding chunks of the full text.
+        # Hardening: previously used a fixed chunk_size + fixed delay
+        # — a 10-bucket/50ms pattern in the SSE byte-stream is
+        # trivially detectable as a fake-stream proxy.  We now use a
+        # randomised chunk size (24-96 chars) and randomised
+        # inter-chunk delay (20-150ms) so the distribution looks like
+        # real token-bound streaming.
+        chunk_size = max(20, random.randint(24, 96))
         # Initial chunk with role
         initial_chunk = {
             "id": response_id,
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": created_ts,
             "model": sse_model_name,
             "choices": [
                 {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
@@ -781,7 +880,7 @@ async def _base_fake_stream_engine(
             content_chunk = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
                     {
@@ -793,14 +892,14 @@ async def _base_fake_stream_engine(
             }
             yield f"data: {json.dumps(content_chunk)}\n\n"
 
-            if i + chunk_size < len(full_text) and delay_per_chunk > 0:
-                await asyncio.sleep(delay_per_chunk)
+            if i + chunk_size < len(full_text):
+                await asyncio.sleep(random.uniform(0.02, 0.15))
 
         # Final chunk to indicate completion
         final_chunk = {
             "id": response_id,
             "object": "chat.completion.chunk",
-            "created": int(time.time()),
+            "created": created_ts,
             "model": sse_model_name,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }
@@ -808,12 +907,15 @@ async def _base_fake_stream_engine(
         yield "data: [DONE]\n\n"
 
     except Exception as e:
-        error_msg = (
-            f"Error in _base_fake_stream_engine for model {sse_model_name}: {str(e)}"
+        # Hardening: previously embedded str(e) directly into the
+        # SSE error message sent to the client.  Now logs internally
+        # and emits a neutral message.
+        vertex_log(
+            "error",
+            f"_base_fake_stream_engine error (internal only, model: {sse_model_name}): {type(e).__name__}: {e}",
         )
-        vertex_log("error", error_msg)
         if not is_auto_attempt:  # Only yield error for non-auto attempts
-            err_resp = create_openai_error_response(500, error_msg, "server_error")
+            err_resp = create_openai_error_response(500, "Upstream service error during streaming.", "server_error")
             yield f"data: {json.dumps(err_resp)}\n\n"
             yield "data: [DONE]\n\n"
 
@@ -834,7 +936,7 @@ async def openai_fake_stream_generator(
         "info",
         f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}')",
     )
-    response_id = f"chatcmpl-{int(time.time())}"
+    response_id = gen_openai_chunk_id()
 
     async def _openai_api_call_wrapper():
         params_for_non_stream_call = openai_params.copy()
@@ -868,19 +970,26 @@ async def openai_fake_stream_generator(
 
     temp_task_for_keepalive_check = asyncio.create_task(_openai_api_call_wrapper())
     outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
+    # OpenAI streams share a single `id` and `created` across all
+    # chunks of the same response.  Previously the keepalive loop
+    # generated a new random id + new `created` per chunk — which is
+    # detectable.  We now use `response_id` and a frozen `created_ts`
+    # for the whole stream.
+    created_ts = int(time.time())
     if outer_keep_alive_interval > 0:
         while not temp_task_for_keepalive_check.done():
             keep_alive_data = {
-                "id": "chatcmpl-keepalive",
+                "id": response_id,
                 "object": "chat.completion.chunk",
-                "created": int(time.time()),
+                "created": created_ts,
                 "model": request_obj.model,
                 "choices": [
-                    {"delta": {"content": ""}, "index": 0, "finish_reason": None}
+                    {"delta": {}, "index": 0, "finish_reason": None}
                 ],
             }
             yield f"data: {json.dumps(keep_alive_data)}\n\n"
-            await asyncio.sleep(outer_keep_alive_interval)
+            jittered = outer_keep_alive_interval * random.uniform(0.75, 1.25)
+            await asyncio.sleep(jittered)
 
     try:
         (
@@ -917,11 +1026,17 @@ async def openai_fake_stream_generator(
             yield chunk
 
     except Exception as e_outer:
-        err_msg_detail = f"Error in openai_fake_stream_generator outer (model: '{request_obj.model}'): {type(e_outer).__name__} - {str(e_outer)}"
-        vertex_log("error", err_msg_detail)
-        sse_err_msg_display = str(e_outer)
-        if len(sse_err_msg_display) > 512:
-            sse_err_msg_display = sse_err_msg_display[:512] + "..."
+        # Hardening: previously embedded type(e).__name__ - str(e)
+        # into the SSE error message sent to the client.  Upstream
+        # exceptions often contain "Gemini API" / "Vertex" / internal
+        # gRPC text — leaking that this is a proxy.  We now log the
+        # full error internally and emit a neutral upstream-error
+        # message to the client.
+        vertex_log(
+            "error",
+            f"openai_fake_stream_generator outer error (internal only): {type(e_outer).__name__}: {e_outer}",
+        )
+        sse_err_msg_display = "Upstream service error during streaming."
         err_resp_sse = create_openai_error_response(
             500, sse_err_msg_display, "server_error"
         )

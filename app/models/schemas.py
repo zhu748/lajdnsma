@@ -18,7 +18,12 @@ class ChatCompletionRequest(BaseModel):
     seed: Optional[int] = None
     logprobs: Optional[int] = None
     response_logprobs: Optional[bool] = None
-    thinking_budget: Optional[int] = -1
+    # Previously defaulted to -1, which caused _clamp_thinking_budget(-1)
+    # to return 0 in gemini.py and silently force-disable thinking on
+    # every OpenAI/Responses request that didn't set the field.  None
+    # now means "no value provided" and the upstream call decides
+    # whether to attach thinkingConfig at all.
+    thinking_budget: Optional[int] = None
     enable_thinking: Optional[bool] = True
     reasoning_effort: Optional[str] = None
     expose_reasoning: Optional[bool] = None
@@ -26,6 +31,11 @@ class ChatCompletionRequest(BaseModel):
     # 函数调用
     tools: Optional[List[Dict[str, Any]]] = None
     tool_choice: Optional[Union[Literal["none", "auto"], Dict[str, Any]]] = "auto"
+    # Pass-through field for OpenAI Responses API parity.  Previously
+    # silently dropped on conversion; clients that sent
+    # `parallel_tool_calls=false` would still see Gemini emit parallel
+    # tool calls.  None = "don't send the field to upstream".
+    parallel_tool_calls: Optional[bool] = None
 
 
 # gemini 请求

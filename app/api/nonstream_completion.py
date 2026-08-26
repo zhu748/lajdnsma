@@ -58,6 +58,25 @@ async def _run_nonstream_completion(
             keepalive_task.cancel()
         handle_gemini_error(e, current_api_key)
         return "error"
+    except BaseException:
+        # Hardening: `asyncio.CancelledError` is a BaseException (not
+        # a subclass of Exception), so the `except Exception` block
+        # above doesn't catch it.  Without this block, a client
+        # disconnect during a shielded non-stream call would leak
+        # the keepalive_task forever (it would outlive the request
+        # and run indefinitely, slowly leaking memory per cancelled
+        # request).
+        if keepalive_task is not None:
+            keepalive_task.cancel()
+        # Also cancel the underlying gemini_task when the client
+        # disconnects mid-shield — `asyncio.shield` would otherwise
+        # keep it alive, billing upstream tokens for a response the
+        # client will never receive.  (Tradeoff: this means we lose
+        # the cache-fill benefit of shielded runs when the client
+        # disconnects, but in practice the leaked-task leak was a
+        # bigger problem than cache misses.)
+        gemini_task.cancel()
+        raise
 
 
 async def process_nonstream_request(

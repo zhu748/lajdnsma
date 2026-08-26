@@ -51,7 +51,12 @@ class ResponseLoopHelpersTestCase(unittest.TestCase):
             max_empty_responses=3,
         )
         self.assertEqual(len(module._log_calls), 3)
-        self.assertEqual(module._log_calls[0][2]["key"], "apikey12")
+        # Hardened: key_preview now returns a hash-based identifier
+        # (key#XXXXXX) instead of the raw api_key[:8] prefix, because
+        # the first 8 chars of a Gemini key are always the highly
+        # recognisable prefix "AIzaSy12".
+        expected_key_id = module.key_preview("apikey123")
+        self.assertEqual(module._log_calls[0][2]["key"], expected_key_id)
         self.assertEqual(module._log_calls[2][0], "warning")
 
     def test_all_keys_failed_response(self):

@@ -2,11 +2,22 @@ import os
 import glob
 import random
 import json
+import time
 from typing import List, Dict, Any
 from google.auth.transport.requests import Request as AuthRequest
 from google.oauth2 import service_account
 import app.vertex.config as app_config  # Changed from relative
 from app.utils.logging import vertex_log
+
+
+# Hardened token cache: per-project_id (token, expiry_epoch).
+# service_account tokens last 1h; we cache for 50min to refresh before
+# expiry.  Avoiding token refresh on every request is important because
+# every refresh is recorded by Cloud Audit Log as a separate
+# `service_account.token.refresh` event — high refresh rate is itself an
+# anomalous-account fingerprint.
+_TOKEN_CACHE: dict[str, tuple] = {}  # {project_id: (token, expiry_epoch)}
+_TOKEN_TTL_SECONDS = 50 * 60  # 50 minutes
 
 
 # Helper function to parse multiple JSONs from a string
@@ -86,21 +97,40 @@ def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
 
 
 def _refresh_auth(credentials):
-    """Helper function to refresh GCP token."""
+    """Helper function to refresh GCP token.
+
+    Hardened: caches the refreshed token in `_TOKEN_CACHE` keyed by
+    project_id so we don't refresh on every request (every refresh is
+    a Cloud Audit Log event; high refresh rate is an anomalous-account
+    fingerprint).
+    """
     if not credentials:
         vertex_log("error", "_refresh_auth called with no credentials.")
         return None
+    project_id_for_log = getattr(credentials, "project_id", "Unknown")
+
+    # Check cache first
+    cached = _TOKEN_CACHE.get(project_id_for_log)
+    if cached is not None:
+        token, expiry = cached
+        if time.time() < expiry:
+            # Apply cached token back to the credentials object so the
+            # downstream google.genai client picks it up.
+            try:
+                credentials.token = token
+            except Exception:
+                pass
+            return token
+
     try:
-        # Assuming credentials object has a project_id attribute for logging
-        project_id_for_log = getattr(credentials, "project_id", "Unknown")
-        vertex_log(
-            "info", f"Attempting to refresh token for project: {project_id_for_log}..."
-        )
         credentials.refresh(AuthRequest())
+        token = credentials.token
+        # Cache for 50 minutes (real tokens last 1h)
+        _TOKEN_CACHE[project_id_for_log] = (token, time.time() + _TOKEN_TTL_SECONDS)
         vertex_log(
-            "info", f"Token refreshed successfully for project: {project_id_for_log}"
+            "info", f"Token refreshed and cached for project: {project_id_for_log}"
         )
-        return credentials.token
+        return token
     except Exception as e:
         project_id_for_log = getattr(credentials, "project_id", "Unknown")
         vertex_log(

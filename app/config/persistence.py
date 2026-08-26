@@ -6,12 +6,25 @@ from app.config import settings
 from app.utils.logging import log
 
 # 定义不应该被保存或加载的配置项
+# Hardened: previously only PASSWORD/WEB_PASSWORD were excluded.  Added
+# the upstream credential fields (GEMINI_API_KEYS, GOOGLE_CREDENTIALS_JSON,
+# VERTEX_EXPRESS_API_KEY) so they don't get written to disk in plaintext
+# when an operator enables ENABLE_STORAGE.
 EXCLUDED_SETTINGS = [
     "STORAGE_DIR",
     "ENABLE_STORAGE",
     "BASE_DIR",
     "PASSWORD",
     "WEB_PASSWORD",
+    "GEMINI_API_KEYS",
+    "GOOGLE_CREDENTIALS_JSON",
+    "VERTEX_EXPRESS_API_KEY",
+    # Hardening: INVALID_API_KEYS previously was persisted to disk
+    # in plaintext.  The list of failed/invalid Gemini API keys is
+    # just as sensitive as the working key list — anyone with read
+    # access to settings.json would gain the full set of keys ever
+    # tried.  Keep it in-memory only.
+    "INVALID_API_KEYS",
     "WHITELIST_MODELS",
     "BLOCKED_MODELS",
     "DEFAULT_BLOCKED_MODELS",

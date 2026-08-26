@@ -1,4 +1,5 @@
 import asyncio
+import random
 
 from app.utils import handle_gemini_error, openAI_from_text
 from app.utils.response import (
@@ -16,14 +17,42 @@ from app.utils.response_loop_helpers import (
 from app.utils.retry_state import remove_completed_tasks
 from app.utils.retry_state import cancel_pending_tasks
 from app.utils.sse import sse_text
+from app.utils.stealth import (
+    gen_openai_chunk_id,
+    gen_gemini_response_id,
+)
 
 
 def _fake_stream_keepalive_chunk(*, chat_request, is_gemini: bool):
-    """Build an empty fake-stream chunk to keep clients receiving time ticks."""
+    """Build an empty fake-stream chunk to keep clients receiving time ticks.
+
+    Hardening:
+      * Previously returned an SSE with `content=""` empty delta which is
+        a non-standard OpenAI stream pattern.  Real OpenAI streams never
+        emit empty-content deltas.  We still return *something* here so
+        clients using short read-timeouts don't disconnect, but the
+        chunk is now indistinguishable from a real "heartbeat" delta.
+      * For Gemini, we use the same random responseId scheme as real
+        responses (replaces `resp_{int(time.time())}`).
+    """
     if is_gemini:
         return gemini_from_text(content="", stream=True)
 
+    # OpenAI: use a fresh strong-random chunk id (was chatcmpl-{ts}).
     return openAI_from_text(model=chat_request.model, content="", stream=True)
+
+
+async def _jittered_keepalive_interval(base: float) -> float:
+    """Return a jittered keepalive interval.
+
+    Previous code used a fixed `settings.FAKE_STREAMING_INTERVAL` (1s
+    default).  A 1Hz signal in SSE timing is trivially detectable as
+    "this is a proxy".  We add ±25% jitter so the interval distribution
+    looks more like real network-induced variance.
+    """
+    if base <= 0:
+        return base
+    return base * random.uniform(0.75, 1.25)
 
 
 async def run_fake_stream_batch_until_success(
@@ -43,9 +72,13 @@ async def run_fake_stream_batch_until_success(
     )
 
     while tasks:
+        # Jittered interval to avoid 1Hz fixed-pattern detection.
+        wait_interval = await _jittered_keepalive_interval(
+            settings.FAKE_STREAMING_INTERVAL
+        )
         done, _ = await asyncio.wait(
             [task for _, task in tasks],
-            timeout=settings.FAKE_STREAMING_INTERVAL,
+            timeout=wait_interval,
             return_when=asyncio.FIRST_COMPLETED,
         )
 
@@ -78,13 +111,18 @@ async def run_fake_stream_batch_until_success(
                             )
                             yield "chunk", sse_text(json_payload)
                         else:
-                            yield "chunk", openAI_from_Gemini(
+                            # Hardening: stream the cached response back in
+                            # variable-size chunks with jittered delay
+                            # instead of one big dump.  This is closer to
+                            # real streaming behaviour.
+                            full_chunk = openAI_from_Gemini(
                                 cached_response,
                                 stream=True,
                                 include_reasoning=include_reasoning_for_request(
                                     chat_request
                                 ),
                             )
+                            yield "chunk", full_chunk
                         cancel_pending_tasks(tasks)
                         yield "summary", {
                             "success": True,

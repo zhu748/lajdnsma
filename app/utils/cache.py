@@ -280,11 +280,13 @@ def generate_cache_key(
                 if inline_data_obj is not None and isinstance(inline_data_obj, dict):
                     h.update(b"inline_data:")
                     data_payload = inline_data_obj.get("data", "")
-                    # log('INFO', f"哈希gemini格式非文本内容{data_payload[:32]}")
+                    # Hardening: previously only hashed the first 32
+                    # characters of the base64 payload — see the
+                    # image_url branch above for the collision risk.
+                    # We now hash the full payload.
                     if isinstance(data_payload, str):
-                        h.update(b"data_prefix:")
                         h.update(
-                            data_payload[:32].encode("utf-8", errors="surrogateescape")
+                            data_payload.encode("utf-8", errors="surrogateescape")
                         )
 
                 file_data_obj = part.get("file_data")
@@ -330,9 +332,20 @@ def generate_cache_key(
 
                         h.update(b"image_url:")  # 加入类型标识符
                         if image_data.startswith("data:image/"):
-                            # 对于base64图像，使用前32字符作为标识符
+                            # Hardening: previously only hashed the first
+                            # 32 characters of the base64 payload.  Two
+                            # different images with the same MIME type
+                            # (e.g. "data:image/png;base64,") share
+                            # the first 32 chars verbatim — so the
+                            # cache key collided and the second image
+                            # would get the first image's cached
+                            # response.  We now hash the entire base64
+                            # payload, which gives each image a unique
+                            # cache key (at the cost of hashing ~MB of
+                            # data per request — acceptable because
+                            # hashlib.sha256 is fast).
                             h.update(
-                                image_data[:32].encode(
+                                image_data.encode(
                                     "utf-8", errors="surrogateescape"
                                 )
                             )

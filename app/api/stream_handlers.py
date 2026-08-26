@@ -20,6 +20,7 @@ from app.utils.response_loop_helpers import (
 )
 from app.utils.retry_state import (
     increase_concurrency,
+    decrease_concurrency,
     next_batch_size,
     reached_empty_response_limit,
     should_continue_retry,
@@ -109,16 +110,25 @@ async def generate_fake_stream_response(
             )
             return
 
-        current_concurrent = increase_concurrency(
-            current_concurrent,
-            settings.INCREASE_CONCURRENT_ON_FAILURE,
-            settings.MAX_CONCURRENT_REQUESTS,
-        )
+        # Hardening: previously this called increase_concurrency on failure,
+        # which from the upstream provider's perspective looks exactly like a
+        # request-rate doubling DDoS pattern.  We now do the opposite: reduce
+        # concurrency on failure to let upstream recover.  The old "increase"
+        # path is preserved only for the explicit opt-in case
+        # INCREASE_CONCURRENT_ON_FAILURE > 0.
+        if settings.INCREASE_CONCURRENT_ON_FAILURE > 0:
+            current_concurrent = increase_concurrency(
+                current_concurrent,
+                settings.INCREASE_CONCURRENT_ON_FAILURE,
+                settings.MAX_CONCURRENT_REQUESTS,
+            )
+        else:
+            current_concurrent = decrease_concurrency(current_concurrent, 1)
         log_concurrency_increase(
             request_type="stream",
             model=chat_request.model,
             current_concurrent=current_concurrent,
-            label="all fake stream requests failed, increased concurrency",
+            label="fake stream batch failed, adjusted concurrency",
         )
 
     log_all_keys_failed(request_type="stream", model=chat_request.model, key="ALL")

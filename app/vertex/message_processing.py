@@ -12,6 +12,7 @@ from app.vertex.models import (
     ContentPartImage,
 )  # Changed from relative
 from app.utils.logging import vertex_log
+from app.utils.stealth import gen_openai_chunk_id
 
 # Define supported roles for Gemini API
 SUPPORTED_ROLES = ["user", "model"]
@@ -558,20 +559,44 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
             }
         )
 
+    # Extract usage metadata from Gemini response.  Previously
+    # hardcoded to all-zero values, which broke downstream clients
+    # that bill by `usage.total_tokens` (they would always see 0).
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    usage_meta = getattr(gemini_response, "usage_metadata", None)
+    if usage_meta is not None:
+        prompt_tokens = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
+        completion_tokens = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
+        total_tokens = int(getattr(usage_meta, "total_token_count", 0) or 0)
+    if not total_tokens:
+        total_tokens = prompt_tokens + completion_tokens
+
     return {
-        "id": f"chatcmpl-{int(time.time())}",
+        "id": gen_openai_chunk_id(),
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
         "choices": choices,
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
     }
 
 
 def convert_chunk_to_openai(
-    chunk, model: str, response_id: str, candidate_index: int = 0
+    chunk, model: str, response_id: str, candidate_index: int = 0, created_ts: int | None = None
 ) -> str:
-    """Converts Gemini stream chunk to OpenAI format, applying deobfuscation if needed."""
+    """Converts Gemini stream chunk to OpenAI format, applying deobfuscation if needed.
+
+    `created_ts` lets the caller pass a per-stream shared timestamp so
+    all chunks of the same response share the same `created` value
+    (matching real OpenAI streaming behaviour).  Falls back to
+    `int(time.time())` for backwards compatibility.
+    """
     is_encrypt_full = model.endswith("-encrypt-full")
     delta_payload = {}
     finish_reason = None
@@ -590,15 +615,19 @@ def convert_chunk_to_openai(
 
         if reasoning_text:
             delta_payload["reasoning_content"] = reasoning_text
-        if normal_text or (
-            not reasoning_text and not delta_payload
-        ):  # Ensure content key if nothing else
-            delta_payload["content"] = normal_text if normal_text else ""
+        if normal_text:
+            delta_payload["content"] = normal_text
+        # Hardening: previously, when both reasoning_text and
+        # normal_text were empty, we forced `delta_payload["content"] =
+        # ""` and emitted `delta: {"content": ""}` — real OpenAI never
+        # emits empty-content deltas.  We now leave delta_payload empty
+        # so an empty delta `{}` is emitted (which is the legal
+        # heartbeat shape).
 
     chunk_data = {
         "id": response_id,
         "object": "chat.completion.chunk",
-        "created": int(time.time()),
+        "created": created_ts if created_ts is not None else int(time.time()),
         "model": model,
         "choices": [
             {
@@ -619,7 +648,9 @@ def convert_chunk_to_openai(
     return f"data: {json.dumps(chunk_data)}\n\n"
 
 
-def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -> str:
+def create_final_chunk(
+    model: str, response_id: str, candidate_count: int = 1, created_ts: int | None = None
+) -> str:
     choices = []
     for i in range(candidate_count):
         choices.append({"index": i, "delta": {}, "finish_reason": "stop"})
@@ -627,7 +658,7 @@ def create_final_chunk(model: str, response_id: str, candidate_count: int = 1) -
     final_chunk = {
         "id": response_id,
         "object": "chat.completion.chunk",
-        "created": int(time.time()),
+        "created": created_ts if created_ts is not None else int(time.time()),
         "model": model,
         "choices": choices,
     }

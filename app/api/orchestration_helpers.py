@@ -79,5 +79,11 @@ async def await_process_task_result(
         if cached_response:
             return cached_response
 
-        sanitized_detail = sanitize_string(f" hajimi 内部处理时发生错误\n具体原因:{e}")
-        raise HTTPException(status_code=500, detail=sanitized_detail)
+        # Hardening: previously embedded the project name "hajimi" plus
+        # the raw exception text in the client-visible error detail.  We
+        # now return only a generic upstream-error message to the client
+        # and rely on internal logging for debugging.
+        raise HTTPException(
+            status_code=500,
+            detail="Upstream service error. Please retry later.",
+        )

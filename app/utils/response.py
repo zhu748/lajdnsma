@@ -3,6 +3,11 @@ import time
 from datetime import datetime, timezone
 
 from app.utils.sse import sse_data
+from app.utils.stealth import (
+    gen_openai_chunk_id,
+    gen_openai_tool_call_id,
+    gen_gemini_response_id,
+)
 
 
 def openAI_from_text(
@@ -18,9 +23,13 @@ def openAI_from_text(
     """
 
     now_time = int(time.time())
+    # Hardened: previously `chatcmpl-{int(time.time())}` which (a) collides
+    # for all requests in the same second and (b) is obviously not the
+    # 29-char random format real OpenAI uses.
+    chunk_id = gen_openai_chunk_id()
     content_chunk = {}
     formatted_chunk = {
-        "id": f"chatcmpl-{now_time}",
+        "id": chunk_id,
         "created": now_time,
         "model": model,
         "choices": [{"index": 0, "finish_reason": finish_reason}],
@@ -49,8 +58,10 @@ def ensure_gemini_timing_fields(payload):
     if not isinstance(payload, dict):
         return payload
 
+    # Use strong random id instead of `resp_{int(time.time())}` which
+    # collides in the same second.
     if not payload.get("responseId"):
-        payload["responseId"] = f"resp_{int(time.time())}"
+        payload["responseId"] = gen_gemini_response_id()
 
     if not payload.get("createTime"):
         payload["createTime"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -101,7 +112,8 @@ def openAI_from_Gemini(response, stream=True, include_reasoning=True):
         OpenAI 标准响应
     """
     now_time = int(time.time())
-    chunk_id = f"chatcmpl-{now_time}"  # 使用时间戳生成唯一 ID
+    # Strong random chunk id (replaces chatcmpl-{ts}).
+    chunk_id = gen_openai_chunk_id()
     content_chunk = {}
     formatted_chunk = {
         "id": chunk_id,
@@ -130,7 +142,8 @@ def openAI_from_Gemini(response, stream=True, include_reasoning=True):
             # Gemini 的 args 是 dict, OpenAI 需要 string
             function_args_str = json.dumps(part.get("args", {}), ensure_ascii=False)
 
-            tool_call_id = f"call_{function_name}__{now_time}_{index}"
+            # Strong random tool_call id (replaces call_{name}__{ts}_{idx}).
+            tool_call_id = gen_openai_tool_call_id(function_name)
             tool_call = {
                 "id": tool_call_id,
                 "type": "function",

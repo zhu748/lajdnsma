@@ -4,9 +4,16 @@ from app.utils.protocol_common import (
     _ensure_list,
     _merge_stream_usage,
     _now_ts,
+    _now_iso_rfc3339,
     _openai_finish_reason_to_claude_stop_reason,
     _parse_sse_json_events,
     _sse_data,
+    _gen_response_id,
+    _gen_message_id,
+    _gen_function_call_id,
+    _gen_anthropic_message_id,
+    _gen_anthropic_tool_use_id,
+    _gen_anthropic_thinking_signature,
 )
 from app.utils.sse import sse_event
 
@@ -16,8 +23,8 @@ async def openai_stream_to_responses_stream(
     model: str,
 ) -> AsyncIterator[str]:
     created_at = _now_ts()
-    response_id = f"resp_{created_at}"
-    message_item_id = f"msg_{created_at}"
+    response_id = _gen_response_id()
+    message_item_id = _gen_message_id()
     sequence_number = 0
 
     def response_event(payload: Dict[str, Any]) -> str:
@@ -139,7 +146,7 @@ async def openai_stream_to_responses_stream(
                 function_data = tool_call.get("function", {}) or {}
                 state = active_tool_calls.get(tool_index)
                 if state is None:
-                    call_id = tool_call.get("id") or f"fc_{created_at}_{tool_index}"
+                    call_id = tool_call.get("id") or _gen_function_call_id()
                     item = {
                         "id": call_id,
                         "type": "function_call",
@@ -310,7 +317,7 @@ async def openai_stream_to_claude_stream(
     body_iterator: AsyncIterator[Any],
     model: str,
 ) -> AsyncIterator[str]:
-    message_id = f"msg_{_now_ts()}"
+    message_id = _gen_anthropic_message_id()
     yield sse_event(
         "message_start",
         {
@@ -336,6 +343,32 @@ async def openai_stream_to_claude_stream(
     text_index = None
     thinking_index = None
     active_tool_calls: Dict[int, Dict[str, Any]] = {}
+
+    # Anthropic SSE streams emit a `ping` event roughly once per
+    # second as a keepalive.  Missing pings are detected by the
+    # Anthropic SDK clients as a stream-stall.  We emit a ping every
+    # ~15 chunks (or at least once if the upstream is slow) using a
+    # counter — the exact cadence is unimportant as long as one
+    # arrives before any client-side idle timeout.
+    _chunk_count_since_ping = 0
+
+    def maybe_ping() -> str | None:
+        nonlocal _chunk_count_since_ping
+        _chunk_count_since_ping += 1
+        if _chunk_count_since_ping >= 15:
+            _chunk_count_since_ping = 0
+            return sse_event(
+                "ping",
+                {
+                    "type": "ping",
+                    # Anthropic's `ping` event carries a `timestamp`
+                    # field in RFC 3339 format.  Real Anthropic streams
+                    # also include `logprobs` (empty) — we omit it
+                    # since clients ignore the field.
+                    "timestamp": _now_iso_rfc3339(),
+                },
+            )
+        return None
 
     def next_index() -> int:
         nonlocal next_content_index
@@ -385,6 +418,11 @@ async def openai_stream_to_claude_stream(
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
         for parsed in _parse_sse_json_events(chunk):
+            # Emit Anthropic keepalive `ping` event periodically.
+            ping = maybe_ping()
+            if ping:
+                yield ping
+
             choice = parsed.get("choices", [{}])[0]
             delta = choice.get("delta", {})
             reasoning_text = delta.get("reasoning_content")
@@ -412,6 +450,40 @@ async def openai_stream_to_claude_stream(
                         "delta": {
                             "type": "thinking_delta",
                             "thinking": reasoning_text,
+                        },
+                    },
+                )
+
+                # Anthropic API spec: a thinking block must emit a
+                # `signature_delta` carrying a non-empty signature before
+                # `content_block_stop`.  Without it, the next turn's
+                # tool_use round-trip is rejected by Anthropic's
+                # server-side signature validator.  We surface the
+                # upstream Gemini `thoughtSignature` if the OpenAI
+                # chunk carried one in `extra_content.google`; otherwise
+                # we emit a strong-random base64-style signature so the
+                # shape matches what Anthropic SDKs expect (instead of
+                # leaving the field empty, which is itself a
+                # fingerprint and breaks tool_use chains).
+                signature_payload = ""
+                extra_content = delta.get("extra_content") or {}
+                google_extra = extra_content.get("google", {}) if isinstance(extra_content, dict) else {}
+                if isinstance(google_extra, dict):
+                    signature_payload = (
+                        google_extra.get("thought_signature")
+                        or google_extra.get("thoughtSignature")
+                        or ""
+                    )
+                if not signature_payload:
+                    signature_payload = _gen_anthropic_thinking_signature()
+                yield sse_event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": thinking_index,
+                        "delta": {
+                            "type": "signature_delta",
+                            "signature": signature_payload,
                         },
                     },
                 )
@@ -455,7 +527,7 @@ async def openai_stream_to_claude_stream(
                     if stop_event:
                         yield stop_event
                     content_index = next_index()
-                    tool_id = tool_call.get("id") or f"toolu_{_now_ts()}_{tool_index}"
+                    tool_id = tool_call.get("id") or _gen_anthropic_tool_use_id()
                     extra_content = tool_call.get("extra_content") or {}
                     google_extra = extra_content.get("google", {})
                     state = {

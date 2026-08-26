@@ -7,6 +7,7 @@ from app.utils.protocol_common import (
     _extract_openai_usage,
     _now_ts,
     _openai_finish_reason_to_claude_stop_reason,
+    _gen_anthropic_thinking_signature,
 )
 
 
@@ -49,6 +50,11 @@ def openai_chat_to_response_api(
         )
 
     usage_counts = _extract_openai_usage(usage)
+    # Echo `parallel_tool_calls` exactly as the client sent it (None
+    # means "client didn't send the field" — don't echo True by
+    # default, which previously diverged from real OpenAI Responses
+    # behaviour and was a fingerprint).
+    parallel_tool_calls_echo = request_payload.get("parallel_tool_calls")
     return {
         "id": f"resp_{chat_response.get('id', _now_ts())}",
         "object": "response",
@@ -60,7 +66,7 @@ def openai_chat_to_response_api(
         "metadata": request_payload.get("metadata") or {},
         "model": chat_response.get("model"),
         "output": output_items,
-        "parallel_tool_calls": request_payload.get("parallel_tool_calls", True),
+        "parallel_tool_calls": parallel_tool_calls_echo,
         "previous_response_id": request_payload.get("previous_response_id"),
         "reasoning": request_payload.get("reasoning"),
         "store": request_payload.get("store", False),
@@ -82,11 +88,30 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
     content: List[Dict[str, Any]] = []
 
     if message.get("reasoning_content"):
+        # Anthropic API requires a non-empty `signature` on every
+        # thinking block; an empty string causes the next-turn
+        # tool_use round-trip to fail Anthropic's signature validator.
+        # If the upstream OpenAI/Gemini response carried a real
+        # thoughtSignature, surface it; otherwise emit a strong-random
+        # base64-style signature of realistic length (replaces the
+        # previous `""` which was both a fingerprint and a
+        # functional breakage).
+        signature_payload = ""
+        extra_content = message.get("extra_content") or {}
+        google_extra = extra_content.get("google", {}) if isinstance(extra_content, dict) else {}
+        if isinstance(google_extra, dict):
+            signature_payload = (
+                google_extra.get("thought_signature")
+                or google_extra.get("thoughtSignature")
+                or ""
+            )
+        if not signature_payload:
+            signature_payload = _gen_anthropic_thinking_signature()
         content.append(
             {
                 "type": "thinking",
                 "thinking": message["reasoning_content"],
-                "signature": "",
+                "signature": signature_payload,
             }
         )
 

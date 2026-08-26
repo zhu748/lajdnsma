@@ -113,6 +113,11 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[1]["content"], "D:/hajimi")
 
     def test_response_request_adds_stateless_previous_response_note(self):
+        # Hardened: previously this test asserted that a system message
+        # saying "this gateway is stateless" was injected.  We removed
+        # that string because it leaks the proxy identity to upstream
+        # Gemini.  The new behaviour is to silently ignore
+        # previous_response_id (stateless adapters can't honor it).
         request = response_request_to_chat_request(
             {
                 "model": "gemini-2.5-pro",
@@ -121,9 +126,11 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
             }
         )
 
-        self.assertEqual(request.messages[0]["role"], "system")
-        self.assertIn("previous_response_id=resp_123", request.messages[0]["content"])
-        self.assertEqual(request.messages[1]["content"], "continue")
+        # The user input should be the only message; no system message
+        # hinting at "stateless gateway" should be present.
+        self.assertEqual(len(request.messages), 1)
+        self.assertEqual(request.messages[0]["role"], "user")
+        self.assertEqual(request.messages[0]["content"], "continue")
 
     def test_response_request_converts_function_tools(self):
         request = response_request_to_chat_request(

@@ -11,9 +11,26 @@ import app.config.settings as settings
 from app.utils.http_client import get_async_client
 from app.utils.logging import log
 from app.utils.sse import iter_sse_json
+from app.utils.stealth import (
+    build_gemini_headers,
+    build_key_probe_headers,
+    gen_anthropic_thinking_signature,
+)
 
 
-GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
+# Previously this was the literal string `"skip_thought_signature_validator"`,
+# which was injected into the Gemini request whenever an assistant tool_call
+# was missing a thoughtSignature.  The literal is a highly-recognisable
+# proxy fingerprint (real Gemini thoughtSignatures are opaque ~200-char
+# base64-like strings).  We now generate a strong-random signature of
+# the same shape on demand; the function call preserves the legacy
+# name as a single import surface so callers don't break.
+def _generate_thought_signature() -> str:
+    return gen_anthropic_thinking_signature()
+
+
+# Kept for backwards-compatible imports elsewhere in the project.
+GEMINI_DUMMY_THOUGHT_SIGNATURE = "<generated-per-call>"
 GEMINI_MAX_THINKING_BUDGET = 24576
 
 
@@ -302,7 +319,9 @@ class GeminiClient:
             log(
                 "INFO",
                 "开启联网搜索模式",
-                extra={"key": self.api_key[:8], "model": request.model},
+                # Use hash-based key id instead of prefix (which is a
+                # highly-recognisable Gemini key prefix `AIzaSy12`).
+                extra={"key": "key#" + str(hash(self.api_key) & 0xFFFFFF), "model": request.model},
             )
 
             data.setdefault("tools", []).append({"google_search": {}})
@@ -331,11 +350,31 @@ class GeminiClient:
         }
         thinking_config = {}
         if settings.ENABLE_THINKING:
+            # Map OpenAI's `reasoning_effort` (low/medium/high) to a
+            # Gemini `thinkingBudget`.  OpenAI clients (e.g. o1-style
+            # prompts sent via the chat completions API) set this field
+            # to control reasoning depth; previously we silently
+            # ignored it, which caused high-effort requests to
+            # produce low-budget reasoning.  Only honour it when the
+            # caller didn't set an explicit `thinking_budget`
+            # (explicit budget wins).
+            if (
+                request.thinking_budget is None
+                and getattr(request, "reasoning_effort", None)
+                and request.reasoning_effort.lower() in {"low", "medium", "high"}
+            ):
+                effort = request.reasoning_effort.lower()
+                # Heuristic mapping: low ~ 1024, medium ~ 8192,
+                # high ~ 24576 (Gemini's cap).  Real values depend on
+                # the model but these are sensible defaults.
+                effort_budget = {"low": 1024, "medium": 8192, "high": GEMINI_MAX_THINKING_BUDGET}[effort]
+                thinking_config["thinkingBudget"] = effort_budget
+
             if request.thinking_budget is not None:
                 thinking_config["thinkingBudget"] = _clamp_thinking_budget(
                     request.thinking_budget
                 )
-            
+
             if getattr(request, "expose_reasoning", getattr(request, "enable_thinking", False)):
                 thinking_config["include_thoughts"] = True
 
@@ -349,8 +388,13 @@ class GeminiClient:
         data = {
             "contents": contents,
             "generationConfig": generationConfig,
-            "safetySettings": safety_settings,
         }
+        # Only attach safetySettings when caller explicitly passes a non-empty
+        # list.  Sending all-OFF safetySettings on every request is one of the
+        # most obvious "this is a proxy" fingerprints (real users almost
+        # never do that).  See app/config/safety.py:get_safety_settings.
+        if safety_settings:
+            data["safetySettings"] = safety_settings
 
         # --- 函数调用处理 ---
         # 1. 添加 tools (函数声明)
@@ -408,6 +452,17 @@ class GeminiClient:
                 config: Dict[str, Union[str, List[str]]] = {"mode": mode}
                 if allowed_functions:
                     config["allowed_function_names"] = allowed_functions
+                # Honour the OpenAI `parallel_tool_calls` flag by
+                # passing the equivalent Gemini
+                # `parallel_function_calls` field.  Previously this flag
+                # was silently dropped, so clients that sent
+                # `parallel_tool_calls=false` would still see Gemini
+                # emit parallel tool calls.
+                if (
+                    hasattr(request, "parallel_tool_calls")
+                    and request.parallel_tool_calls is False
+                ):
+                    config["parallel_function_calls"] = False
                 tool_config = {"function_calling_config": config}
 
         # 3. 添加 tool_config 到 data
@@ -423,7 +478,10 @@ class GeminiClient:
     async def stream_chat(self, request, contents, safety_settings, system_instruction):
         # 真流式请求处理逻辑
         extra_log = {
-            "key": self.api_key[:8],
+            # Don't log raw key prefix (AIzaSy12 is a recognisable Gemini
+            # key prefix).  Use a stable hash so the same key still shows
+            # up as the same identifier in the dashboard.
+            "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
             "request_type": "stream",
             "model": request.model,
         }
@@ -434,10 +492,14 @@ class GeminiClient:
         )
         #log("INFO", f"Request body to Google: {json.dumps(data, ensure_ascii=False)}")
 
-        url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:streamGenerateContent?key={self.api_key}&alt=sse"
-        headers = {
-            "Content-Type": "application/json",
-        }
+        # Hardening: API key moved from URL query (?key=...) to the
+        # `x-goog-api-key` header.  URL query is logged by every layer in
+        # the path (Google access logs, CDN, any intermediate proxy), so
+        # putting the key in the URL effectively publishes it.  The header
+        # form is what the official Google SDK uses.
+        url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:streamGenerateContent?alt=sse"
+        headers = build_gemini_headers(self.api_key, streaming=True)
+        headers["x-goog-api-key"] = self.api_key
 
         client = await get_async_client()
         async with client.stream(
@@ -469,10 +531,9 @@ class GeminiClient:
         )
         #log("INFO", f"Request body to Google: {json.dumps(data, ensure_ascii=False)}")
 
-        url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent?key={self.api_key}"
-        headers = {
-            "Content-Type": "application/json",
-        }
+        url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent"
+        headers = build_gemini_headers(self.api_key, streaming=False)
+        headers["x-goog-api-key"] = self.api_key
 
         try:
             client = await get_async_client()
@@ -576,8 +637,14 @@ class GeminiClient:
                         or google_extra.get("thoughtSignature")
                         or tool_call.get("thought_signature")
                         or tool_call.get("thoughtSignature")
-                        or GEMINI_DUMMY_THOUGHT_SIGNATURE
                     )
+                    # Previously fell back to the literal
+                    # `GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"`
+                    # which is a recognizable proxy fingerprint.  We now
+                    # generate a strong-random signature of realistic
+                    # shape on demand when one is missing.
+                    if not thought_signature:
+                        thought_signature = _generate_thought_signature()
                     function_call_part["thoughtSignature"] = thought_signature
                     parts.append(function_call_part)
 
@@ -598,8 +665,19 @@ class GeminiClient:
                     if function_name:
                         pass
                     elif isinstance(tool_call_id, str) and tool_call_id.startswith(prefix):
-                        # ?? tool_call_id = f"call_{function_name}" (response.py????)
-                        function_name = tool_call_id[len(prefix) :].split("__", 1)[0]
+                        # The previous tool_call_id format embedded the
+                        # function name as `call_{name}__{rand}`, so we
+                        # used to parse it back here.  Real OpenAI
+                        # tool_call_ids are opaque `call_` + 24 lowercase
+                        # alphanumeric chars with no name embedded, so
+                        # there is nothing to parse out.  We fall through
+                        # and rely on the call_id_to_name map (populated
+                        # when the assistant's tool_calls were converted
+                        # earlier in this same pass) or the explicit
+                        # `message.name` field.  If neither is present,
+                        # we cannot safely reconstruct a Gemini
+                        # functionResponse and skip this tool message.
+                        continue
                     else:
                         continue
                     function_response_part = {
@@ -724,11 +802,12 @@ class GeminiClient:
 
     @staticmethod
     async def list_available_models(api_key) -> list:
-        url = "https://generativelanguage.googleapis.com/v1beta/models?key={}".format(
-            api_key
-        )
+        # Key moved from ?key=... to header to avoid leaking it into access logs.
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
+        headers = build_key_probe_headers(api_key)
+        headers["x-goog-api-key"] = api_key
         client = await get_async_client()
-        response = await client.get(url, timeout=60)
+        response = await client.get(url, headers=headers, timeout=60)
         response.raise_for_status()
         data = response.json()
         models = []
@@ -748,10 +827,10 @@ class GeminiClient:
         """
         获取原生Gemini模型列表
         """
-        url = "https://generativelanguage.googleapis.com/v1beta/models?key={}".format(
-            api_key
-        )
+        url = "https://generativelanguage.googleapis.com/v1beta/models"
+        headers = build_key_probe_headers(api_key)
+        headers["x-goog-api-key"] = api_key
         client = await get_async_client()
-        response = await client.get(url, timeout=60)
+        response = await client.get(url, headers=headers, timeout=60)
         response.raise_for_status()
         return response.json()

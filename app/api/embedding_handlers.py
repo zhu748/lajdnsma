@@ -47,6 +47,18 @@ async def handle_vector_insert(request, key_manager, embedding_request_cls, embe
     items = body.get("items", [])
     model = body.get("model")
 
+    # Hardening: previously no upper bound on the number of items.
+    # An attacker could submit 10 000 items × 10 KB each = 100 MB
+    # request body, with each item triggering a separate upstream
+    # embedding call.  We cap to a safe maximum to prevent both
+    # memory exhaustion and upstream-quota abuse.
+    MAX_VECTOR_INSERT_ITEMS = 100
+    if not isinstance(items, list) or len(items) > MAX_VECTOR_INSERT_ITEMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"items must be a list of at most {MAX_VECTOR_INSERT_ITEMS} entries.",
+        )
+
     api_key = await key_manager.get_available_key()
     if not all([items, model, api_key]):
         raise HTTPException(

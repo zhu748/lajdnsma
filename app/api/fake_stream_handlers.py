@@ -31,7 +31,7 @@ async def handle_fake_streaming(
             "info",
             "fake stream response received; caching result",
             extra={
-                "key": api_key[:8],
+                "key": "key#" + str(hash(api_key) & 0xFFFFFF),
                 "request_type": "fake-stream",
                 "model": chat_request.model,
             },

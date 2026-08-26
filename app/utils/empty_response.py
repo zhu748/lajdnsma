@@ -2,7 +2,15 @@ from app.utils.error_response import build_error_response
 from app.utils.logging import log
 
 
-EMPTY_RESPONSE_LIMIT_MESSAGE = "空响应次数达到上限\n请修改输入提示词"
+# Previously this string was "空响应次数达到上限\n请修改输入提示词" which leaks
+# the existence of an internal "empty-response retry mechanism" to the
+# client.  Real models don't have such a concept, and exposing it is a
+# proxy fingerprint.  The new message is a natural-sounding assistant
+# reply that doesn't hint at internal retry logic.
+EMPTY_RESPONSE_LIMIT_MESSAGE = (
+    "I couldn't generate a response for that input. "
+    "Could you rephrase or add more detail?"
+)
 
 
 def is_empty_gemini_response(response_content) -> bool:

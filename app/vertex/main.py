@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
-from fastapi.security import HTTPBearer
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 # from fastapi.responses import JSONResponse # Not used
 # import os # Not used
@@ -17,14 +17,14 @@ from app.config import settings
 from app.vertex.routes import models_api
 from app.vertex.routes import chat_api
 
-app = FastAPI(title="OpenAI to Gemini Adapter")
+app = FastAPI(title="API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.ALLOWED_ORIGINS if hasattr(settings, "ALLOWED_ORIGINS") and settings.ALLOWED_ORIGINS else [],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 credential_manager = CredentialManager()
@@ -100,22 +100,31 @@ async def startup_event():
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "OpenAI to Gemini Adapter is running."}
+    # Hardening: previously returned the literal string
+    # "OpenAI to Gemini Adapter is running." which directly
+    # disclosed the project identity to any caller.  We now
+    # return a minimal status object with no project-identifying
+    # text.
+    return {"status": "ok"}
 
 
 @vertex_router.get("/health")
 async def health_check(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """
-    Simple health check endpoint for the Vertex AI integration.
-    """
-    # Validate API key
-    api_key = validate_api_key(credentials)
-    if not api_key:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+    """Simple health check endpoint for the Vertex AI integration.
 
-    # If we get here, API key is valid
-    vertex_log("info", "Health check passed with valid API key")
-    return {"status": "ok", "message": "Vertex AI integration is operational"}
+    Note: validate_api_key takes a raw token string, not an
+    HTTPAuthorizationCredentials object.  We previously passed the
+    whole credentials object — which was always truthy, so the
+    auth check was effectively bypassed.  Now we extract
+    credentials.credentials (the raw bearer token string) and pass
+    that.
+    """
+    # Extract the raw bearer token from the HTTPAuthorizationCredentials
+    # wrapper.  validate_api_key takes a string token, not the wrapper.
+    token = credentials.credentials if credentials is not None else ""
+    if not validate_api_key(token):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return {"status": "ok"}
 
 
 @vertex_router.get("/status")
@@ -123,15 +132,8 @@ async def status():
     """
     Public status endpoint (no auth required)
     """
+    # Hardening: previously echoed a static version string and an
+    # explicit list of available endpoints.  We now return only a
+    # minimal online status — no version, no endpoint list.
     vertex_log("info", "Status check requested")
-    return {
-        "status": "online",
-        "version": "1.0.0",
-        "endpoints_available": [
-            "/vertex/health",
-            "/vertex/predict",
-            "/vertex/generate",
-            "/vertex/admin/config",
-            "/vertex/models/list",
-        ],
-    }
+    return {"status": "online"}

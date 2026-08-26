@@ -64,6 +64,20 @@ class ApiStatsManager:
             )
             self._worker_thread.start()
 
+    def shutdown(self):
+        """Signal the background worker thread to stop.
+
+        Previously `_stop_event` was never set, so the worker thread
+        would spin in `time.sleep(0.01)` forever (until the process
+        was killed).  Now any caller — including the FastAPI shutdown
+        event in app/main.py — can ask the worker to stop cleanly.
+        """
+        self._stop_event.set()
+        if self._worker_thread is not None:
+            # Don't block forever — the worker sleeps at most 10ms per
+            # iteration, so 2 seconds is plenty.
+            self._worker_thread.join(timeout=2.0)
+
     def _worker_loop(self):
         """后台工作线程的主循环"""
         batch = []
@@ -144,7 +158,10 @@ class ApiStatsManager:
                 self.recent_calls.pop(0)
 
         # 记录日志
-        log_message = f"API调用已记录: 秘钥 '{api_key[:8]}', 模型 '{model}', 令牌: {tokens if tokens is not None else 0}"
+        # Don't log raw key prefix (AIzaSy12 is a recognisable Gemini
+        # key prefix).  Use a stable short hash instead.
+        key_id = "key#" + str(hash(api_key) & 0xFFFFFF)
+        log_message = f"API调用已记录: 秘钥 '{key_id}', 模型 '{model}', 令牌: {tokens if tokens is not None else 0}"
         log("info", log_message)
 
     async def cleanup(self):
@@ -194,7 +211,7 @@ class ApiStatsManager:
                 if ts >= hour_ago_ts
             )
 
-    def get_calls_last_minute(self, now=None):
+    def get_calls_last_minute(self, now=None) -> int:
         """获取过去一分钟的总调用次数"""
         if now is None:
             now = datetime.now()
@@ -206,6 +223,29 @@ class ApiStatsManager:
                 data["calls"]
                 for ts, data in self.time_buckets.items()
                 if ts >= minute_ago_ts
+            )
+
+    def get_calls_last_minute_for_key(self, api_key: str, now=None) -> int:
+        """获取过去一分钟内某个 API key 的调用次数。
+
+        实现方式：扫描 self.recent_calls（保留最近 100 条），过滤
+        timestamp 在过去 60s 内且 api_key 匹配的记录。
+
+        这个范围足够支撑 RPM 限流决策（默认 RPM=15-30，远低于 100 的窗口
+        上限）。  对大池子或超高 QPS 场景，需要切换到独立的滑动窗口
+        实现，但当前实现已足够避免单 Key 短时间被打穿。
+        """
+        if now is None:
+            now = datetime.now()
+        cutoff = now - timedelta(seconds=60)
+
+        with self._recent_calls_lock:
+            return sum(
+                1
+                for call in self.recent_calls
+                if call.get("api_key") == api_key
+                and call.get("timestamp") is not None
+                and call["timestamp"] >= cutoff
             )
 
     def get_tokens_last_24h(self):
@@ -272,7 +312,7 @@ class ApiStatsManager:
 
         with self._counters_lock:
             for api_key in api_keys:
-                api_key_id = api_key[:8]
+                api_key_id = "key#" + str(hash(api_key) & 0xFFFFFF)
                 calls_24h = self.api_key_counts[api_key]
                 total_tokens = self.api_key_tokens[api_key]
 
@@ -346,3 +386,20 @@ async def update_api_call_stats(api_call_stats, endpoint=None, model=None, token
 async def get_api_key_usage(api_call_stats, api_key, model=None):
     """获取API密钥的调用次数 (兼容旧接口)"""
     return await api_stats_manager.get_api_key_usage(api_key, model)
+
+
+def get_calls_last_minute_for_key(api_key: str) -> int:
+    """获取过去一分钟内某个 API key 的调用次数 (兼容新接口)。
+
+    同步函数，因为底层是同步的；调用方在 async 上下文里直接调用即可。
+    """
+    return api_stats_manager.get_calls_last_minute_for_key(api_key)
+
+
+# Default Gemini free-tier RPM safety threshold.  When a key's last-minute
+# call count is at or above this fraction of MAX_OUTBOUND_RPM, we should
+# skip it during key selection to avoid hitting the upstream limit.
+# Default 0.8 = use the key only when it's at less than 80% of the limit.
+import os as _os
+MAX_OUTBOUND_RPM = int(_os.environ.get("MAX_OUTBOUND_RPM", "15"))  # Gemini free-tier default
+OUTBOUND_RPM_BACKOFF_FRACTION = float(_os.environ.get("OUTBOUND_RPM_BACKOFF_FRACTION", "0.8"))
