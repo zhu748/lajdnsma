@@ -2,7 +2,8 @@ from fastapi import APIRouter, HTTPException, Header, Query
 from datetime import datetime
 from typing import Optional
 import asyncio
-import threading
+# Cleanup: threading 导入已移除 —— 密钥检测已从「线程 + 每 key 新建
+# event loop」改为在主循环上运行的后台任务。
 from app.utils import log_manager
 import app.config.settings as settings
 import app.vertex.config as app_config
@@ -170,7 +171,10 @@ async def get_dashboard_data(
         raise HTTPException(status_code=401, detail="Authentication failed")
     # 先清理过期数据，确保统计数据是最新的
     await api_stats_manager.maybe_cleanup()
-    await response_cache_manager.clean_expired()  # 使用管理器清理缓存
+    # Perf: 此处曾对每次 dashboard 轮询调用 response_cache_manager.
+    # clean_expired() —— 该方法持有全局缓存锁做全量扫描，而 maintenance.py
+    # 的每分钟定时任务已经在做同样的清理。高频轮询 + 锁全量扫描会把所有
+    # 请求的缓存热路径挂起，故移除；maybe_cleanup 内部按小时级节流，保留。
     active_requests_manager.clean_completed()  # 使用管理器清理活跃请求
 
     # 获取当前统计数据
@@ -924,17 +928,31 @@ async def test_api_keys(password_data: dict):
         if not verify_web_password(password):
             raise HTTPException(status_code=401, detail="密码错误")
 
-        # 检查是否已经有测试在运行
+        # 检查是否已经有测试在运行。
+        # Correctness: 旧实现在检查 is_running 与后台任务真正置位之间存在
+        # 调度间隙（run_api_key_test 要等事件循环调度后才更新进度字典），
+        # 两个并发 POST 都能通过检查并各自启动检测，并发改写
+        # key_manager.api_keys。改为在端点内同步置位，检测任务开始时再
+        # 重置计数器，彻底消除 TOCTOU 窗口。
         if api_key_test_progress["is_running"]:
             raise HTTPException(status_code=409, detail="已有API密钥检测正在进行中")
+        api_key_test_progress["is_running"] = True
 
         # 获取有效密钥列表
         valid_keys = key_manager.api_keys.copy()
 
-        # 启动异步测试
-        threading.Thread(
-            target=start_api_key_test_in_thread, args=(valid_keys,), daemon=True
-        ).start()
+        # 启动后台检测任务
+        # Fix: 旧实现在新线程里为每个 key 新建 event loop 再调
+        # test_api_key → GeminiClient → get_async_client()，拿到的是
+        # 绑定主事件循环的全局共享 httpx AsyncClient —— 跨线程跨循环
+        # 使用同一客户端不是并发安全的（连接池原语与创建它的 loop
+        # 绑定），检测期间并发流量可能报 "attached to a different
+        # loop" 或污染连接池。改为在主循环上以后台任务串行检测
+        # （与 main.py 的 check_remaining_keys_async 同一模式），
+        # 同时消除每 key 新建/销毁 event loop 的开销。
+        task = asyncio.create_task(run_api_key_test(valid_keys))
+        _dashboard_bg_tasks.add(task)
+        task.add_done_callback(_dashboard_bg_tasks.discard)
 
         return {
             "status": "success",
@@ -943,6 +961,9 @@ async def test_api_keys(password_data: dict):
     except HTTPException:
         raise
     except Exception as e:
+        # 同步置位的 is_running 在任务创建失败时必须回滚，
+        # 否则该功能会永久处于"检测中"状态。
+        api_key_test_progress["is_running"] = False
         raise HTTPException(status_code=500, detail=f"启动API密钥检测失败：{str(e)}")
 
 
@@ -970,20 +991,9 @@ async def get_test_api_keys_progress(
     return api_key_test_progress
 
 
-def check_api_key_in_thread(key):
-    """在线程中检查单个API密钥的有效性"""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        is_valid = loop.run_until_complete(test_api_key(key))
-        if is_valid:
-            log("info", f"API密钥 key#{hash(key) & 0xFFFFFF:06x} 有效")
-            return key, True
-        else:
-            log("warning", f"API密钥 key#{hash(key) & 0xFFFFFF:06x} 无效")
-            return key, False
-    finally:
-        loop.close()
+# 后台任务引用持有：asyncio.create_task 只持弱引用，不持引用的
+# 长耗时任务（密钥检测可能跑几分钟）可能被 GC 静默中断。
+_dashboard_bg_tasks: set = set()
 
 
 async def test_api_key(key):
@@ -997,8 +1007,12 @@ async def test_api_key(key):
         return False
 
 
-def start_api_key_test_in_thread(keys):
-    """在线程中启动API密钥检测过程"""
+async def run_api_key_test(keys):
+    """在主事件循环上串行检测全部 API 密钥。
+
+    取代旧的线程 + 每 key 新建 event loop 方案（见上方 /test-api-keys
+    端点注释），串行 + 探测间 2-6s 随机抖动，避免密钥枚举指纹。
+    """
     # 重置进度信息
     api_key_test_progress.update(
         {
@@ -1039,17 +1053,20 @@ def start_api_key_test_in_thread(keys):
         # sequence looks like real human-driven testing of individual
         # keys, not a script iterating through a list.  Operators with
         # many keys should expect the batch to take a few minutes.
-        import time as _time
         import random as _random
 
         for idx, key in enumerate(all_keys_to_test):
             # Skip the delay before the very first probe so the first
             # result is delivered quickly; only inter-probe delay matters.
             if idx > 0:
-                _time.sleep(_random.uniform(2.0, 6.0))
+                await asyncio.sleep(_random.uniform(2.0, 6.0))
 
-            # 检查密钥
-            _, is_valid = check_api_key_in_thread(key)
+            # 检查密钥（直接在主循环上 await，安全共享全局 httpx 客户端）
+            is_valid = await test_api_key(key)
+            if is_valid:
+                log("info", f"API密钥 key#{hash(key) & 0xFFFFFF:06x} 有效")
+            else:
+                log("warning", f"API密钥 key#{hash(key) & 0xFFFFFF:06x} 无效")
 
             # 更新进度
             api_key_test_progress["completed"] += 1
@@ -1062,11 +1079,19 @@ def start_api_key_test_in_thread(keys):
                 invalid_keys.append(key)
                 api_key_test_progress["invalid"] += 1
 
-        # 更新全局密钥列表
-        key_manager.api_keys = valid_keys
+        # 更新全局密钥列表。
+        # Correctness: 旧实现用检测开始时的快照整体覆写 key_manager.api_keys
+        # —— 检测串行且每 key 间隔 2-6s 抖动，几十个 key 要跑几分钟，期间
+        # 通过 update_config(gemini_api_keys) 新增的 key 会被静默丢弃。
+        # 改为与当前列表合并：保留检测期间新增且未被本次检测覆盖的 key。
+        tested = set(all_keys_to_test)
+        newly_added = [k for k in key_manager.api_keys if k not in tested]
+        final_valid_keys = valid_keys + newly_added
+
+        key_manager.api_keys = final_valid_keys
 
         # 更新设置中的有效和无效密钥
-        settings.GEMINI_API_KEYS = ",".join(valid_keys)
+        settings.GEMINI_API_KEYS = ",".join(final_valid_keys)
         settings.INVALID_API_KEYS = ",".join(invalid_keys)
 
         # 保存设置

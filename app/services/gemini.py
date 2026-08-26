@@ -757,7 +757,13 @@ class GeminiClient:
                     else:
                         gemini_history.append({"role": role_to_use, "parts": parts})
         if errors:
-            return errors
+            # Correctness: 旧实现此处 `return errors` 返回单值列表，而所有
+            # 调用方都按二元组解包（contents, system_instruction）——含 1 个
+            # 错误时解包抛 ValueError → 500；含恰好 2 个错误时错误字符串被
+            # 当成 contents/system_instruction 原样发给上游。改为抛
+            # ValueError，由调用方（request_format.prepare_request_messages）
+            # 转换成 HTTP 400 返回给客户端。
+            raise ValueError("; ".join(errors))
 
         # --- 后处理 ---
 

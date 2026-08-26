@@ -43,12 +43,9 @@ def init_router(
     _safety_settings,
     _safety_settings_g2,
     _current_api_key,
-    _fake_streaming,
-    _fake_streaming_interval,
-    _password,
-    _max_requests_per_minute,
-    _max_requests_per_day_per_ip,
 ):
+    # Cleanup: 曾接收 11 个参数，其中 5 个（fake_streaming、interval、
+    # password、两个限流值）是只存不读的死参数，已删除。
     init_runtime(
         _key_manager,
         _response_cache_manager,
@@ -56,11 +53,6 @@ def init_router(
         _safety_settings,
         _safety_settings_g2,
         _current_api_key,
-        _fake_streaming,
-        _fake_streaming_interval,
-        _password,
-        _max_requests_per_minute,
-        _max_requests_per_day_per_ip,
     )
 
 

@@ -1,5 +1,6 @@
 import app.config.settings as settings
 from app.utils.error_handling import handle_gemini_error
+from app.utils.logging import log
 from app.utils.response import (
     ensure_gemini_timing_fields,
     include_reasoning_for_request,
@@ -32,7 +33,26 @@ async def handle_nonstream_task_status(
                 model=chat_request.model,
                 label="non-stream request success",
             )
-            cached_response, _ = await response_cache_manager.get_and_remove(cache_key)
+            cached_response, cache_hit = await response_cache_manager.get_and_remove(
+                cache_key
+            )
+            # Correctness: 丢弃 cache_hit 的旧写法在缓存被并发请求"偷走"
+            # 时（另一请求在 store() 与本处 get_and_remove() 之间的 await
+            # 窗口内用同一 cache_key 消费了缓存）拿到 None，随后
+            # cached_response.data 直接 AttributeError，被外层 except 记为
+            # 该 key "error" 并触发无意义的全 key 重试。显式检查命中标志，
+            # 未命中按失败处理（该响应已被其他请求取走，本请求重试是
+            # 唯一正确的恢复路径）。
+            if not cache_hit or cached_response is None:
+                log(
+                    "warning",
+                    f"任务成功但缓存条目已被并发请求消费: {cache_key[:8]}...",
+                    extra={
+                        "request_type": "non-stream",
+                        "model": chat_request.model,
+                    },
+                )
+                return "error", None, empty_response_count
             if is_gemini:
                 response = ensure_gemini_timing_fields(cached_response.data)
             else:

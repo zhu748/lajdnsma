@@ -17,10 +17,8 @@ from app.utils.response_loop_helpers import (
 from app.utils.retry_state import remove_completed_tasks
 from app.utils.retry_state import cancel_pending_tasks
 from app.utils.sse import sse_text
-from app.utils.stealth import (
-    gen_openai_chunk_id,
-    gen_gemini_response_id,
-)
+# Cleanup: 曾从此处导入 gen_openai_chunk_id / gen_gemini_response_id，
+# 但模块内从未使用，已删除。
 
 
 def _fake_stream_keepalive_chunk(*, chat_request, is_gemini: bool):

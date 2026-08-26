@@ -30,6 +30,15 @@ def ensure_model_available(model: str, available_models: list[str]):
 
 
 async def wait_for_existing_task(active_requests_manager, pool_key: str, request):
+    # Correctness: 请求合并只对非流式请求启用。流式任务的 result 是一个
+    # StreamingResponse 对象，其 body_iterator 只能被消费一次 —— 如果把
+    # 同一个对象交给等待者，主请求与等待者会并发迭代同一个 async
+    # generator（SSE chunk 被任意瓜分，或直接抛
+    # "asynchronous generator is already running"），两条流同时损坏。
+    # 等待者放弃合流，走自己的完整处理路径。
+    if getattr(request, "stream", False):
+        return None
+
     active_task = active_requests_manager.get(pool_key)
     if not active_task or active_task.done():
         return None
@@ -38,7 +47,7 @@ async def wait_for_existing_task(active_requests_manager, pool_key: str, request
         "info",
         "发现相同请求的进行中任务",
         extra={
-            "request_type": "stream" if request.stream else "non-stream",
+            "request_type": "non-stream",
             "model": request.model,
         },
     )
@@ -63,6 +72,16 @@ async def wait_for_existing_task(active_requests_manager, pool_key: str, request
                 f"已从活跃请求池移除{error_type}任务: {pool_key}",
                 extra={"request_type": "non-stream"},
             )
+    except Exception as e:
+        # 等待的任务本身失败了。不向上抛（抛出会把原始异常以未脱敏的
+        # 500 直接返回给等待者），移除失败任务后让等待者走自己的完整
+        # 处理路径 —— 那条路径有标准的错误脱敏与缓存回退逻辑。
+        log(
+            "warning",
+            f"等待的已有任务失败，改为独立处理: {pool_key} ({e})",
+            extra={"request_type": "non-stream", "model": request.model},
+        )
+        active_requests_manager.remove(pool_key)
 
     return None
 

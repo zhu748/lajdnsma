@@ -2,8 +2,15 @@ import json
 import os
 import inspect
 import pathlib
+import threading
 from app.config import settings
 from app.utils.logging import log
+
+# 序列化 settings.json 时的互斥锁。save_settings 会在事件循环线程和
+# 后台任务中被并发触发（改配置 / 密钥检测完成 / 每日维护），虽然单个
+# 调用本身不 await，但 threading.Lock 成本极低且能防御任何线程上下文
+# （例如未来从 executor 里调用）造成的交错写。
+_save_lock = threading.Lock()
 
 # 定义不应该被保存或加载的配置项
 # Hardened: previously only PASSWORD/WEB_PASSWORD were excluded.  Added
@@ -67,9 +74,27 @@ def save_settings():
                     continue
         log("info", f"保存设置到JSON文件: {settings_file}")
 
-        # 保存到JSON文件
-        with open(settings_file, "w", encoding="utf-8") as f:
-            json.dump(settings_dict, f, ensure_ascii=False, indent=4)
+        # 原子写入：先写临时文件再 os.replace。
+        # 旧实现直接以 "w" 模式覆写 settings.json —— 进程在写入中途崩溃
+        # （或磁盘满）会留下截断的 JSON，下次启动 load_settings 失败导致
+        # 全部持久化配置静默丢失；并发写则可能交错。os.replace 在同一
+        # 文件系统上是原子的，读方永远只能看到完整的旧版或新版。
+        with _save_lock:
+            tmp_file = storage_dir / "settings.json.tmp"
+            try:
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(settings_dict, f, ensure_ascii=False, indent=4)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_file, settings_file)
+            finally:
+                # 正常路径下 os.replace 已把临时文件移走；这里兜底清理
+                # 写入失败时残留的 .tmp 文件。
+                if tmp_file.exists():
+                    try:
+                        tmp_file.unlink()
+                    except OSError:
+                        pass
 
         return settings_file
 
@@ -93,82 +118,17 @@ def load_settings():
             with open(settings_file, "r", encoding="utf-8") as f:
                 loaded_settings = json.load(f)
 
-            # 保存当前环境变量中的GEMINI_API_KEYS
-            current_api_keys = []
-            if hasattr(settings, "GEMINI_API_KEYS") and settings.GEMINI_API_KEYS:
-                current_api_keys = settings.GEMINI_API_KEYS.split(",")
-                current_api_keys = [
-                    key.strip() for key in current_api_keys if key.strip()
-                ]
-
-            # 保存当前环境变量中的GOOGLE_CREDENTIALS_JSON和VERTEX_EXPRESS_API_KEY
-            current_google_credentials_json = (
-                settings.GOOGLE_CREDENTIALS_JSON
-                if hasattr(settings, "GOOGLE_CREDENTIALS_JSON")
-                else ""
-            )
-            current_vertex_express_api_key = (
-                settings.VERTEX_EXPRESS_API_KEY
-                if hasattr(settings, "VERTEX_EXPRESS_API_KEY")
-                else ""
-            )
-
-            # 更新settings模块中的变量，但排除特定配置项
+            # 更新settings模块中的变量，但排除特定配置项。
+            # Cleanup: GEMINI_API_KEYS / GOOGLE_CREDENTIALS_JSON /
+            # VERTEX_EXPRESS_API_KEY 均在 EXCLUDED_SETTINGS 中（安全加固
+            # 决定凭据不落盘），旧代码里对这三个字段的"合并/环境变量优先"
+            # 特殊分支因 `name not in EXCLUDED_SETTINGS` 先行短路而永远
+            # 不可达 —— 约 50 行死代码却暗示凭据可持久化，全部删除。
+            # 旧版本 settings.json 若真含有这些字段，也会被同一条件正确
+            # 跳过，行为不变。
             for name, value in loaded_settings.items():
                 if hasattr(settings, name) and name not in EXCLUDED_SETTINGS:
-                    # 特殊处理GEMINI_API_KEYS，进行合并去重
-                    if name == "GEMINI_API_KEYS":
-                        loaded_api_keys = value.split(",") if value else []
-                        loaded_api_keys = [
-                            key.strip() for key in loaded_api_keys if key.strip()
-                        ]
-                        all_keys = list(set(current_api_keys + loaded_api_keys))
-                        setattr(settings, name, ",".join(all_keys))
-                    # 特殊处理GOOGLE_CREDENTIALS_JSON，如果当前环境变量中有值，则优先使用环境变量中的值
-                    elif name == "GOOGLE_CREDENTIALS_JSON":
-                        # 检查当前值是否为空（None、空字符串、只有空白字符，或者是"''"这样的空引号）
-                        is_empty = (
-                            not current_google_credentials_json
-                            or not current_google_credentials_json.strip()
-                            or current_google_credentials_json.strip() in ['""', "''"]
-                        )
-                        log("debug", f"is_empty检查结果: {is_empty}")
-                        if is_empty:
-                            log(
-                                "debug",
-                                "当前GOOGLE_CREDENTIALS_JSON为空，将使用持久化的值",
-                            )
-                            setattr(settings, name, value)
-                            # 更新环境变量，确保其他模块能够访问到
-                            if value:  # 只有当value不为空时才设置环境变量
-                                os.environ["GOOGLE_CREDENTIALS_JSON"] = value
-                                log(
-                                    "info",
-                                    "从持久化存储加载了GOOGLE_CREDENTIALS_JSON配置",
-                                )
-                            else:
-                                log("warning", "持久化的GOOGLE_CREDENTIALS_JSON值为空")
-                        else:
-                            log(
-                                "debug", "当前GOOGLE_CREDENTIALS_JSON不为空，保持现有值"
-                            )
-                    # 特殊处理VERTEX_EXPRESS_API_KEY，如果当前环境变量中有值，则优先使用环境变量中的值
-                    elif name == "VERTEX_EXPRESS_API_KEY":
-                        # 检查当前值是否为空（None、空字符串或只有空白字符）
-                        if (
-                            not current_vertex_express_api_key
-                            or not current_vertex_express_api_key.strip()
-                        ):
-                            setattr(settings, name, value)
-                            # 更新环境变量，确保其他模块能够访问到
-                            if value:  # 只有当value不为空时才设置环境变量
-                                os.environ["VERTEX_EXPRESS_API_KEY"] = value
-                                log(
-                                    "info",
-                                    "从持久化存储加载了VERTEX_EXPRESS_API_KEY配置",
-                                )
-                    else:
-                        setattr(settings, name, value)
+                    setattr(settings, name, value)
 
             # 在加载完设置后，检查是否需要刷新模型配置
             try:

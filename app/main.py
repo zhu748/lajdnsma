@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +23,7 @@ from app.vertex.vertex_ai_init import init_vertex_ai
 from app.vertex.credentials_manager import CredentialManager
 from app.utils.http_client import close_async_client
 import app.config.settings as settings
-from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2, get_safety_settings
+from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 import asyncio
 import sys
 import pathlib
@@ -41,8 +42,33 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # matches the previous intent).
 MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024  # 50 MB
 
+# 后台任务引用持有：CPython 的 asyncio.create_task 只持弱引用，
+# 不持引用的长耗时任务（如密钥后台检查，每 key 间隔 2-5s，可能跑
+# 几分钟）可能在任一 GC 周期被静默回收中断。模块级 set + done
+# callback 保证任务存活到完成。
+_background_tasks: set = set()
 
-app = FastAPI()
+
+def _spawn_background_task(coro) -> asyncio.Task:
+    """创建后台任务并持有强引用，防止被垃圾回收静默中断。"""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
+# --------------- 生命周期（lifespan）---------------
+# Modernization: FastAPI 0.109+ 已弃用 @app.on_event，这里改用官方
+# 推荐的 lifespan 上下文管理器（startup 逻辑在 yield 前，shutdown
+# 逻辑在 yield 后），消除 DeprecationWarning 且面向未来兼容。
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await _startup()
+    yield
+    await _shutdown()
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -82,7 +108,13 @@ async def harden_response_headers(request: Request, call_next):
     # in front of real OpenAI/Anthropic deployments.
     response.headers["Server"] = "cloudflare"
     # Strip FastAPI/Starlette-added disclosure headers if present.
-    response.headers.pop("X-Powered-By", None)
+    # CRITICAL FIX: 旧写法 `response.headers.pop("X-Powered-By", None)`
+    # 调用了 MutableHeaders 根本不存在的 .pop() 方法 —— Starlette 的
+    # MutableHeaders 只有 __delitem__，没有 pop。该异常被全局异常处
+    # 理器吞掉后，**每个请求都返回 500**（冒烟测试发现）。改为
+    # membership check + del，兼容所有 Starlette 版本。
+    if "x-powered-by" in response.headers:
+        del response.headers["x-powered-by"]
     return response
 
 
@@ -201,8 +233,7 @@ sys.excepthook = handle_exception
 # --------------- 事件处理 ---------------
 
 
-@app.on_event("startup")
-async def startup_event():
+async def _startup():
     # 首先加载持久化设置，确保所有配置都是最新的
     load_settings()
 
@@ -264,8 +295,9 @@ async def startup_event():
 
     if not SKIP_CHECK_API_KEY:
         # 创建后台任务检查剩余密钥
+        # （_spawn_background_task 持有强引用，防止任务被 GC 静默中断）
         if keys_to_check_later:
-            asyncio.create_task(
+            _spawn_background_task(
                 check_remaining_keys_async(keys_to_check_later, initial_invalid_keys)
             )
         else:
@@ -291,6 +323,8 @@ async def startup_event():
         key_manager._reset_key_stack()
 
     # 初始化路由器
+    # （已清理 5 个只存不读的死参数：fake_streaming/interval/password/限流值，
+    # 各处实际都是实时读 settings.*）
     init_router(
         key_manager,
         response_cache_manager,
@@ -298,11 +332,6 @@ async def startup_event():
         SAFETY_SETTINGS,
         SAFETY_SETTINGS_G2,
         first_valid_key,
-        settings.FAKE_STREAMING,
-        settings.FAKE_STREAMING_INTERVAL,
-        settings.PASSWORD,
-        settings.MAX_REQUESTS_PER_MINUTE,
-        settings.MAX_REQUESTS_PER_DAY_PER_IP,
     )
 
     # 初始化仪表盘路由器
@@ -317,8 +346,7 @@ async def startup_event():
     open_browser()
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
+async def _shutdown():
     # Hardening: previously only closed the shared httpx client.
     # Orphan background schedulers + threads would keep running
     # after the HTTP server stopped, raising
@@ -329,6 +357,13 @@ async def shutdown_event():
         await shutdown_scheduler()
     except Exception as e:
         log("error", f"shutdown_scheduler error: {str(e)}")
+    # 释放 Vertex OpenAI Direct 路径缓存的客户端连接池
+    try:
+        from app.vertex.routes.chat_api import close_cached_openai_clients
+
+        await close_cached_openai_clients()
+    except Exception as e:
+        log("error", f"close_cached_openai_clients error: {str(e)}")
     await close_async_client()
 
 
@@ -360,7 +395,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         content=ErrorResponse(
             message="Internal Server Error. Please retry later.",
             type="internal_error",
-        ).dict(),
+        ).model_dump(),
     )
 
 
@@ -379,7 +414,13 @@ async def health_check():
     return {"status": "ok"}
 
 # 挂载静态文件目录
-app.mount("/assets", StaticFiles(directory="app/templates/assets"), name="assets")
+# Fix: 旧写法用相对路径 "app/templates/assets"，依赖进程启动时的 CWD；
+# 从非项目根目录启动会导致 500。与上方 templates 统一用 BASE_DIR 绝对路径。
+app.mount(
+    "/assets",
+    StaticFiles(directory=str(BASE_DIR / "templates" / "assets")),
+    name="assets",
+)
 
 # 设置根路由路径
 dashboard_path = f"/{settings.DASHBOARD_URL}" if settings.DASHBOARD_URL else "/"
@@ -390,7 +431,12 @@ async def root(request: Request):
     """
     根路由 - 返回静态 HTML 文件
     """
-    base_url = str(request.base_url).replace("http", "https")
+    # 只替换 URL scheme，不用 replace("http", "https") —— 后者会误伤
+    # URL 中任意位置的 "http" 子串（如 https://my-http-host/ →
+    # https://my-https-host/，主机名被改写）。
+    base_url = str(request.base_url)
+    if base_url.startswith("http://"):
+        base_url = "https://" + base_url[len("http://"):]
     api_url = f"{base_url}v1" if base_url.endswith("/") else f"{base_url}/v1"
     # 直接返回 index.html 文件
     return templates.TemplateResponse(

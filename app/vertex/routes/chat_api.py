@@ -29,9 +29,73 @@ from app.vertex.api_helpers import (
     create_openai_error_response,
     execute_gemini_call,
 )
-from app.utils.stealth import gen_openai_chunk_id, full_jitter_backoff
+from app.utils.stealth import gen_openai_chunk_id  # full_jitter_backoff 未使用，已删除
 
 router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Direct 路径的 AsyncOpenAI 客户端缓存
+# ---------------------------------------------------------------------------
+# Perf/resource fix: 旧实现每个请求都 new 一个 `openai.AsyncOpenAI`
+# 且从不 close —— 每个请求都完整 TCP+TLS 握手（+100~300ms 延迟），
+# 且未关闭的客户端持有连接/socket，长期运行会 FD 泄漏（Too many open
+# files）。
+#
+# GCP OAuth token 约一小时才轮换一次，同一 token 期间的所有请求完全
+# 可以复用同一个客户端（AsyncOpenAI 内部的 httpx 连接池本身就是为
+# 并发共享设计的）。因此按 (endpoint, token, stream 模式) 键控缓存，
+# 上限 _MAX_CACHED_OPENAI_CLIENTS，淘汰时后台关闭旧客户端释放连接。
+_openai_client_cache: Dict[tuple, openai.AsyncOpenAI] = {}
+_openai_client_cache_lock = asyncio.Lock()
+_MAX_CACHED_OPENAI_CLIENTS = 32
+
+
+async def _close_client_quietly(client: openai.AsyncOpenAI) -> None:
+    try:
+        await client.close()
+    except Exception as e:  # noqa: BLE001 - best-effort cleanup
+        vertex_log("warning", f"Failed to close evicted OpenAI client: {e}")
+
+
+async def _get_cached_openai_client(
+    base_url: str,
+    gcp_token: str,
+    stealth_headers: Dict[str, str],
+) -> openai.AsyncOpenAI:
+    """按 (endpoint, token, headers) 复用 AsyncOpenAI 客户端。"""
+    key = (base_url, gcp_token, tuple(sorted(stealth_headers.items())))
+    async with _openai_client_cache_lock:
+        client = _openai_client_cache.get(key)
+        if client is not None:
+            return client
+
+        client = openai.AsyncOpenAI(
+            base_url=base_url,
+            api_key=gcp_token,
+            default_headers=stealth_headers,
+            timeout=600.0,
+            max_retries=0,  # we handle retries ourselves with jitter
+        )
+        # 插入末尾保持插入序，淘汰时从头部取最旧的
+        _openai_client_cache[key] = client
+
+        # 超出容量时淘汰最旧的（>=1 小时未轮换的 token，几乎不可能仍在
+        # 被在途请求使用；关闭放到后台任务，不阻塞请求路径）
+        while len(_openai_client_cache) > _MAX_CACHED_OPENAI_CLIENTS:
+            _old_key = next(iter(_openai_client_cache))
+            _old_client = _openai_client_cache.pop(_old_key)
+            asyncio.create_task(_close_client_quietly(_old_client))
+        return client
+
+
+async def close_cached_openai_clients() -> None:
+    """进程关闭时释放全部缓存客户端（由 main lifespan 调用）。"""
+    async with _openai_client_cache_lock:
+        clients = list(_openai_client_cache.values())
+        _openai_client_cache.clear()
+    for client in clients:
+        await _close_client_quietly(client)
 
 
 @router.post("/v1/chat/completions")
@@ -344,6 +408,12 @@ async def chat_completions(
             # Content-Type/Accept headers via `default_headers` and strip
             # the X-Stainless family by setting them to empty strings
             # (the SDK explicitly allows overriding/blanking them).
+            #
+            # Perf fix: the client is now served from a bounded cache
+            # keyed by (endpoint, token, headers) — see
+            # _get_cached_openai_client above — so connection pools are
+            # reused across requests sharing the same GCP token instead
+            # of being rebuilt (and leaked) per request.
             from app.utils.stealth import pick_user_agent
 
             stealth_headers = {
@@ -363,15 +433,10 @@ async def chat_completions(
                 "X-Stainless-Async": "",
                 "X-Stainless-Retry-Count": "",
             }
-            openai_client = openai.AsyncOpenAI(
-                base_url=VERTEX_AI_OPENAI_ENDPOINT_URL,
-                api_key=gcp_token,  # OAuth token
-                default_headers=stealth_headers,
-                # Use a long timeout for chat completions (10 minutes)
-                # but force the SDK's own httpx client to share our
-                # process-wide connection pool limits.
-                timeout=600.0,
-                max_retries=0,  # we handle retries ourselves with jitter
+            openai_client = await _get_cached_openai_client(
+                VERTEX_AI_OPENAI_ENDPOINT_URL,
+                gcp_token,
+                stealth_headers,
             )
 
             # Hardening: previously hardcoded all 5 safety categories

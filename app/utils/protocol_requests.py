@@ -119,12 +119,6 @@ def _function_call_output_to_text(output: Any) -> str:
     return json.dumps(output, ensure_ascii=False)
 
 
-def _function_name_from_call_id(call_id: Any) -> Optional[str]:
-    if not isinstance(call_id, str) or not call_id.startswith("call_"):
-        return None
-    return call_id[len("call_") :].split("__", 1)[0]
-
-
 def _claude_image_to_openai_image(item: Dict[str, Any]) -> Dict[str, Any] | None:
     source = item.get("source", {})
     if not isinstance(source, dict):
@@ -215,7 +209,12 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
                     "tool_call_id": call_id or "",
                     "content": output,
                 }
-                function_name = call_id_to_name.get(call_id) or _function_name_from_call_id(call_id)
+                # tool_call_id 现为 call_ + 24 位随机小写字母数字
+                # （stealth.gen_openai_tool_call_id），不再内嵌函数名；旧的
+                # call_{name}__ 回退解析器会把随机后缀当成函数名写入
+                # functionResponse，产生错误的上游调用。仅依赖显式注册的
+                # call_id → name 映射。
+                function_name = call_id_to_name.get(call_id)
                 if function_name:
                     tool_message["name"] = function_name
                 messages.append(tool_message)

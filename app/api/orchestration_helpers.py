@@ -1,7 +1,6 @@
 from fastapi import HTTPException
 
-from app.utils.error_handling import sanitize_string
-
+# Cleanup: sanitize_string 导入未使用，已删除。
 
 async def get_cached_response_or_none(
     get_cache_func,
@@ -66,6 +65,16 @@ async def await_process_task_result(
             pool_key=pool_key,
         )
         return response
+    except HTTPException:
+        # 处理任务内部主动抛出的 HTTPException（例如消息格式校验失败的
+        # 400）必须原样透传 —— 旧实现被下方 except Exception 统一转换成
+        # 500 "Upstream service error"，把客户端错误伪装成了服务端错误。
+        remove_active_request_if_needed(
+            public_mode=public_mode,
+            active_requests_manager=active_requests_manager,
+            pool_key=pool_key,
+        )
+        raise
     except Exception as e:
         remove_active_request_if_needed(
             public_mode=public_mode,

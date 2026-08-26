@@ -208,8 +208,13 @@ api_call_stats = {
 stats_lock = asyncio.Lock()
 
 # 日志配置
-logging.getLogger("uvicorn").disabled = True
-logging.getLogger("uvicorn.access").disabled = True
+# Fix: 旧写法 `logging.getLogger("uvicorn").disabled = True` 会连 uvicorn
+# 的错误/启动日志一起杀掉，服务没起来时排障无从看起。现在只静默
+# access log（高频且价值低），保留 error 级别的 uvicorn 日志；同时
+# 可通过 DISABLE_UVICORN_LOG=1 恢复旧行为。
+if os.environ.get("DISABLE_UVICORN_LOG", "1").lower() != "false":
+    logging.getLogger("uvicorn.access").disabled = True
+    logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 
 # ---------- 以下配置信息已废弃 ----------

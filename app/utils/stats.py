@@ -2,7 +2,7 @@ import asyncio
 from datetime import datetime, timedelta
 from app.utils.logging import log
 import app.config.settings as settings
-from collections import defaultdict, Counter
+from collections import defaultdict, Counter, deque
 import time
 import threading
 import queue
@@ -30,7 +30,8 @@ class ApiStatsManager:
         self.time_buckets = {}  # 格式: {timestamp_minute: {"calls": count, "tokens": count}}
 
         # 保存与兼容格式相关的调用日志（最小化存储）
-        self.recent_calls = []  # 仅保存最近的少量调用，用于前端展示
+        # deque(maxlen=N) 自动淘汰最旧记录，避免 list.pop(0) 的 O(n) 复制
+        self.recent_calls = deque(maxlen=100)  # 仅保存最近的少量调用，用于前端展示
         self.max_recent_calls = 100  # 最大保存的最近调用记录数
 
         # 当前时间分钟桶的时间戳（分钟级别）
@@ -79,28 +80,32 @@ class ApiStatsManager:
             self._worker_thread.join(timeout=2.0)
 
     def _worker_loop(self):
-        """后台工作线程的主循环"""
-        batch = []
-        last_process = time.time()
+        """后台工作线程的主循环
 
+        Perf fix: 旧实现每 10ms 只 get_nowait() 一条更新，消费速率上限
+        ~100 条/秒；持续 QPS 超过该值时 _update_queue 无界增长（内存泄
+        漏），同时线程以 100Hz 空转唤醒浪费 CPU。新实现：
+        1. 阻塞等待第一条更新（最多等 batch_interval 秒）——空闲时零唤醒；
+        2. 拿到第一条后立即排空队列中当前积压的所有更新（一次性批处理，
+           消费速率只受锁开销限制，可达每秒数十万条）。
+        """
         while not self._stop_event.is_set():
             try:
-                # 非阻塞获取更新
+                # 阻塞等待第一条更新（空闲时挂起，不空转）
                 try:
-                    update = self._update_queue.get_nowait()
-                    batch.append(update)
+                    first = self._update_queue.get(timeout=self.batch_interval)
                 except queue.Empty:
-                    pass
+                    continue
 
-                # 处理批次或超时
-                current_time = time.time()
-                if batch and (current_time - last_process >= self.batch_interval):
-                    self._process_batch(batch)
-                    batch = []
-                    last_process = current_time
+                batch = [first]
+                # 立即排空当前积压的整批更新
+                while True:
+                    try:
+                        batch.append(self._update_queue.get_nowait())
+                    except queue.Empty:
+                        break
 
-                # 短暂休眠以避免CPU占用过高
-                time.sleep(0.01)
+                self._process_batch(batch)
 
             except Exception as e:
                 log("error", f"后台处理线程错误: {str(e)}")
@@ -144,7 +149,8 @@ class ApiStatsManager:
             self.time_buckets[minute_ts]["tokens"] += tokens
             self.current_minute = minute_ts
 
-        # 更新最近调用记录
+        # 更新最近调用记录（deque(maxlen) 自动淘汰旧记录，避免
+        # list.pop(0) 的 O(n) 复制）
         with self._recent_calls_lock:
             compact_call = {
                 "api_key": api_key,
@@ -152,10 +158,7 @@ class ApiStatsManager:
                 "timestamp": now,
                 "tokens": tokens,
             }
-
             self.recent_calls.append(compact_call)
-            if len(self.recent_calls) > self.max_recent_calls:
-                self.recent_calls.pop(0)
 
         # 记录日志
         # Don't log raw key prefix (AIzaSy12 is a recognisable Gemini
@@ -185,15 +188,25 @@ class ApiStatsManager:
             self.last_cleanup = now
 
     async def get_api_key_usage(self, api_key, model=None):
-        """获取API密钥的使用统计"""
+        """获取API密钥的使用统计
+
+        Fix: 旧实现用 `self.api_model_counts[api_key][model]` 下标访问
+        defaultdict —— 读操作也会插入空 Counter，导致统计字典被从未
+        调用过的 key 污染（条目只增不减）。改用 .get() 链式读法，
+        读路径零副作用。
+        """
         with self._counters_lock:
             if model:
-                return self.api_model_counts[api_key][model]
-            else:
-                return self.api_key_counts[api_key]
+                return self.api_model_counts.get(api_key, {}).get(model, 0)
+            return self.api_key_counts.get(api_key, 0)
 
     def get_calls_last_24h(self):
-        """获取过去24小时的总调用次数"""
+        """获取自上次每日重置以来的总调用次数。
+
+        Naming: 旧名/旧注释声称"过去24小时"，但计数器随每日 15:00 的
+        定时重置清零，并非滑动窗口 —— 修正注释以免误导（口径变更需
+        UI 同步，此处仅澄清语义）。
+        """
         with self._counters_lock:
             return sum(self.api_key_counts.values())
 
@@ -310,15 +323,18 @@ class ApiStatsManager:
         """获取API密钥的详细统计信息"""
         stats = []
 
+        # Correctness: 与 get_api_key_usage 同型的读污染修复 —— 旧实现
+        # 用下标访问 defaultdict，读操作也会插入空 Counter/0，统计字典被
+        # 从未调用过的 key 污染（条目只增不减）。改用 .get() 链式读法。
         with self._counters_lock:
             for api_key in api_keys:
                 api_key_id = "key#" + str(hash(api_key) & 0xFFFFFF)
-                calls_24h = self.api_key_counts[api_key]
-                total_tokens = self.api_key_tokens[api_key]
+                calls_24h = self.api_key_counts.get(api_key, 0)
+                total_tokens = self.api_key_tokens.get(api_key, 0)
 
                 model_stats = {}
-                for model, count in self.api_model_counts[api_key].items():
-                    tokens = self.api_model_tokens[api_key][model]
+                for model, count in self.api_model_counts.get(api_key, {}).items():
+                    tokens = self.api_model_tokens.get(api_key, {}).get(model, 0)
                     model_stats[model] = {"calls": count, "tokens": tokens}
 
                 usage_percent = (

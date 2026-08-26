@@ -7,6 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# 哨兵：区分「sys.modules 中没有该键」与「值为 None」。
+_MISSING = object()
+
 
 def load_native_stream_module(chunks=None, raise_error=False):
     fake_services = types.ModuleType("app.services")
@@ -45,7 +48,7 @@ def load_native_stream_module(chunks=None, raise_error=False):
     fake_response.include_reasoning_for_request = (
         lambda request: getattr(request, "enable_thinking", True)
     )
-    fake_response.openAI_from_Gemini = lambda chunk, stream=True, include_reasoning=True: {
+    fake_response.openAI_from_Gemini = lambda chunk, stream=True, include_reasoning=True, **kwargs: {
         "chunk": chunk.data,
         "stream": stream,
         "include_reasoning": include_reasoning,
@@ -60,23 +63,37 @@ def load_native_stream_module(chunks=None, raise_error=False):
     fake_sse = types.ModuleType("app.utils.sse")
     fake_sse.sse_text = lambda data: f"data: {data}\n\n"
 
-    sys.modules.update(
-        {
-            "app.services": fake_services,
-            "app.utils": fake_utils,
-            "app.utils.gemini_response_processing": fake_processing,
-            "app.utils.response": fake_response,
-            "app.utils.response_loop_helpers": fake_loop,
-            "app.utils.sse": fake_sse,
-        }
-    )
-    spec = importlib.util.spec_from_file_location(
-        "native_stream_handlers",
-        ROOT / "app/api/native_stream_handlers.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+    fake_stealth = types.ModuleType("app.utils.stealth")
+    fake_stealth.gen_openai_chunk_id = lambda: "chatcmpl-testsharedid0000000000000"
+
+    stubbed = {
+        "app.services": fake_services,
+        "app.utils": fake_utils,
+        "app.utils.gemini_response_processing": fake_processing,
+        "app.utils.response": fake_response,
+        "app.utils.response_loop_helpers": fake_loop,
+        "app.utils.sse": fake_sse,
+        "app.utils.stealth": fake_stealth,
+    }
+    # 隔离：记下被替换前的 sys.modules 原值，模块 exec 完成后恢复，
+    # 避免假桩泄漏到同一进程内的其他测试（例如 test_response 需要
+    # 真实的 app.utils.stealth）。
+    saved = {name: sys.modules.get(name, _MISSING) for name in stubbed}
+    sys.modules.update(stubbed)
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "native_stream_handlers",
+            ROOT / "app/api/native_stream_handlers.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+    finally:
+        for name, prev in saved.items():
+            if prev is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
     module._stat_calls = stat_calls
     module._errors = errors
     module._logs = logs

@@ -1,3 +1,4 @@
+import hmac
 from typing import Optional
 from fastapi import HTTPException, Header, Query
 import app.config.settings as settings
@@ -38,11 +39,18 @@ async def custom_verify_password(
         client_provided_api_key = token
 
     # 进行校验和比对
-    if (not client_provided_api_key) or (client_provided_api_key != settings.PASSWORD):
+    # Hardening: 改用常量时间比较（hmac.compare_digest），防止通过响应
+    # 时间差异逐字节猜测密码的时序侧信道攻击。
+    if (not client_provided_api_key) or not hmac.compare_digest(
+        client_provided_api_key, settings.PASSWORD
+    ):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid token")
 
 
 def verify_web_password(password: str):
-    if password != settings.WEB_PASSWORD:
+    # 常量时间比较，同上
+    if not isinstance(password, str) or not hmac.compare_digest(
+        password, settings.WEB_PASSWORD
+    ):
         return False
     return True

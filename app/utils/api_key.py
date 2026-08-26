@@ -4,7 +4,6 @@ import os
 import logging
 import asyncio
 import time
-from apscheduler.schedulers.background import BackgroundScheduler
 from app.utils.http_client import get_async_client
 from app.utils.logging import format_log_message
 from app.utils.stealth import build_key_probe_headers
@@ -90,11 +89,11 @@ class APIKeyManager:
     def __init__(self):
         self.api_keys = re.findall(r"AIzaSy[a-zA-Z0-9_-]{33}", settings.GEMINI_API_KEYS)
         # 加载更多 GEMINI_API_KEYS
+        # Fix: 旧实现在第一个空序号就 break——配置了 _1,_2,_4 时 _4 会被
+        # 静默忽略。改为遍历全部检查，空序号跳过。
         for i in range(1, 99):
             if keys := os.environ.get(f"GEMINI_API_KEYS_{i}", ""):
                 self.api_keys += re.findall(r"AIzaSy[a-zA-Z0-9_-]{33}", keys)
-            else:
-                break
 
         # Dedupe while preserving order.  The previous code accepted
         # duplicates silently, which inflated effective concurrency for a
@@ -109,9 +108,10 @@ class APIKeyManager:
 
         self.key_stack = []  # 初始化密钥栈
         self._reset_key_stack()  # 初始化时创建随机密钥栈
-        self.scheduler = BackgroundScheduler()
-        self.scheduler.start()
         self.lock = asyncio.Lock()  # Added lock
+        # Cleanup: 这里曾有一个 BackgroundScheduler 实例被创建并启动，
+        # 但从未注册任何任务（全项目无 key_manager.scheduler 引用），
+        # 也从未被 shutdown——纯粹占用一个线程且在进程关闭时泄漏。已删除。
 
     @property
     def strategy(self) -> str:

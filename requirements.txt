@@ -1,13 +1,20 @@
-fastapi
-uvicorn
-httpx
-python-dotenv
-requests
-apscheduler
-jinja2
+# 依赖清单已与 pyproject.toml 对齐：
+# 1. 补充 tzdata —— app/utils/maintenance.py 使用 ZoneInfo("Asia/Shanghai")，
+#    python:3.12-slim 镜像无系统时区数据，缺少此包会直接 ZoneInfoNotFoundError
+#    启动崩溃（pyproject 里有但旧 requirements.txt 漏了，而 Docker 用的是本文件）；
+# 2. 移除 requests —— 全部出站请求已统一走共享 httpx AsyncClient，
+#    唯一残留引用是永不命中的死 isinstance 分支（已删除）；
+# 3. 版本约束与 pyproject.toml 完全一致，避免两处漂移。
+apscheduler>=3.11.0
+fastapi>=0.115.12
 google-auth==2.38.0
 google-cloud-aiplatform==1.86.0
-pydantic==2.6.1
 google-genai==1.11.0
-xxhash
+httpx>=0.28.1
+jinja2>=3.1.6
 openai==1.76.0
+pydantic==2.6.1
+python-dotenv>=1.1.0
+tzdata>=2025.2
+uvicorn>=0.34.2
+xxhash>=0.8.2

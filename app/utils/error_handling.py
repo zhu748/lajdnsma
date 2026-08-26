@@ -1,13 +1,14 @@
 import json
-import requests
 import httpx
 import logging
 import asyncio
 import re
-import random
 from fastapi import HTTPException
 from app.utils.logging import log
 from app.utils.stealth import full_jitter_backoff
+
+# Cleanup: `requests` 依赖已移除 —— 全部出站请求已统一走共享的 httpx
+# AsyncClient，旧的 requests.exceptions.* isinstance 分支永远不会命中。
 
 logger = logging.getLogger("my_logger")
 
@@ -60,8 +61,8 @@ def handle_gemini_error(error, current_api_key) -> str:
     sanitized_full_error_str = sanitize_string(str(error))
     key_for_log = _key_id(current_api_key)
 
-    # 同时检查 requests 和 httpx 的 HTTPError
-    if isinstance(error, (requests.exceptions.HTTPError, httpx.HTTPStatusError)):
+    # httpx HTTP 错误（旧 requests 分支已删除，见文件头注释）
+    if isinstance(error, httpx.HTTPStatusError):
         status_code = error.response.status_code
         log_extra = {"key": key_for_log, "status_code": status_code}
         error_message = ""  # 初始化 error_message
@@ -129,7 +130,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             )
             return error_message
 
-    elif isinstance(error, (httpx.TimeoutException, requests.exceptions.Timeout)):
+    elif isinstance(error, httpx.TimeoutException):
         error_message = "Request timed out"
         log(
             "WARNING",
@@ -138,7 +139,7 @@ def handle_gemini_error(error, current_api_key) -> str:
         )
         return error_message
 
-    elif isinstance(error, (httpx.ConnectError, requests.exceptions.ConnectionError)):
+    elif isinstance(error, httpx.ConnectError):
         error_message = "Connection error"
         log(
             "WARNING",
@@ -191,8 +192,8 @@ async def handle_api_error(
     """
     key_id = _key_id(api_key)
 
-    # 同时检查 requests 和 httpx 的 HTTPError
-    if isinstance(e, (requests.exceptions.HTTPError, httpx.HTTPStatusError)):
+    # httpx HTTP 错误
+    if isinstance(e, httpx.HTTPStatusError):
         status_code = e.response.status_code
 
         # 429 -> 切换 key + 冷却当前 key

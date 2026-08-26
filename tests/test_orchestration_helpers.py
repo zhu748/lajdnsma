@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 import types
@@ -117,6 +118,75 @@ class OrchestrationHelpersTestCase(unittest.IsolatedAsyncioTestCase):
                 is_gemini=False,
             )
         self.assertEqual(ctx.exception.status_code, 500)
+
+
+class AwaitTaskHttpExceptionPassThroughTestCase(unittest.IsolatedAsyncioTestCase):
+    """R2-M7 回归：处理任务抛出的 HTTPException 必须原样透传。
+
+    旧实现把一切异常统一转换成 500 "Upstream service error" —— 消息
+    校验失败（400）被伪装成服务端错误，客户端收到错误的语义。
+    """
+
+    async def test_http_exception_passthrough(self):
+        module, HTTPException = load_orchestration_helpers()
+
+        async def bad_request_task():
+            raise HTTPException(status_code=400, detail="Invalid request messages")
+
+        task = asyncio.create_task(bad_request_task())
+
+        class Manager:
+            def __init__(self):
+                self.removed = []
+
+            def remove(self, key):
+                self.removed.append(key)
+
+        mgr = Manager()
+        with self.assertRaises(HTTPException) as ctx:
+            await module.await_process_task_result(
+                process_task=task,
+                public_mode=False,
+                active_requests_manager=mgr,
+                pool_key="pool",
+                get_cache_func=None,
+                cache_key="cache",
+                is_stream=False,
+                is_gemini=False,
+            )
+        # 必须是 400 而非 500
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertIn("Invalid request messages", str(ctx.exception.detail))
+        # 失败后仍要从活跃请求池移除
+        self.assertEqual(mgr.removed, ["pool"])
+
+    async def test_generic_exception_still_500_with_cache_fallback(self):
+        module, HTTPException = load_orchestration_helpers()
+
+        async def boom_task():
+            raise RuntimeError("upstream exploded")
+
+        task = asyncio.create_task(boom_task())
+
+        class Manager:
+            def remove(self, key):
+                pass
+
+        async def fake_get_cache(cache_key, is_stream, is_gemini):
+            return {"fallback": True}
+
+        # 缓存回退命中 → 不抛
+        result = await module.await_process_task_result(
+            process_task=task,
+            public_mode=True,
+            active_requests_manager=Manager(),
+            pool_key=None,
+            get_cache_func=fake_get_cache,
+            cache_key="cache",
+            is_stream=False,
+            is_gemini=False,
+        )
+        self.assertEqual(result, {"fallback": True})
 
 
 if __name__ == "__main__":

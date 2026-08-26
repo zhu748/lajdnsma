@@ -1,0 +1,52 @@
+# ============================================================
+# Docker 构建优化
+# 1. .dockerignore 排除与运行时无关的文件（.git 22MB、wiki 截图
+#    5.5MB、前端源码、测试、Windows 脚本等），构建上下文从 ~30MB
+#    降到 ~2MB；
+# 2. Dockerfile 先 COPY 依赖清单再装依赖、最后 COPY 代码——代码
+#    改动可复用依赖层缓存，重建从全量装依赖（30-60s+）降到秒级。
+# ============================================================
+
+# --- 版本控制 / 元数据 ---
+.git
+.gitignore
+.gitattributes
+
+# --- 文档与截图（运行时完全不需要，wiki 目录 5.5MB）---
+wiki/
+*.md
+!README.md
+
+# --- 前端源码与构建产物源（镜像直接使用 app/templates 里已构建好的静态文件）---
+hajimiUI/node_modules/
+hajimiUI/dist/
+hajimiUI/
+
+# --- 测试与开发工具 ---
+tests/
+.pytest_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# --- Windows / 本地运行脚本（Linux 容器不需要）---
+*.ps1
+*.bat
+env.ps1
+Win*
+
+# --- Python 虚拟环境与工具缓存 ---
+.venv/
+venv/
+.uv-cache/
+
+# --- IDE / 编辑器 ---
+.vscode/
+.idea/
+*.swp
+
+# --- 其他运行时无关文件 ---
+Dockerfile
+.dockerignore
+docker-compose*

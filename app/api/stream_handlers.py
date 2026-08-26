@@ -254,6 +254,10 @@ async def process_stream_request(
     cache_key: str,
 ) -> StreamingResponse:
     """处理流式 API 请求。"""
+    # 在打开 SSE 流之前先做一次消息格式校验：非法消息（如错误 role）
+    # 若留到生成器内部才暴露，此时 http.response.start 已发出，客户端
+    # 只能看到连接中断；提前校验则能返回标准的 400 JSON 错误。
+    prepare_request_messages(chat_request)
     return StreamingResponse(
         stream_response_generator(
             chat_request,

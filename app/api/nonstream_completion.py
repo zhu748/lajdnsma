@@ -8,7 +8,6 @@ from app.utils.gemini_response_processing import (
     finalize_gemini_response,
     select_safety_settings,
 )
-from app.utils.logging import log
 
 
 async def _run_nonstream_completion(
@@ -22,7 +21,6 @@ async def _run_nonstream_completion(
     cache_key: str,
     *,
     use_shield: bool = False,
-    keepalive_interval: float | None = None,
 ):
     gemini_client = GeminiClient(current_api_key)
     gemini_task = asyncio.create_task(
@@ -37,14 +35,14 @@ async def _run_nonstream_completion(
     )
 
     awaited_task = asyncio.shield(gemini_task) if use_shield else gemini_task
-    keepalive_task = None
-    if keepalive_interval is not None:
-        keepalive_task = asyncio.create_task(send_keepalive_messages(keepalive_interval))
 
+    # Cleanup: 此处曾为每个请求创建一个 "keepalive" 后台任务，但该任务
+    # 的循环体只有 asyncio.sleep —— 不发送任何字节，纯空转。真正的
+    # keepalive 由 nonstream_handlers.process_nonstream_with_keepalive_stream
+    # 的流式生成器（周期性 yield "\n"）实现，与此处无关。空转任务连同
+    # 其取消/泄漏防护逻辑一并删除。
     try:
         response_content = await awaited_task
-        if keepalive_task is not None:
-            keepalive_task.cancel()
         return await finalize_gemini_response(
             response_content,
             api_key=current_api_key,
@@ -54,27 +52,18 @@ async def _run_nonstream_completion(
             cache_key=cache_key,
         )
     except Exception as e:
-        if keepalive_task is not None:
-            keepalive_task.cancel()
         handle_gemini_error(e, current_api_key)
         return "error"
     except BaseException:
         # Hardening: `asyncio.CancelledError` is a BaseException (not
         # a subclass of Exception), so the `except Exception` block
-        # above doesn't catch it.  Without this block, a client
-        # disconnect during a shielded non-stream call would leak
-        # the keepalive_task forever (it would outlive the request
-        # and run indefinitely, slowly leaking memory per cancelled
-        # request).
-        if keepalive_task is not None:
-            keepalive_task.cancel()
-        # Also cancel the underlying gemini_task when the client
-        # disconnects mid-shield — `asyncio.shield` would otherwise
-        # keep it alive, billing upstream tokens for a response the
-        # client will never receive.  (Tradeoff: this means we lose
+        # above doesn't catch it.  Cancel the underlying gemini_task
+        # when the client disconnects mid-shield — `asyncio.shield` would
+        # otherwise keep it alive, billing upstream tokens for a response
+        # the client will never receive.  (Tradeoff: this means we lose
         # the cache-fill benefit of shielded runs when the client
-        # disconnects, but in practice the leaked-task leak was a
-        # bigger problem than cache misses.)
+        # disconnects, but in practice the leaked task was a bigger
+        # problem than cache misses.)
         gemini_task.cancel()
         raise
 
@@ -113,6 +102,10 @@ async def process_nonstream_request_with_keepalive(
     cache_key: str,
     keepalive_interval: float = 30.0,
 ):
+    # 兼容签名：keepalive_interval 由 build_nonstream_task 透传，但实际
+    # 的 keepalive 行为在流式包装层实现，此参数已不使用（保留以避免
+    # 波及全部调用方）。
+    _ = keepalive_interval
     return await _run_nonstream_completion(
         chat_request,
         contents,
@@ -122,22 +115,7 @@ async def process_nonstream_request_with_keepalive(
         safety_settings,
         safety_settings_g2,
         cache_key,
-        keepalive_interval=keepalive_interval,
     )
-
-
-async def send_keepalive_messages(interval: float):
-    try:
-        while True:
-            await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        pass
-    except Exception as e:
-        log(
-            "error",
-            f"keepalive task error: {str(e)}",
-            extra={"request_type": "non-stream", "keepalive": True},
-        )
 
 
 def build_nonstream_task(

@@ -1,4 +1,5 @@
 import time
+import json
 import xxhash
 import asyncio
 from typing import Dict, Any, Optional, Tuple
@@ -37,20 +38,6 @@ class ResponseCacheManager:
         self.max_entries = max_entries  # 总条目数限制
         self.cur_cache_num = 0  # 当前条目数
         self.lock = asyncio.Lock()  # Added lock
-
-    async def get(self, cache_key: str) -> Tuple[Optional[Any], bool]:  # Made async
-        """获取指定键的第一个有效缓存项（不删除）"""
-        now = time.time()
-        async with self.lock:
-            if cache_key in self.cache:
-                cache_deque = self.cache[cache_key]
-                # 查找第一个未过期的项，且不删除
-                for item in cache_deque:
-                    if now < item.get("expiry_time", 0):
-                        response = item.get("response", None)
-                        return response, True
-
-            return None, False
 
     async def get_and_remove(self, cache_key: str) -> Tuple[Optional[Any], bool]:
         """获取并删除指定键的第一个有效缓存项。"""
@@ -248,6 +235,29 @@ def generate_cache_key(
 
     # 1. 哈希模型名称
     h.update(chat_request.model.encode("utf-8", errors="surrogateescape"))
+
+    # 1.5 哈希工具定义。
+    # Correctness: tools 不属于消息历史，旧的键计算只哈希模型 + 最近 N
+    # 条消息 —— 同模型、同最近 6 条消息但 tools 不同的两个请求会共享
+    # 缓存键，第二个请求可能拿到第一个请求（不同工具配置）的缓存答案
+    # （默认 CALCULATE_CACHE_ENTRIES=6 截断时尤为严重）。规范化序列化后
+    # 全量哈希，确保不同工具集的请求不会串扰。
+    tools = None
+    if is_gemini:
+        payload = getattr(chat_request, "payload", None)
+        tools = getattr(payload, "tools", None)
+    else:
+        tools = getattr(chat_request, "tools", None)
+    if tools:
+        try:
+            h.update(b"tools:")
+            h.update(
+                json.dumps(
+                    tools, sort_keys=True, ensure_ascii=False, default=str
+                ).encode("utf-8", errors="surrogateescape")
+            )
+        except (TypeError, ValueError):
+            h.update(b"tools:unserializable")
 
     if last_n_messages <= 0:
         # 如果不考虑消息，直接返回基于模型的哈希

@@ -15,11 +15,10 @@ active_requests_manager = None
 safety_settings = None
 safety_settings_g2 = None
 current_api_key = None
-FAKE_STREAMING = None
-FAKE_STREAMING_INTERVAL = None
-PASSWORD = None
-MAX_REQUESTS_PER_MINUTE = None
-MAX_REQUESTS_PER_DAY_PER_IP = None
+# Cleanup: 曾有 FAKE_STREAMING / FAKE_STREAMING_INTERVAL / PASSWORD /
+# MAX_REQUESTS_PER_MINUTE / MAX_REQUESTS_PER_DAY_PER_IP 五个全局快照
+# 变量，但全项目只写不读（各处实际都是实时读 settings.*），
+# 属于误导后来者的死代码，已连同 init_runtime 的对应参数一并删除。
 
 
 def init_runtime(
@@ -29,16 +28,9 @@ def init_runtime(
     _safety_settings,
     _safety_settings_g2,
     _current_api_key,
-    _fake_streaming,
-    _fake_streaming_interval,
-    _password,
-    _max_requests_per_minute,
-    _max_requests_per_day_per_ip,
 ):
     global key_manager, response_cache_manager, active_requests_manager
     global safety_settings, safety_settings_g2, current_api_key
-    global FAKE_STREAMING, FAKE_STREAMING_INTERVAL
-    global PASSWORD, MAX_REQUESTS_PER_MINUTE, MAX_REQUESTS_PER_DAY_PER_IP
 
     key_manager = _key_manager
     response_cache_manager = _response_cache_manager
@@ -46,11 +38,6 @@ def init_runtime(
     safety_settings = _safety_settings
     safety_settings_g2 = _safety_settings_g2
     current_api_key = _current_api_key
-    FAKE_STREAMING = _fake_streaming
-    FAKE_STREAMING_INTERVAL = _fake_streaming_interval
-    PASSWORD = _password
-    MAX_REQUESTS_PER_MINUTE = _max_requests_per_minute
-    MAX_REQUESTS_PER_DAY_PER_IP = _max_requests_per_day_per_ip
 
 
 async def verify_user_agent(request: Request):
@@ -62,6 +49,23 @@ async def verify_user_agent(request: Request):
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not allowed client",
         )
+
+
+def _single_chunk_response(payload: str) -> StreamingResponse:
+    """Build a StreamingResponse that sends `payload` as ONE chunk.
+
+    Perf fix: passing a raw `str` to StreamingResponse makes Starlette
+    fall back to `iterate_in_threadpool(content)`, which iterates the
+    string **character by character** — a 4 KB cached SSE payload turned
+    into ~4000 separate ASGI sends (in a worker thread!), right on the
+    cache-hit path that is supposed to be the fastest.  Wrapping the
+    payload in an async generator yields it as a single chunk.
+    """
+    return StreamingResponse(_one_shot(payload), media_type="text/event-stream")
+
+
+async def _one_shot(payload: str):
+    yield payload
 
 
 async def get_cache(cache_key, is_stream: bool, is_gemini=False):
@@ -78,15 +82,12 @@ async def get_cache(cache_key, is_stream: bool, is_gemini=False):
         if is_gemini:
             if is_stream:
                 payload = ensure_gemini_timing_fields(cached_response.data)
-                data = sse_data(payload)
-                return StreamingResponse(data, media_type="text/event-stream")
+                return _single_chunk_response(sse_data(payload))
             return ensure_gemini_timing_fields(cached_response.data)
 
         if is_stream:
             chunk = openAI_from_Gemini(cached_response, stream=True)
-            return StreamingResponse(
-                f"{chunk}{sse_done()}", media_type="text/event-stream"
-            )
+            return _single_chunk_response(f"{chunk}{sse_done()}")
         return openAI_from_Gemini(cached_response, stream=False)
 
     return None

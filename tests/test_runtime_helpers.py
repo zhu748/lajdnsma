@@ -74,7 +74,11 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
         response = await module.get_cache("cache-key", is_stream=True, is_gemini=False)
 
         self.assertEqual(response.media_type, "text/event-stream")
-        self.assertEqual(response.body_iterator, "data: openai\n\ndata: [DONE]\n\n")
+        # Perf fix: body_iterator 现在是异步生成器（发送单个 chunk），
+        # 而不是原始字符串（Starlette 会逐字符发送）。消费生成器并
+        # 断言拼接后的完整 payload。
+        chunks = [chunk async for chunk in response.body_iterator]
+        self.assertEqual("".join(chunks), "data: openai\n\ndata: [DONE]\n\n")
 
     async def test_route_runtime_cache_gemini_adds_timing(self):
         fake_fastapi = types.ModuleType("fastapi")
@@ -181,7 +185,11 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
         response = await module.get_cache("cache-key", is_stream=True, is_gemini=True)
 
         self.assertEqual(response.media_type, "text/event-stream")
-        self.assertEqual(response.body_iterator, "data: {'ok': True, 'createTime': 'now'}\n\n")
+        # 同上：消费异步生成器验证完整 payload
+        chunks = [chunk async for chunk in response.body_iterator]
+        self.assertEqual(
+            "".join(chunks), "data: {'ok': True, 'createTime': 'now'}\n\n"
+        )
 
     async def test_empty_response_helpers(self):
         fake_error_response = types.ModuleType("app.utils.error_response")

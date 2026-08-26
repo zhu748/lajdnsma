@@ -346,5 +346,23 @@ class GeminiSchemaTestCase(unittest.TestCase):
         )
 
 
+    def test_convert_messages_invalid_role_raises_value_error(self):
+        """R2-M7 回归：非法 role 必须抛 ValueError（旧实现返回单值 errors
+        列表，调用方按二元组解包 —— 1 个错误时 ValueError 解包失败变 500，
+        恰好 2 个错误时错误字符串被当作 contents 发给上游）。"""
+        module = load_gemini_module()
+        client = module.GeminiClient("test-key")
+
+        with self.assertRaises(ValueError) as ctx:
+            client.convert_messages(
+                [
+                    {"role": "user", "content": "hi"},
+                    {"role": "intruder", "content": "bad role"},
+                ],
+                use_system_prompt=True,
+            )
+        self.assertIn("Invalid role", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

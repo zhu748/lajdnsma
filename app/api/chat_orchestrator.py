@@ -1,3 +1,5 @@
+from fastapi import HTTPException, status
+
 import app.config.settings as settings
 from app.api.orchestration_helpers import (
     await_process_task_result,
@@ -32,6 +34,18 @@ async def handle_aistudio_chat_completion(
     processors.
     """
     is_gemini = is_gemini_request(request)
+
+    # Correctness: AIRequest.payload 是 Optional（schemas.py），而
+    # GeminiClient._convert_request_data 在 format_type == "gemini" 且
+    # payload 为 None 时 data 永不赋值即被使用 → UnboundLocalError，被
+    # 重试循环当作上游失败处理，白白烧完所有 key 后返回误导性 500。
+    # 在任务创建前直接拒绝（400），既避免崩溃也避免无意义重试风暴。
+    if is_gemini and getattr(request, "payload", None) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Gemini-format request requires a `payload` field",
+        )
+
     cache_key = build_request_cache_key(request, is_gemini=is_gemini)
 
     await protect_from_abuse(

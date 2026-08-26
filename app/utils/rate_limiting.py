@@ -10,8 +10,21 @@ rate_limit_lock = asyncio.Lock()
 # would accumulate millions of stale entries.  We now periodically
 # sweep expired entries.  Run the sweep roughly every 5 minutes
 # (every 300 s) and only on the call path (no background thread).
+#
+# Bug fix: the old sweep used a flat 90 s cutoff for EVERY entry,
+# which meant day buckets (86 400 s window) were deleted after just
+# 90 seconds of inactivity — resetting that IP's daily counter and
+# making MAX_REQUESTS_PER_DAY_PER_IP effectively a 90-second quota.
+# Entries now carry their own TTL so each bucket type expires on its
+# own schedule.
 _last_sweep_ts = 0
 _SWEEP_INTERVAL_S = 300
+
+# TTLs for each bucket type.  Minute buckets only need to outlive
+# their 60 s window; day buckets must survive their full 86 400 s
+# window so an IP cannot reset its daily quota by idling.
+_MINUTE_TTL_S = 90
+_DAY_TTL_S = 86400 + 300
 
 
 async def _maybe_sweep_expired(now: int) -> None:
@@ -25,13 +38,11 @@ async def _maybe_sweep_expired(now: int) -> None:
         return
     _last_sweep_ts = now
     # Identify expired keys without mutating the dict while iterating.
+    # Each entry is (count, ts, ttl); expire per-entry so day buckets
+    # live for their full daily window.
     expired_keys = []
-    for key, (_count, ts) in rate_limit_data.items():
-        # Entries are either minute-bucketed (expire after 60s) or
-        # day-bucketed (expire after 86400s).  We use a conservative
-        # 90s cutoff which removes minute buckets quickly and keeps
-        # day buckets around for their full useful lifetime.
-        if now - ts > 90:
+    for key, (_count, ts, ttl) in rate_limit_data.items():
+        if now - ts > ttl:
             expired_keys.append(key)
     for key in expired_keys:
         rate_limit_data.pop(key, None)
@@ -52,20 +63,28 @@ async def protect_from_abuse(
     async with rate_limit_lock:
         await _maybe_sweep_expired(now)
 
-        minute_count, minute_timestamp = rate_limit_data.get(minute_key, (0, now))
+        # Bug fix: 第一轮 H4 将条目改为 (count, ts, ttl) 三元组时，此处
+        # 的解包仍按二元组 —— 任何聊天补全请求第一跳就抛
+        # "too many values to unpack"，所有 chat 请求 500。补齐解包维度
+        # 并加回归测试（protect_from_abuse 全路径）。
+        minute_count, minute_timestamp, _minute_ttl = rate_limit_data.get(
+            minute_key, (0, now, _MINUTE_TTL_S)
+        )
 
         if now - minute_timestamp >= 60:
             minute_count = 0
             minute_timestamp = now
         minute_count += 1
-        rate_limit_data[minute_key] = (minute_count, minute_timestamp)
+        rate_limit_data[minute_key] = (minute_count, minute_timestamp, _MINUTE_TTL_S)
 
-        day_count, day_timestamp = rate_limit_data.get(day_key, (0, now))
+        day_count, day_timestamp, _day_ttl = rate_limit_data.get(
+            day_key, (0, now, _DAY_TTL_S)
+        )
         if now - day_timestamp >= 86400:
             day_count = 0
             day_timestamp = now
         day_count += 1
-        rate_limit_data[day_key] = (day_count, day_timestamp)
+        rate_limit_data[day_key] = (day_count, day_timestamp, _DAY_TTL_S)
 
     if minute_count > max_requests_per_minute:
         raise HTTPException(

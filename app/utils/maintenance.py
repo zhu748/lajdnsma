@@ -57,37 +57,14 @@ def schedule_cache_cleanup(response_cache_manager, active_requests_manager):
         active_requests_manager.clean_long_running, "interval", minutes=5, args=[300]
     )
 
-    # 使用同步包装器调用异步函数
-    def run_cleanup():
-        try:
-            # 创建新的事件循环而不是获取现有的
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-            # 在这个新循环中运行清理操作
-            loop.run_until_complete(api_stats_manager.cleanup())
-        except Exception as e:
-            log("error", f"清理统计数据时出错: {str(e)}")
-        finally:
-            # 确保关闭循环以释放资源
-            loop.close()
-
-    # 添加同步的清理任务
-    _scheduler.add_job(run_cleanup, "interval", minutes=5)
-
-    # 同样修改定时重置函数
-    def run_reset():
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(api_call_stats_clean())
-        except Exception as e:
-            log("error", f"重置统计数据时出错: {str(e)}")
-        finally:
-            loop.close()
+    # Cleanup: 旧实现用「新建 event loop 的同步包装器」来跑这两个协程
+    # ——但 AsyncIOScheduler 本身就在主事件循环上调度，原生支持直接
+    # 注册协程函数。每 5 分钟/每天白建一个 event loop 既慢又容易踩
+    # 「loop 与共享资源绑定的循环不一致」的坑。改为直接注册。
+    _scheduler.add_job(api_stats_manager.cleanup, "interval", minutes=5)
 
     _scheduler.add_job(check_version, "interval", hours=4)
-    _scheduler.add_job(run_reset, "cron", hour=15, minute=0)
+    _scheduler.add_job(api_call_stats_clean, "cron", hour=15, minute=0)
     _scheduler.start()
     return _scheduler
 

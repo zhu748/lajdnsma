@@ -1,13 +1,18 @@
 import json
 from typing import Any, Dict, List
 
-from app.utils.errors import responses_error_response
+# Cleanup: responses_error_response 导入未使用，已删除。
 from app.utils.protocol_common import (
     _ensure_list,
     _extract_openai_usage,
     _now_ts,
     _openai_finish_reason_to_claude_stop_reason,
     _gen_anthropic_thinking_signature,
+)
+from app.utils.stealth import (
+    gen_anthropic_message_id,
+    gen_openai_message_id,
+    gen_openai_response_id,
 )
 
 
@@ -25,7 +30,7 @@ def openai_chat_to_response_api(
         output_items.append(
             {
                 "type": "message",
-                "id": f"msg_{chat_response.get('id', 'response')}",
+                "id": gen_openai_message_id(),
                 "status": "completed",
                 "role": "assistant",
                 "content": [
@@ -56,7 +61,10 @@ def openai_chat_to_response_api(
     # behaviour and was a fingerprint).
     parallel_tool_calls_echo = request_payload.get("parallel_tool_calls")
     return {
-        "id": f"resp_{chat_response.get('id', _now_ts())}",
+        # Protocol: 官方 Responses API 的响应 id 形态是 resp_ + 30 位随机
+        # 字符；旧实现的 f"resp_{chat_response['id']}" 会产生
+        # "resp_chatcmpl-xxx" 双前缀，形态与官方不符且是可检测指纹。
+        "id": gen_openai_response_id(),
         "object": "response",
         "created_at": chat_response.get("created", _now_ts()),
         "status": "completed",
@@ -148,7 +156,10 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
     )
 
     return {
-        "id": f"msg_{chat_response.get('id', _now_ts())}",
+        # Protocol: 官方 Anthropic 消息 id 形态是 msg_01 + 24 位随机字符；
+        # 旧实现的 f"msg_{chat_response['id']}" 会产生 "msg_chatcmpl-xxx"
+        # 双前缀，形态与官方不符。
+        "id": gen_anthropic_message_id(),
         "type": "message",
         "role": "assistant",
         "model": chat_response.get("model"),

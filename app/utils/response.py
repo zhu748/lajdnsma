@@ -101,19 +101,27 @@ def include_reasoning_for_request(chat_request):
     return bool(getattr(chat_request, "enable_thinking", True))
 
 
-def openAI_from_Gemini(response, stream=True, include_reasoning=True):
+def openAI_from_Gemini(
+    response, stream=True, include_reasoning=True, chunk_id=None, created=None
+):
     """
     根据 GeminiResponseWrapper 对象创建 OpenAI 标准响应对象块。
 
     Args:
         response: GeminiResponseWrapper 对象，包含响应数据。
+        stream: 是否为流式块。
+        include_reasoning: 是否携带 reasoning_content。
+        chunk_id: 可选。同一条流式补全共享的 id —— OpenAI 协议规定一次
+            completion 的所有 chunk 使用相同 id/created；逐 chunk 生成新
+            id 会导致按 id 聚合的客户端把响应拆散，也是明显的代理指纹。
+        created: 可选。与 chunk_id 配套的共享创建时间戳。
 
     Returns:
         OpenAI 标准响应
     """
-    now_time = int(time.time())
+    now_time = int(time.time()) if created is None else created
     # Strong random chunk id (replaces chatcmpl-{ts}).
-    chunk_id = gen_openai_chunk_id()
+    chunk_id = gen_openai_chunk_id() if chunk_id is None else chunk_id
     content_chunk = {}
     formatted_chunk = {
         "id": chunk_id,
