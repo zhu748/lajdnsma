@@ -64,6 +64,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     enableVertexExpress: false,
     vertexExpressApiKey: false,
     googleCredentialsJson: false,
+    keyRotationStrategy: 'fill',
   })
 
   const apiKeyStats = ref([])
@@ -186,6 +187,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
       responsesModelAliases: data.responses_model_aliases || {},
       claudeDefaultModel: data.claude_default_model || '',
       claudeModelAliases: data.claude_model_aliases || {},
+      keyRotationStrategy: data.key_rotation_strategy || 'fill',
     }
 
     if (data.api_key_stats) {
