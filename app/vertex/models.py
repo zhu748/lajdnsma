@@ -35,7 +35,9 @@ class OpenAIRequest(BaseModel):
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     seed: Optional[int] = None
-    logprobs: Optional[int] = None
+    # Spec fix: OpenAI defines `logprobs` as a boolean flag (the int
+    # counterpart is `top_logprobs`); Pydantic previously coerced it as int.
+    logprobs: Optional[bool] = None
     response_logprobs: Optional[bool] = None
     n: Optional[int] = None  # Maps to candidate_count in Vertex AI
 

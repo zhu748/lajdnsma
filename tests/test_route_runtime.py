@@ -27,6 +27,12 @@ def load_route_runtime():
     fake_settings = types.ModuleType("app.config.settings")
     fake_settings.WHITELIST_USER_AGENT = {"claude-code*"}
 
+    # 隔离修复（round-3）：补上父包 stub，避免中间包缺位时
+    # `import app.config.settings as settings` 解析失败（详见
+    # tests/conftest.py 的说明）。
+    fake_config_pkg = types.ModuleType("app.config")
+    fake_config_pkg.__path__ = []
+
     fake_utils = types.ModuleType("app.utils")
     fake_utils.log = lambda *args, **kwargs: None
 
@@ -40,6 +46,7 @@ def load_route_runtime():
 
     sys.modules["fastapi"] = fake_fastapi
     sys.modules["fastapi.responses"] = fake_fastapi_responses
+    sys.modules["app.config"] = fake_config_pkg
     sys.modules["app.config.settings"] = fake_settings
     sys.modules["app.utils"] = fake_utils
     sys.modules["app.utils.response"] = fake_response

@@ -14,6 +14,12 @@ from google.genai import types
 from google import genai
 import openai
 from app.vertex.credentials_manager import _refresh_auth, CredentialManager
+# Perf/anti-fingerprint fix: reuse the per-project genai client pool
+# instead of re-creating a client (RSA parse + TLS renegotiation) on
+# every SA-credential request.  The pool already exists in
+# vertex_ai_init for exactly this purpose — the main chat path simply
+# wasn't using it.
+from app.vertex.vertex_ai_init import _get_client_from_pool
 
 # Local module imports
 from app.vertex.models import OpenAIRequest
@@ -50,6 +56,12 @@ _openai_client_cache: Dict[tuple, openai.AsyncOpenAI] = {}
 _openai_client_cache_lock = asyncio.Lock()
 _MAX_CACHED_OPENAI_CLIENTS = 32
 
+# Resource fix: fire-and-forget tasks are only weakly referenced by the
+# event loop; if nothing else holds a reference the task can be garbage-
+# collected mid-flight ("Task was destroyed but it is pending"), leaking
+# the client it was supposed to close.  Hold strong references until done.
+_background_close_tasks: set = set()
+
 
 async def _close_client_quietly(client: openai.AsyncOpenAI) -> None:
     try:
@@ -85,7 +97,9 @@ async def _get_cached_openai_client(
         while len(_openai_client_cache) > _MAX_CACHED_OPENAI_CLIENTS:
             _old_key = next(iter(_openai_client_cache))
             _old_client = _openai_client_cache.pop(_old_key)
-            asyncio.create_task(_close_client_quietly(_old_client))
+            _close_task = asyncio.create_task(_close_client_quietly(_old_client))
+            _background_close_tasks.add(_close_task)
+            _close_task.add_done_callback(_background_close_tasks.discard)
         return client
 
 
@@ -299,20 +313,15 @@ async def chat_completions(
             )
 
             if rotated_credentials and rotated_project_id:
-                try:
-                    client_to_use = genai.Client(
-                        vertexai=True,
-                        credentials=rotated_credentials,
-                        project=rotated_project_id,
-                        location="global",
-                    )
-                    vertex_log(
-                        "info",
-                        f"INFO: Using SA credential for Gemini model {request.model} (project: {rotated_project_id})",
-                    )
-                except Exception as e:
-                    client_to_use = None  # Ensure it's None on failure
-                    error_msg = f"SA credential client initialization failed for Gemini model '{request.model}': {e}."
+                # Perf/anti-fingerprint fix: previously constructed a new
+                # genai.Client per request here, re-negotiating TLS (and
+                # re-parsing the RSA key) every time — the exact pattern
+                # the client pool in vertex_ai_init exists to prevent.
+                client_to_use = _get_client_from_pool(
+                    rotated_project_id, rotated_credentials, location="global"
+                )
+                if client_to_use is None:
+                    error_msg = f"SA credential client initialization failed for Gemini model '{request.model}'."
                     vertex_log("error", error_msg)
                     return JSONResponse(
                         status_code=500,
@@ -320,6 +329,10 @@ async def chat_completions(
                             500, error_msg, "server_error"
                         ),
                     )
+                vertex_log(
+                    "info",
+                    f"INFO: Using SA credential for Gemini model {request.model} (project: {rotated_project_id})",
+                )
             else:  # No SA credentials available for an SA model request
                 error_msg = f"Model '{request.model}' requires SA credentials for Gemini, but none are available or loaded."
                 vertex_log("error", error_msg)
@@ -376,7 +389,7 @@ async def chat_completions(
                 "info",
                 f"INFO: [OpenAI Direct Path] Using credentials for project: {rotated_project_id}",
             )
-            gcp_token = _refresh_auth(rotated_credentials)
+            gcp_token = await asyncio.to_thread(_refresh_auth, rotated_credentials)
 
             if not gcp_token:
                 error_msg = f"Failed to obtain valid GCP token for OpenAI client (Source: Credential Manager, Project: {rotated_project_id})."
@@ -1034,78 +1047,87 @@ async def openai_fake_stream_generator(
         return raw_response, reasoning_text, full_content_from_api
 
     temp_task_for_keepalive_check = asyncio.create_task(_openai_api_call_wrapper())
-    outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
-    # OpenAI streams share a single `id` and `created` across all
-    # chunks of the same response.  Previously the keepalive loop
-    # generated a new random id + new `created` per chunk — which is
-    # detectable.  We now use `response_id` and a frozen `created_ts`
-    # for the whole stream.
-    created_ts = int(time.time())
-    if outer_keep_alive_interval > 0:
-        while not temp_task_for_keepalive_check.done():
-            keep_alive_data = {
-                "id": response_id,
-                "object": "chat.completion.chunk",
-                "created": created_ts,
-                "model": request_obj.model,
-                "choices": [
-                    {"delta": {}, "index": 0, "finish_reason": None}
-                ],
-            }
-            yield f"data: {json.dumps(keep_alive_data)}\n\n"
-            jittered = outer_keep_alive_interval * random.uniform(0.75, 1.25)
-            await asyncio.sleep(jittered)
-
+    # Resource fix: if the client disconnects while keep-alive chunks
+    # are being yielded, this generator is closed at the `yield` below and
+    # the `await temp_task_for_keepalive_check` further down never runs —
+    # the upstream OpenAI request then runs to completion as an orphan,
+    # burning quota and the shared connection pool.  try/finally cancels
+    # it on every exit path (cancel on a finished task is a no-op).
     try:
-        (
-            full_api_response,
-            separated_reasoning_text,
-            separated_actual_content_text,
-        ) = await temp_task_for_keepalive_check
+        outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
+        # OpenAI streams share a single `id` and `created` across all
+        # chunks of the same response.  Previously the keepalive loop
+        # generated a new random id + new `created` per chunk — which is
+        # detectable.  We now use `response_id` and a frozen `created_ts`
+        # for the whole stream.
+        created_ts = int(time.time())
+        if outer_keep_alive_interval > 0:
+            while not temp_task_for_keepalive_check.done():
+                keep_alive_data = {
+                    "id": response_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": request_obj.model,
+                    "choices": [
+                        {"delta": {}, "index": 0, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(keep_alive_data)}\n\n"
+                jittered = outer_keep_alive_interval * random.uniform(0.75, 1.25)
+                await asyncio.sleep(jittered)
 
-        def _extract_openai_full_text(response: Any) -> str:
-            if (
-                response.choices
-                and response.choices[0].message
-                and response.choices[0].message.content is not None
+        try:
+            (
+                full_api_response,
+                separated_reasoning_text,
+                separated_actual_content_text,
+            ) = await temp_task_for_keepalive_check
+
+            def _extract_openai_full_text(response: Any) -> str:
+                if (
+                    response.choices
+                    and response.choices[0].message
+                    and response.choices[0].message.content is not None
+                ):
+                    return response.choices[0].message.content
+                return ""
+
+            def _is_openai_response_valid(response: Any) -> bool:
+                return bool(response.choices and response.choices[0].message is not None)
+
+            async for chunk in _base_fake_stream_engine(
+                api_call_task_creator=lambda: asyncio.create_task(
+                    asyncio.sleep(0, result=full_api_response)
+                ),
+                extract_text_from_response_func=_extract_openai_full_text,
+                is_valid_response_func=_is_openai_response_valid,
+                response_id=response_id,
+                sse_model_name=request_obj.model,
+                keep_alive_interval_seconds=0,
+                is_auto_attempt=is_auto_attempt,
+                reasoning_text_to_yield=separated_reasoning_text,
+                actual_content_text_to_yield=separated_actual_content_text,
             ):
-                return response.choices[0].message.content
-            return ""
+                yield chunk
 
-        def _is_openai_response_valid(response: Any) -> bool:
-            return bool(response.choices and response.choices[0].message is not None)
-
-        async for chunk in _base_fake_stream_engine(
-            api_call_task_creator=lambda: asyncio.create_task(
-                asyncio.sleep(0, result=full_api_response)
-            ),
-            extract_text_from_response_func=_extract_openai_full_text,
-            is_valid_response_func=_is_openai_response_valid,
-            response_id=response_id,
-            sse_model_name=request_obj.model,
-            keep_alive_interval_seconds=0,
-            is_auto_attempt=is_auto_attempt,
-            reasoning_text_to_yield=separated_reasoning_text,
-            actual_content_text_to_yield=separated_actual_content_text,
-        ):
-            yield chunk
-
-    except Exception as e_outer:
-        # Hardening: previously embedded type(e).__name__ - str(e)
-        # into the SSE error message sent to the client.  Upstream
-        # exceptions often contain "Gemini API" / "Vertex" / internal
-        # gRPC text — leaking that this is a proxy.  We now log the
-        # full error internally and emit a neutral upstream-error
-        # message to the client.
-        vertex_log(
-            "error",
-            f"openai_fake_stream_generator outer error (internal only): {type(e_outer).__name__}: {e_outer}",
-        )
-        sse_err_msg_display = "Upstream service error during streaming."
-        err_resp_sse = create_openai_error_response(
-            500, sse_err_msg_display, "server_error"
-        )
-        json_payload_error = json.dumps(err_resp_sse)
-        if not is_auto_attempt:
-            yield f"data: {json_payload_error}\n\n"
-            yield "data: [DONE]\n\n"
+        except Exception as e_outer:
+            # Hardening: previously embedded type(e).__name__ - str(e)
+            # into the SSE error message sent to the client.  Upstream
+            # exceptions often contain "Gemini API" / "Vertex" / internal
+            # gRPC text — leaking that this is a proxy.  We now log the
+            # full error internally and emit a neutral upstream-error
+            # message to the client.
+            vertex_log(
+                "error",
+                f"openai_fake_stream_generator outer error (internal only): {type(e_outer).__name__}: {e_outer}",
+            )
+            sse_err_msg_display = "Upstream service error during streaming."
+            err_resp_sse = create_openai_error_response(
+                500, sse_err_msg_display, "server_error"
+            )
+            json_payload_error = json.dumps(err_resp_sse)
+            if not is_auto_attempt:
+                yield f"data: {json_payload_error}\n\n"
+                yield "data: [DONE]\n\n"
+    finally:
+        temp_task_for_keepalive_check.cancel()

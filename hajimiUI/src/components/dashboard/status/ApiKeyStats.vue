@@ -1,6 +1,6 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
-import { computed, ref } from 'vue'
+import { computed, ref, onUnmounted, watch } from 'vue'
 import ApiCallsChart from './ApiCallsChart.vue'
 
 const dashboardStore = useDashboardStore()
@@ -66,6 +66,21 @@ const testError = ref('')
 const testProgress = ref({ completed: 0, total: 0, valid: 0, invalid: 0, is_completed: false })
 const isTesting = ref(false)
 let testPollTimer = null
+// 连续失败计数：后端重启/任务丢失时 is_completed 永不到达，
+// 轮询必须自己设上限，否则每 1.5s 永久打接口。
+const MAX_POLL_FAILURES = 10
+let pollFailures = 0
+
+function stopPolling() {
+  if (testPollTimer) {
+    clearInterval(testPollTimer)
+    testPollTimer = null
+  }
+}
+
+// 卸载清理：切换页面/组件销毁时停掉轮询定时器（此前无清理，
+// 离开控制台后仍每 1.5s 请求一次）。
+onUnmounted(stopPolling)
 
 async function startTest() {
   testError.value = ''
@@ -94,19 +109,35 @@ async function startTest() {
 
 async function pollTestProgress() {
   try {
-    const pw = encodeURIComponent(dashboardStore.sessionPassword || testPassword.value)
-    const r = await fetch(`/api/test-api-keys/progress?password=${pw}`)
-    if (!r.ok) return
+    // 凭证只走 Authorization 头，不再拼 URL 查询串（查询串会进
+    // uvicorn access log 与反代日志）。
+    const r = await fetch('/api/test-api-keys/progress', {
+      headers: dashboardStore.authHeaders(),
+    })
+    if (!r.ok) {
+      // 非 200：连续 N 次后放弃轮询，避免后端重启后永久空转
+      if (++pollFailures >= MAX_POLL_FAILURES) {
+        stopPolling()
+        isTesting.value = false
+        testError.value = 'Progress polling failed repeatedly; test may have been interrupted'
+      }
+      return
+    }
+    pollFailures = 0
     const data = await r.json()
     testProgress.value = data
     if (data.is_completed) {
-      clearInterval(testPollTimer)
-      testPollTimer = null
+      stopPolling()
       isTesting.value = false
       await dashboardStore.fetchDashboardData()
     }
   } catch (e) {
-    console.error('poll progress:', e)
+    // 网络错误同样计入失败上限
+    if (++pollFailures >= MAX_POLL_FAILURES) {
+      stopPolling()
+      isTesting.value = false
+      testError.value = 'Progress polling failed repeatedly; test may have been interrupted'
+    }
   }
 }
 
@@ -189,6 +220,12 @@ const pageSize = 10
 const totalPages = computed(() =>
   Math.max(1, Math.ceil(dashboardStore.apiKeyStats.length / pageSize))
 )
+
+// 数据缩减（如 Clear invalid 删除无效 key）后钳制当前页码，
+// 否则停在超界页会显示假空态。
+watch(totalPages, (tp) => {
+  if (currentPage.value > tp) currentPage.value = tp
+})
 
 const pageRows = computed(() => {
   const start = (currentPage.value - 1) * pageSize

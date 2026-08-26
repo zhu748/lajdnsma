@@ -27,6 +27,14 @@ def load_request_helpers():
     fake_settings.CALCULATE_CACHE_ENTRIES = 3
     fake_settings.NONSTREAM_KEEPALIVE_ENABLED = False
 
+    # 隔离修复（round-3）：只 stub 叶子模块 app.config.settings 而不
+    # stub 父包 app.config 时，若会话里恰好没有缓存的 app.config
+    # （conftest 现在会在每个测试后清理 sys.modules），
+    # `import app.config.settings as settings` 会因中间包缺失而
+    # ImportError。补上父包 stub（空 __path__ 即可，叶子已 stub）。
+    fake_config_pkg = types.ModuleType("app.config")
+    fake_config_pkg.__path__ = []
+
     fake_utils = types.ModuleType("app.utils")
     log_calls = []
 
@@ -40,6 +48,7 @@ def load_request_helpers():
     fake_utils.log = log
 
     sys.modules["fastapi"] = fake_fastapi
+    sys.modules["app.config"] = fake_config_pkg
     sys.modules["app.config.settings"] = fake_settings
     sys.modules["app.utils"] = fake_utils
 

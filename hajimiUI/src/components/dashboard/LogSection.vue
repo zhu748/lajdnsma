@@ -6,7 +6,6 @@ const dashboardStore = useDashboardStore()
 const currentFilter = ref('ALL')
 const logContainer = ref(null)
 const isFirstLoad = ref(true)
-const userScrolled = ref(false)
 
 const filters = ['ALL', 'INFO', 'WARNING', 'ERROR']
 
@@ -24,10 +23,6 @@ function scrollToBottom() {
   if (logContainer.value) {
     logContainer.value.scrollTop = logContainer.value.scrollHeight
   }
-}
-
-function handleScroll() {
-  userScrolled.value = true
 }
 
 const filteredLogs = computed(() => {
@@ -65,9 +60,6 @@ watch(currentFilter, async () => {
 onMounted(() => {
   if (dashboardStore.logs.length > 0) {
     nextTick(scrollToBottom)
-  }
-  if (logContainer.value) {
-    logContainer.value.addEventListener('scroll', handleScroll)
   }
 })
 </script>

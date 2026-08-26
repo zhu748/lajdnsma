@@ -50,32 +50,49 @@ def load_chat_orchestrator():
     fake_error_handling = types.ModuleType("app.utils.error_handling")
     fake_error_handling.sanitize_string = lambda text: text
 
-    sys.modules.update(
-        {
-            "app": fake_app,
-            "app.api": fake_api_pkg,
-            "fastapi": fake_fastapi,
-            "app.config.settings": fake_settings,
-            "app.config": fake_config_pkg,
-            "app.utils": fake_utils,
-            "app.utils.error_handling": fake_error_handling,
-        }
-    )
+    stubbed = {
+        "app": fake_app,
+        "app.api": fake_api_pkg,
+        "fastapi": fake_fastapi,
+        "app.config.settings": fake_settings,
+        "app.config": fake_config_pkg,
+        "app.utils": fake_utils,
+        "app.utils.error_handling": fake_error_handling,
+    }
 
-    for name in [
-        "app.api.request_helpers",
-        "app.api.orchestration_helpers",
-        "app.api.chat_orchestrator",
-    ]:
-        sys.modules.pop(name, None)
+    # 隔离（round-3 修复）：原先 sys.modules.update(...) 安装假桩后从不
+    # 恢复，假 fastapi/app.utils 泄漏到同进程后续测试 —— 任何之后才
+    # import 真实模块的测试（如 round-3 的 app.vertex.api_helpers 导入
+    # 检查）都会拿到缺属性的假桩而 ImportError。这里快照-恢复：
+    # exec 前记录被替换的原值与 sys.modules 键集合，exec 后还原。
+    _MISSING = object()
+    saved = {name: sys.modules.get(name, _MISSING) for name in stubbed}
+    before_keys = set(sys.modules.keys())
+    sys.modules.update(stubbed)
+    try:
+        for name in [
+            "app.api.request_helpers",
+            "app.api.orchestration_helpers",
+            "app.api.chat_orchestrator",
+        ]:
+            sys.modules.pop(name, None)
 
-    spec = importlib.util.spec_from_file_location(
-        "app.api.chat_orchestrator",
-        ROOT / "app/api/chat_orchestrator.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
+        spec = importlib.util.spec_from_file_location(
+            "app.api.chat_orchestrator",
+            ROOT / "app/api/chat_orchestrator.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+    finally:
+        # 移除 exec 期间新注册的模块（假桩依赖链上的 request_helpers 等）
+        for name in set(sys.modules.keys()) - before_keys - set(stubbed):
+            sys.modules.pop(name, None)
+        for name, prev in saved.items():
+            if prev is _MISSING:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = prev
     module._test_state = types.SimpleNamespace(
         settings=fake_settings,
         protect_calls=protect_calls,

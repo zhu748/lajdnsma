@@ -34,7 +34,7 @@
 ---
 5.  **配置应用信息**
     *   **Application Name:** 填写一个应用名称（必须是**英文**，且以**小写字母**开头）。
-    *   **Image Name:** 输入镜像地址 `ghcr.io/wyeeeee/hajimi:latest`
+    *   **Image Name:** 输入镜像地址 `ghcr.io/zhu748/lajdnsma:latest`（本仓库 GitHub Actions 自动构建）
     * 配置端口为7860并打开
     ![填写应用信息](./img/claw/11.png)
 > 在日本区域，创建容器后绑定自定义域名有概率失败，只能 http 访问。请删除容器后重新创建并绑定，或者使用新加坡的容器。参见 https://question.run.claw.cloud/questions/10010000000000298
@@ -44,7 +44,7 @@
     ![环境变量部分](./img/claw/6.png)
 ---
 7.  **填写环境变量**
-    从https://github.com/wyeeeee/hajimi/releases/tag/settings 下载settings.txt
+    参考仓库根目录的 `.env.example` 获取全部可用变量
     按照注释配置相应内容，您可以保留这个txt作为本地备份<br>
     注意：大部分设置都拥有默认值，如果您不理解设置内容，只需要填写拥有的gemini key到对应位置即可
     ![配置文件](./img/claw/settings.png)

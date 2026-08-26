@@ -237,11 +237,20 @@ class APIKeyManager:
                     usage = 0
                 if usage >= settings.API_KEY_DAILY_LIMIT:
                     # Key exhausted its daily quota.  Pop and try next.
-                    log(
-                        "info",
+                    #
+                    # Bug fix: this branch previously called log(...) which
+                    # was never imported in this module — the NameError
+                    # replaced the intended "advance to next key" flow, so
+                    # the sticky key stayed on top of the stack and EVERY
+                    # subsequent get_available_key() crashed again (all
+                    # chat/embedding requests 500 until the daily counter
+                    # reset).  Uses the module's own logger style instead.
+                    log_msg = format_log_message(
+                        "INFO",
                         f"key#{hash(candidate) & 0xFFFFFF:06x} reached daily limit "
                         f"({usage}/{settings.API_KEY_DAILY_LIMIT}), advancing to next key (fill mode)",
                     )
+                    logger.info(log_msg)
                     self.key_stack.pop()
                     continue
 

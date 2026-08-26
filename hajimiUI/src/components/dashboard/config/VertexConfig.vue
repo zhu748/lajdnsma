@@ -12,14 +12,22 @@ const localConfig = reactive({
 })
 
 const populated = ref(false)
+// 快照式脏检查基线：Vertex 凭证字段（vertexExpressApiKey /
+// googleCredentialsJson）后端只回传「是否已配置」的布尔值，回填到
+// 输入框会把字面量 "true" 写进 v-model——一旦用户碰过输入框就会把
+// 字符串 "true" POST 成新凭证。现在凭证字段恒初始化为 ''（占位符
+// 风格），脏检查改为对比「填充时快照」而非 store 值，避免空输入框
+// 被误判为已修改而在每次 Save 时把已存凭证清空。
+let initialConfig = null
 watch(
   () => dashboardStore.isConfigLoaded,
   (loaded) => {
     if (loaded && !populated.value) {
       localConfig.fakeStreaming = dashboardStore.config.fakeStreaming
       localConfig.enableVertexExpress = dashboardStore.config.enableVertexExpress
-      localConfig.vertexExpressApiKey = dashboardStore.config.vertexExpressApiKey || ''
-      localConfig.googleCredentialsJson = dashboardStore.config.googleCredentialsJson || ''
+      localConfig.vertexExpressApiKey = ''
+      localConfig.googleCredentialsJson = ''
+      initialConfig = { ...localConfig }
       populated.value = true
     }
   },
@@ -41,9 +49,9 @@ async function saveAll() {
   successMsg.value = ''
   try {
     for (const key of Object.keys(localConfig)) {
-      if (localConfig[key] !== dashboardStore.config[key]) {
+      if (localConfig[key] !== initialConfig[key]) {
         await dashboardStore.updateConfig(key, localConfig[key], password.value)
-        dashboardStore.config[key] = localConfig[key]
+        initialConfig[key] = localConfig[key]
       }
     }
     successMsg.value = 'Saved'

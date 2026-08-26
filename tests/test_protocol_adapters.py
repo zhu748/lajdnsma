@@ -7,6 +7,11 @@ import types
 
 
 fake_app = types.ModuleType("app")
+# 隔离修复（round-3）：假 app 包必须携带真实 __path__，否则它一旦
+# 经 sys.modules.setdefault("app", ...) 进入会话，后续任何
+# `import app.vertex...` / `import app.config...` 都会因“'app' is not
+# a package”而失败。指向真实目录后，未被 stub 的子模块仍可正常解析。
+fake_app.__path__ = [str(Path(__file__).resolve().parents[1] / "app")]
 fake_models = types.ModuleType("app.models")
 fake_schemas = types.ModuleType("app.models.schemas")
 fake_utils = types.ModuleType("app.utils")

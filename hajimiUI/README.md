@@ -22,8 +22,22 @@ npm install
 npm run dev
 ```
 
-### Compile and Minify for Production
+### Build for Production (serves the backend)
 
 ```sh
 npm run build
 ```
+
+`build` runs `build.js`, which:
+
+1. runs `vite build` with `outDir` pointing at `../app/templates/assets`;
+2. deletes the stray `index.html` vite emits into the assets dir;
+3. renames every asset to a random 32-hex name (anti-fingerprint);
+4. writes a hand-rolled `../app/templates/index.html` referencing the new names.
+
+**The served UI is the committed build output in `app/templates/`** — after
+changing anything in `src/`, you MUST run `npm run build` and commit the
+updated `app/templates/` files, otherwise the deployment keeps serving the
+old UI. (`npm run build:app` is an alias kept for backwards compatibility;
+never run bare `vite build` — it wipes the assets dir with fixed-name output
+and leaves `index.html` pointing at deleted hashed files.)

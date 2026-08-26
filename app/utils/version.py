@@ -21,10 +21,16 @@ Hardening:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import app.config.settings as settings
 from app.utils.logging import log
 from app.utils.stealth import pick_user_agent
+
+# version.txt 位于仓库根目录；用 __file__ 相对定位而非 "./version.txt"，
+# 后者依赖进程 CWD（uvicorn 从其他目录启动时读不到，dashboard 会永远
+# 显示 0.0.0 —— 与 main.py 里 StaticFiles 的 BASE_DIR 修复同理）。
+_VERSION_FILE = Path(__file__).resolve().parents[2] / "version.txt"
 
 
 async def check_version() -> bool:
@@ -38,7 +44,7 @@ async def check_version() -> bool:
     # whether remote check is enabled, so the dashboard can still
     # display the local version.
     try:
-        with open("./version.txt", "r") as f:
+        with open(_VERSION_FILE, "r", encoding="utf-8") as f:
             version_line = f.read().strip()
             settings.version["local_version"] = (
                 version_line.split("=")[1] if "=" in version_line else "0.0.0"

@@ -6,6 +6,7 @@ from app.vertex.auth import get_api_key, validate_api_key
 from app.vertex.model_loader import (
     get_vertex_models,
     get_vertex_express_models,
+    get_models_config,
     refresh_models_config_cache,
 )
 import app.vertex.config as app_config
@@ -145,7 +146,14 @@ async def refresh_models(credentials: HTTPAuthorizationCredentials = Depends(sec
 
 @router.get("/v1/models")
 async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_key)):
-    await refresh_models_config_cache()
+    # Perf fix: previously forced `refresh_models_config_cache()` on EVERY
+    # request — an outbound HTTP call (up to 3 retries with backoff when the
+    # config host is slow) executed while holding the module-wide cache
+    # lock, stalling every concurrent model-list request and the chat
+    # path's model validation.  We now read the cache (fetching only when
+    # empty); the explicit /models/refresh endpoint remains for forced
+    # refreshes, and startup pre-warms the cache once.
+    await get_models_config()
 
     OPENAI_DIRECT_SUFFIX = "-openai"
     EXPERIMENTAL_MARKER = "-exp-"

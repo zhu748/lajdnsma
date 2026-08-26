@@ -96,12 +96,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
   applyDarkMode(isDarkMode.value)
 
   // ---------- Auth helper ----------
-  // Appends ?password=... to GET endpoints that now require auth.
-  function authQuery() {
-    if (!sessionPassword.value) return ''
-    return `?password=${encodeURIComponent(sessionPassword.value)}`
-  }
-
+  // 凭证只通过 Authorization 头传递。曾有一个 authQuery() 把密码拼进
+  // ?password=... 查询串（与 Header 双重发送）——查询串会完整落入
+  // uvicorn access log 与反向代理日志，已删除；后端两种方式都接受。
   function authHeaders(extra = {}) {
     const h = { ...extra }
     if (sessionPassword.value) {
@@ -120,7 +117,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     isRefreshing.value = true
     lastError.value = ''
     try {
-      const response = await fetch(`/api/dashboard-data${authQuery()}`, {
+      const response = await fetch('/api/dashboard-data', {
         headers: authHeaders(),
       })
       if (response.status === 401) {
@@ -274,7 +271,6 @@ export const useDashboardStore = defineStore('dashboard', () => {
     setSelectedModel,
     toggleDarkMode,
     updateConfig,
-    authQuery,
     authHeaders,
   }
 })

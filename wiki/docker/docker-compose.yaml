@@ -1,6 +1,7 @@
 services:
   hajimi-app:
-    image: beijixingxing/hajimi:latest
+    # Fix: 指向本仓库 CI 产物（原为第三方镜像，跑的是别人的旧版/未加固代码）
+    image: ghcr.io/zhu748/lajdnsma:latest
     container_name: hajimi-app  # 固定容器名方便监控
     labels:
       - "com.centurylinklabs.watchtower.enable=true"  # 启用自动更新
@@ -14,7 +15,10 @@ services:
      # - HTTP_PROXY=http://host.docker.internal:7890  # 代理地址，请注意！无外网环境需要取消注释，添加自己的代理地址
      # - HTTPS_PROXY=https://host.docker.internal:7890  # 同上，保持一样就行，电脑部署推荐使用host.docker.internal
     volumes: # 持久化挂载，自动创建
-      - ./settings:/hajimi/settings
+      # Fix: 与代码默认 STORAGE_DIR=/data/settings/ 对齐（原挂载 /hajimi/settings
+      # 依赖第三方 .env 设置 STORAGE_DIR，混用样例时配置会写进未挂载目录，
+      # 重建容器即丢全部配置和 key）
+      - ./data:/data
     restart: unless-stopped # 自动重启，但手动停止后不再重启
 
   # 🆙 自动更新监控服务（默认每小时检查一次）

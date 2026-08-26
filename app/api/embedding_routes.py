@@ -29,15 +29,25 @@ async def create_embedding(
         settings.MAX_REQUESTS_PER_DAY_PER_IP,
     )
     try:
-        assert route_runtime.key_manager is not None
+        if route_runtime.key_manager is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Service is still initializing (no API keys loaded), please retry shortly",
+            )
         return await create_embeddings_with_key(
             request,
             route_runtime.key_manager,
             EmbeddingClient,
         )
+    except HTTPException:
+        raise
     except Exception as e:
+        # Hardening: the raw exception text can embed upstream URLs or key
+        # fragments — log it internally, return a neutral message.
         log("ERROR", f"An unexpected error occurred: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        raise HTTPException(
+            status_code=500, detail="An unexpected error occurred"
+        )
 
 
 @router.post("/api/vector/query")
@@ -55,7 +65,11 @@ async def vector_query(
         settings.MAX_REQUESTS_PER_DAY_PER_IP,
     )
     try:
-        assert route_runtime.key_manager is not None
+        if route_runtime.key_manager is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Service is still initializing (no API keys loaded), please retry shortly",
+            )
         return await handle_vector_query(
             request,
             route_runtime.key_manager,
@@ -63,9 +77,11 @@ async def vector_query(
             EmbeddingClient,
             log,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         log("ERROR", f"An unexpected error occurred during vector query: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during vector query")
 
 
 @router.post("/api/vector/insert")
@@ -81,7 +97,11 @@ async def vector_insert(
         settings.MAX_REQUESTS_PER_DAY_PER_IP,
     )
     try:
-        assert route_runtime.key_manager is not None
+        if route_runtime.key_manager is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Service is still initializing (no API keys loaded), please retry shortly",
+            )
         return await handle_vector_insert(
             request,
             route_runtime.key_manager,
@@ -89,6 +109,8 @@ async def vector_insert(
             EmbeddingClient,
             log,
         )
+    except HTTPException:
+        raise
     except Exception as e:
         log("ERROR", f"An unexpected error occurred during vector insert: {e}")
-        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {e}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred during vector insert")

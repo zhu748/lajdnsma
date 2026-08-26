@@ -21,6 +21,12 @@ from app.vertex.message_processing import (
 import app.vertex.config as app_config  # Changed from relative
 from app.config import settings  # 导入settings模块
 from app.utils.stealth import gen_openai_chunk_id
+# Bug fix: `vertex_log` was called in three streaming error handlers
+# (and below in place of stray print()s) but never imported — the first
+# upstream error hit a NameError that replaced the original exception,
+# silently truncating the client SSE stream (no error block, no [DONE])
+# and losing the real cause from the logs.
+from app.utils.logging import vertex_log
 
 
 def create_openai_error_response(
@@ -78,7 +84,7 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
 
 def is_response_valid(response):
     if response is None:
-        print("DEBUG: Response is None, therefore invalid.")
+        vertex_log("debug", "Response is None, therefore invalid.")
         return False
 
     # Check for direct text attribute
@@ -117,8 +123,8 @@ def is_response_valid(response):
     # Removed prompt_feedback as a sole criterion for validity.
     # It should only be valid if actual text content is found.
     # Block reasons will be checked explicitly by callers if they need to treat it as an error for retries.
-    print(
-        "DEBUG: Response is invalid, no usable text content found by is_response_valid."
+    vertex_log(
+        "debug", "Response is invalid, no usable text content found by is_response_valid."
     )
     return False
 
@@ -237,39 +243,33 @@ async def _base_fake_stream_engine(
             max(20, random.randint(24, 96)) if content_to_chunk else 0
         )
 
-        if not content_to_chunk and content_to_chunk != "":
-            # Real OpenAI never emits `delta: {"content": ""}`.  We
-            # emit an empty delta object instead — the closest legal
-            # shape for a no-content heartbeat.
-            empty_delta_data = {
+        # Cleanup: the previous `if not content_to_chunk and
+        # content_to_chunk != ""` branch was dead code — `content_to_chunk`
+        # is always a str (line above coerces with `or ""`), and a str
+        # can never be both falsy and != "".  For empty content the for
+        # loop below simply emits nothing, which is the desired shape.
+        for i in range(0, len(content_to_chunk), chunk_size):
+            chunk_text = content_to_chunk[i : i + chunk_size]
+            content_delta_data = {
                 "id": response_id,
                 "object": "chat.completion.chunk",
                 "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
-                    {"index": 0, "delta": {}, "finish_reason": None}
+                    {
+                        "index": 0,
+                        "delta": {"content": chunk_text},
+                        "finish_reason": None,
+                    }
                 ],
             }
-            yield f"data: {json.dumps(empty_delta_data)}\n\n"
-        else:
-            for i in range(0, len(content_to_chunk), chunk_size):
-                chunk_text = content_to_chunk[i : i + chunk_size]
-                content_delta_data = {
-                    "id": response_id,
-                    "object": "chat.completion.chunk",
-                    "created": created_ts,
-                    "model": sse_model_name,
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {"content": chunk_text},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-                yield f"data: {json.dumps(content_delta_data)}\n\n"
-                if len(content_to_chunk) > chunk_size:
-                    await asyncio.sleep(random.uniform(0.02, 0.15))
+            yield f"data: {json.dumps(content_delta_data)}\n\n"
+            # Perf: sleep only BETWEEN chunks, not after the last one.
+            # Previously `len(content_to_chunk) > chunk_size` slept after
+            # every chunk including the final one, adding a pointless
+            # 20-150ms tail latency to every fake-streamed response.
+            if i + chunk_size < len(content_to_chunk):
+                await asyncio.sleep(random.uniform(0.02, 0.15))
 
         yield create_final_chunk(sse_model_name, response_id, created_ts=created_ts)
         yield "data: [DONE]\n\n"
@@ -304,8 +304,9 @@ async def gemini_fake_stream_generator(
     model_name_for_log = getattr(
         gemini_client_instance, "model_name", "unknown_gemini_model_object"
     )
-    print(
-        f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with reasoning separation."
+    vertex_log(
+        "info",
+        f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with reasoning separation.",
     )
     response_id = gen_openai_chunk_id()
 
@@ -318,31 +319,38 @@ async def gemini_fake_stream_generator(
         )
     )
 
-    # Keep-alive loop while the main API call is in progress
-    outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
-    if outer_keep_alive_interval > 0:
-        while not api_call_task.done():
-            # Hardened: empty delta (no content fields at all) instead of
-            # empty reasoning_content.  Strong random chunk id instead of
-            # the fixed "chatcmpl-keepalive" string.  Jittered interval.
-            keep_alive_data = {
-                "id": gen_openai_chunk_id(),
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": request_obj.model,
-                "choices": [
-                    {
-                        "delta": {},
-                        "index": 0,
-                        "finish_reason": None,
-                    }
-                ],
-            }
-            yield f"data: {json.dumps(keep_alive_data)}\n\n"
-            jittered = outer_keep_alive_interval * random.uniform(0.75, 1.25)
-            await asyncio.sleep(jittered)
-
+    # Keep-alive loop while the main API call is in progress.
+    #
+    # Resource fix: if the client disconnects while we are yielding
+    # keep-alive chunks, this generator is closed at the `yield` below
+    # and `await api_call_task` never runs — the upstream request then
+    # runs to completion as an orphan, burning quota and connections.
+    # try/finally guarantees the task is cancelled on ANY exit path
+    # (cancel on a finished task is a no-op).
     try:
+        outer_keep_alive_interval = app_config.FAKE_STREAMING_INTERVAL_SECONDS
+        if outer_keep_alive_interval > 0:
+            while not api_call_task.done():
+                # Hardened: empty delta (no content fields at all) instead of
+                # empty reasoning_content.  Strong random chunk id instead of
+                # the fixed "chatcmpl-keepalive" string.  Jittered interval.
+                keep_alive_data = {
+                    "id": gen_openai_chunk_id(),
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": request_obj.model,
+                    "choices": [
+                        {
+                            "delta": {},
+                            "index": 0,
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+                yield f"data: {json.dumps(keep_alive_data)}\n\n"
+                jittered = outer_keep_alive_interval * random.uniform(0.75, 1.25)
+                await asyncio.sleep(jittered)
+
         raw_response = await api_call_task  # Get the full Gemini response
 
         # 2. Parse the response for reasoning and content using the centralized parser
@@ -422,6 +430,11 @@ async def gemini_fake_stream_generator(
         if not is_auto_attempt:
             yield f"data: {json_payload_error}\n\n"
             yield "data: [DONE]\n\n"
+    finally:
+        # Client-disconnect / cancellation path: cancel the in-flight
+        # upstream request so it doesn't run to completion as an orphan
+        # (cancel on an already-finished task is a no-op).
+        api_call_task.cancel()
 
 
 async def execute_gemini_call(
@@ -438,8 +451,9 @@ async def execute_gemini_call(
     client_model_name_for_log = getattr(
         current_client, "model_name", "unknown_direct_client_object"
     )
-    print(
-        f"INFO: execute_gemini_call for requested API model '{model_to_call}', using client object with internal name '{client_model_name_for_log}'. Original request model: '{request_obj.model}'"
+    vertex_log(
+        "info",
+        f"execute_gemini_call for requested API model '{model_to_call}', using client object with internal name '{client_model_name_for_log}'. Original request model: '{request_obj.model}'",
     )
 
     # 每次调用时直接从settings获取最新的FAKE_STREAMING值
@@ -449,8 +463,9 @@ async def execute_gemini_call(
     else:
         fake_streaming_enabled = app_config.FAKE_STREAMING_ENABLED
 
-    print(
-        f"DEBUG: FAKE_STREAMING setting is {fake_streaming_enabled} for model {request_obj.model}"
+    vertex_log(
+        "debug",
+        f"FAKE_STREAMING setting is {fake_streaming_enabled} for model {request_obj.model}",
     )
 
     if request_obj.stream:

@@ -36,7 +36,7 @@ https://dashboard.render.com/register
 
 ![创建Web服务](./img/render/2.png)
 
-点击Existing Image，填入镜像`ghcr.io/wyeeeee/hajimi:latest`
+点击Existing Image，填入镜像`ghcr.io/zhu748/lajdnsma:latest`（本仓库 GitHub Actions 自动构建）
 
 ![选择镜像](./img/render/3.png)
 
@@ -44,7 +44,7 @@ https://dashboard.render.com/register
 
 ![配置实例](./img/render/4.png)
 
-输入`PORT=7860`，然后换行并粘贴来自 https://github.com/wyeeeee/hajimi/blob/main/.env 的内容并按需修改，然后点击Add variables，再点击Deploy Web Service
+输入`PORT=7860`，然后换行并粘贴来自本仓库 [`.env.example`](https://github.com/zhu748/lajdnsma/blob/main/.env.example) 的内容并按需修改，然后点击Add variables，再点击Deploy Web Service
 
 ![输入环境变量](./img/render/5.png)
 

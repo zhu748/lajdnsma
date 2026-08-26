@@ -2,7 +2,9 @@ name: GHCR CI
 
 on:
   push:
-    branches: [main]
+    # Fix: the original value "ain]" is invalid YAML — the entire workflow fails to parse,
+    # the CI has never actually run (GHCR image does not exist), and it silently failed without anyone noticing.
+    branches: main
   workflow_dispatch:
 
 jobs:

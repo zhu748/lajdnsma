@@ -16,7 +16,9 @@ class ChatCompletionRequest(BaseModel):
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     seed: Optional[int] = None
-    logprobs: Optional[int] = None
+    # Spec fix: OpenAI defines `logprobs` as a boolean flag (the int
+    # counterpart is `top_logprobs`); Pydantic previously coerced it as int.
+    logprobs: Optional[bool] = None
     response_logprobs: Optional[bool] = None
     # Previously defaulted to -1, which caused _clamp_thinking_budget(-1)
     # to return 0 in gemini.py and silently force-disable thinking on

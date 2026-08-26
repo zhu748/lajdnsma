@@ -48,6 +48,13 @@ async def _maybe_sweep_expired(now: int) -> None:
         rate_limit_data.pop(key, None)
 
 
+def _client_host(request: Request) -> str:
+    """Best-effort client host ("unknown" when not available, e.g. some
+    test transports and ASGI wrappers without connection info)."""
+    client = getattr(request, "client", None)
+    return client.host if client and client.host else "unknown"
+
+
 async def protect_from_abuse(
     request: Request,
     max_requests_per_minute: int = 30,
@@ -57,8 +64,15 @@ async def protect_from_abuse(
     minute = now // 60
     day = now // (60 * 60 * 24)
 
-    minute_key = f"{request.url.path}:{minute}"
-    day_key = f"{request.client.host}:{day}"
+    # Bug fix: the minute bucket used to be keyed by path+minute ONLY,
+    # while the day bucket included the client host.  With the default
+    # MAX_REQUESTS_PER_MINUTE=30 a single client sending 31 requests to
+    # the same path within a minute exhausted a budget shared by ALL
+    # users — one user could 429 the whole deployment.  Minute buckets
+    # are now per-IP as well, matching the day-bucket semantics.
+    host = _client_host(request)
+    minute_key = f"{host}:{request.url.path}:{minute}"
+    day_key = f"{host}:{day}"
 
     async with rate_limit_lock:
         await _maybe_sweep_expired(now)

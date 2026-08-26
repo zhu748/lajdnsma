@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import StatusSection from '../components/dashboard/StatusSection.vue'
 import ConfigSection from '../components/dashboard/ConfigSection.vue'
 import LogSection from '../components/dashboard/LogSection.vue'
@@ -21,6 +21,12 @@ onMounted(() => {
 })
 
 onUnmounted(() => stopPolling())
+
+// 会话失效（401 时 store 清空密码回到锁屏）也要停掉轮询——
+// 此前只有手动 Lock / 卸载会停，401 后定时器继续空转打 401。
+watch(isUnlocked, (unlocked) => {
+  if (!unlocked) stopPolling()
+})
 
 function startPolling() {
   if (refreshTimer.value) return

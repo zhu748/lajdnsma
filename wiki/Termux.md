@@ -1,6 +1,6 @@
 # Hajimi 项目部署指南（Termux + Ubuntu）
 
-> 本文档旨在指导用户如何在 **Android 设备**上通过 **Termux + Ubuntu** 环境部署并使用 [Hajimi 项目](https://github.com/wyeeeee/hajimi)。
+> 本文档旨在指导用户如何在 **Android 设备**上通过 **Termux + Ubuntu** 环境部署并使用本项目。
 
 ---
 
@@ -50,7 +50,7 @@ apt update && apt --yes upgrade && apt --yes install git python3 python3-pip
 ### 步骤 3：下载项目并安装依赖
 
 ```bash
-git clone https://github.com/wyeeeee/hajimi && cd hajimi && pip install tzdata -r requirements.txt
+git clone https://github.com/zhu748/lajdnsma && cd lajdnsma && pip install tzdata -r requirements.txt
 ```
 
 ---

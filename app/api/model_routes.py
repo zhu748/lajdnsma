@@ -47,7 +47,15 @@ async def vertex_list_models(
     _=Depends(custom_verify_password),
     _2=Depends(route_runtime.verify_user_agent),
 ):
-    assert route_runtime.current_api_key is not None
+    # Hardening: this used to be an `assert` — with `python -O` the check
+    # disappears entirely and None flows downstream; without -O a bare
+    # AssertionError produced a 500 with a stack trace.  Return an explicit
+    # 503 instead.
+    if route_runtime.current_api_key is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Service is still initializing (no API keys loaded), please retry shortly",
+        )
     return await models_api.list_models(request, route_runtime.current_api_key)
 
 

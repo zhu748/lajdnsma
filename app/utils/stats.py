@@ -1,4 +1,3 @@
-import asyncio
 from datetime import datetime, timedelta
 from app.utils.logging import log
 import app.config.settings as settings
@@ -385,10 +384,11 @@ class ApiStatsManager:
 api_stats_manager = ApiStatsManager()
 
 
-# 兼容现有代码的函数
-def clean_expired_stats(api_call_stats):
-    """清理过期统计数据的函数 (兼容旧接口)"""
-    asyncio.create_task(api_stats_manager.cleanup())
+# 兼容现有代码的函数（clean_expired_stats 曾是一个 fire-and-forget 的
+# asyncio.create_task 包装器，但全仓库无任何调用方，且从同步上下文调用
+# 时会因无运行中的事件循环而报错——真正的定时清理由 maintenance 调度器
+# 每 5 分钟直接执行 api_stats_manager.cleanup，故连同 app/utils/__init__
+# 的导入一并删除）
 
 
 async def update_api_call_stats(api_call_stats, endpoint=None, model=None, token=None):

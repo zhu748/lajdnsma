@@ -27,6 +27,11 @@
 - ~~[zeabur部署的使用文档(需付费)](./wiki/zeabur.md) 感谢**墨舞ink**编写~~（已过时且暂时无人更新，欢迎提交pull requests）
 
 ###  更新日志
+* v1.0.9
+   * 修复 Vertex 流式错误路径崩溃、fill 轮换策略日额度崩溃等正确性问题
+   * 限流改为按 IP 独立计数（此前单个用户可耗尽全站每分钟配额）
+   * 消除事件循环阻塞的 OAuth 刷新、批量请求孤儿任务与内存泄漏
+   * 密钥轮换/凭证轮换加固，前端控制台修复轮询泄漏与凭证回填问题
 * v1.0.2
    * 修复 400 错误
 
@@ -210,7 +215,7 @@
 1. 注册Claw Cloud账户
 2. 登录Claw Cloud控制台
 3. 进入APP Launchpad并创建新应用
-4. 使用镜像地址 `ghcr.io/wyeeeee/hajimi:latest`
+4. 使用镜像地址 `ghcr.io/zhu748/lajdnsma:latest`（本仓库 GitHub Actions 自动构建）
 5. 配置环境变量
 6. 部署应用并获取访问地址
 

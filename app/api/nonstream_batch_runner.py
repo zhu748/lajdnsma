@@ -24,42 +24,56 @@ async def run_nonstream_batch_until_success(
     - empty_response_count: updated empty response count
     - tasks: remaining pending keyed tasks
     """
-    while tasks:
-        wait_kwargs = {"return_when": asyncio.FIRST_COMPLETED}
-        if wait_timeout is not None:
-            wait_kwargs["timeout"] = wait_timeout
+    # Resource fix: on the success path we already cancel the remaining
+    # pending tasks, but if the caller is cancelled while we sit in
+    # asyncio.wait (client disconnect), CancelledError propagated straight
+    # out and the whole batch of in-flight upstream requests kept running
+    # as orphans — burning per-key RPM quota nobody will consume.  Cancel
+    # the batch on any cancellation/abort path before re-raising.
+    try:
+        while tasks:
+            wait_kwargs = {"return_when": asyncio.FIRST_COMPLETED}
+            if wait_timeout is not None:
+                wait_kwargs["timeout"] = wait_timeout
 
-        done, _ = await asyncio.wait([task for _, task in tasks], **wait_kwargs)
-        if not done:
-            return {
-                "status": "pending",
-                "response": None,
-                "empty_response_count": empty_response_count,
-                "tasks": tasks,
-            }
-
-        for task in done:
-            api_key = tasks_map[task]
-            status, response, empty_response_count = await handle_nonstream_task_status(
-                task=task,
-                api_key=api_key,
-                chat_request=chat_request,
-                response_cache_manager=response_cache_manager,
-                cache_key=cache_key,
-                is_gemini=is_gemini,
-                empty_response_count=empty_response_count,
-                serialize_json=serialize_json,
-            )
-            if status == "success":
-                cancel_pending_tasks(tasks)
+            done, _ = await asyncio.wait([task for _, task in tasks], **wait_kwargs)
+            if not done:
                 return {
-                    "status": "success",
-                    "response": response,
+                    "status": "pending",
+                    "response": None,
                     "empty_response_count": empty_response_count,
                     "tasks": tasks,
                 }
 
-            tasks = remove_completed_tasks(tasks)
+            for task in done:
+                api_key = tasks_map[task]
+                status, response, empty_response_count = (
+                    await handle_nonstream_task_status(
+                        task=task,
+                        api_key=api_key,
+                        chat_request=chat_request,
+                        response_cache_manager=response_cache_manager,
+                        cache_key=cache_key,
+                        is_gemini=is_gemini,
+                        empty_response_count=empty_response_count,
+                        serialize_json=serialize_json,
+                    )
+                )
+                if status == "success":
+                    cancel_pending_tasks(tasks)
+                    return {
+                        "status": "success",
+                        "response": response,
+                        "empty_response_count": empty_response_count,
+                        "tasks": tasks,
+                    }
+
+                tasks = remove_completed_tasks(tasks)
+    except BaseException:
+        # CancelledError (client disconnect) or GeneratorExit — cancel the
+        # in-flight upstream batch, then let the cancellation propagate.
+        cancel_pending_tasks(tasks)
+        raise
 
     return {
         "status": "exhausted",

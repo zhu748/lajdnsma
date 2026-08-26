@@ -132,7 +132,8 @@ def _refresh_auth(credentials):
         )
         return token
     except Exception as e:
-        project_id_for_log = getattr(credentials, "project_id", "Unknown")
+        # Cleanup: the except block used to re-assign project_id_for_log to
+        # the same value it already holds — dead store, removed.
         vertex_log(
             "error", f"Error refreshing GCP token for project {project_id_for_log}: {e}"
         )
@@ -145,7 +146,9 @@ class CredentialManager:
         # Use CREDENTIALS_DIR from config
         self.credentials_dir = app_config.CREDENTIALS_DIR
         self.credentials_files = []
-        self.current_index = 0
+        # Cleanup: removed unused `self.current_index` — rotation is done by
+        # random.shuffle in get_random_credentials(), this attribute was
+        # written once at init and never read anywhere.
         self.credentials = None
         self.project_id = None
         # New: Store credentials loaded directly from JSON objects

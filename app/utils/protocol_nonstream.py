@@ -20,7 +20,7 @@ def openai_chat_to_response_api(
     chat_response: Dict[str, Any], request_payload: Dict[str, Any] | None = None
 ) -> Dict[str, Any]:
     request_payload = request_payload or {}
-    choice = chat_response.get("choices", [{}])[0]
+    choice = (chat_response.get("choices") or [{}])[0]
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
     output_items: List[Dict[str, Any]] = []
@@ -89,7 +89,7 @@ def openai_chat_to_response_api(
 
 
 def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, Any]:
-    choice = chat_response.get("choices", [{}])[0]
+    choice = (chat_response.get("choices") or [{}])[0]
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
     usage_counts = _extract_openai_usage(usage)

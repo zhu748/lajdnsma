@@ -535,14 +535,11 @@ class GeminiClient:
         headers = build_gemini_headers(self.api_key, streaming=False)
         headers["x-goog-api-key"] = self.api_key
 
-        try:
-            client = await get_async_client()
-            response = await client.post(url, headers=headers, json=data, timeout=600)
-            response.raise_for_status()  # 检查 HTTP 错误状态
+        client = await get_async_client()
+        response = await client.post(url, headers=headers, json=data, timeout=600)
+        response.raise_for_status()  # 检查 HTTP 错误状态
 
-            return GeminiResponseWrapper(response.json())
-        except Exception:
-            raise
+        return GeminiResponseWrapper(response.json())
 
     # OpenAI 格式请求转换为 gemini 格式请求
     def convert_messages(

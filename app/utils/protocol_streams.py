@@ -97,7 +97,7 @@ async def openai_stream_to_responses_stream(
     async for raw_chunk in body_iterator:
         chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
         for parsed in _parse_sse_json_events(chunk):
-            choice = parsed.get("choices", [{}])[0]
+            choice = (parsed.get("choices") or [{}])[0]
             delta = choice.get("delta", {})
             text = delta.get("content")
             if text:
@@ -423,7 +423,7 @@ async def openai_stream_to_claude_stream(
             if ping:
                 yield ping
 
-            choice = parsed.get("choices", [{}])[0]
+            choice = (parsed.get("choices") or [{}])[0]
             delta = choice.get("delta", {})
             reasoning_text = delta.get("reasoning_content")
             if reasoning_text:

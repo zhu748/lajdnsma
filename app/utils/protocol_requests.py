@@ -243,6 +243,18 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
     # NOT inject a system message advertising this (the previous
     # "stateless gateway" string was a self-identifying fingerprint).
 
+    # Map the Responses API `reasoning: {"effort": "low|medium|high"}`
+    # object onto the chat-completions `reasoning_effort` field, which
+    # gemini.py translates into a thinkingBudget.  Codex and other
+    # Responses clients set high reasoning effort and previously got the
+    # default budget because the field was silently dropped here.
+    reasoning_effort = None
+    reasoning = payload.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort.lower() in {"low", "medium", "high"}:
+            reasoning_effort = effort.lower()
+
     return ChatCompletionRequest(
         model=payload["model"],
         messages=messages,
@@ -255,6 +267,7 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
         tool_choice=_response_tool_choice_to_openai(payload.get("tool_choice", "auto")),
         source_protocol="responses",
         parallel_tool_calls=parallel_tool_calls,
+        reasoning_effort=reasoning_effort,
     )
 
 

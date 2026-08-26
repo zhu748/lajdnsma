@@ -31,7 +31,7 @@
 （⬇️⬇️⬇️以下操作全部在github网站进行）
 
 ## 0.1 Fork本项目
-- 点击链接：[https://github.com/wyeeeee/hajimi/fork]
+- 点击链接：[hhttps://github.com/zhu748/lajdnsma/fork
 - 注意：现在Huggingface在封禁hajimi镜像，所以在fork仓库时不要使用hajimi原名，随便写点其他东西来填写`Repository name`
 - 点击底部绿色按钮`Create fork`完成Fork操作
 
@@ -42,7 +42,7 @@
 - 点击右侧的`Run workflow`按钮
 - 直接点击弹出的`Run workflow`开始构建镜像（需要等待一些时间）
 - ⚠️镜像地址为：ghcr.io/你的github用户名/你填写的仓库名:latest
-  - 例如：ghcr.io/wyeeeee/hajimi:latest。
+  - 例如：ghcr.io/zhu748/lajdnsma:latest（本仓库 GitHub Actions 自动构建）。
   - 记住这个镜像等下要在huggingface中填写
 
 
@@ -92,7 +92,7 @@ CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "7860"]
 - Name填写`PASSWORD` | value填写`你的密码` (可以不填，你不设置默认密码是123) | 点击保存
 - Name填写`GEMINI_API_KEYS`|  value填写`你的key` (多个key用“,”英文逗号隔开，不能换行填进value中，示例：xxx,xxx,xxx) | 点击保存
 - `⛔️免责声明：key是你的个人资产，为了安全隐私，因此保存后变量中不会显示你输入过的key，！！请一定保存好！！`
-- 💡更多变量，点击下载txt：[https://github.com/wyeeeee/hajimi/releases/tag/settings]
+- 💡更多变量，点击下载txt：[hhttps://github.com/zhu748/lajdnsma/blob/main/.env.example（更多变量参考）
 
 ## 1.5 项目前端
 - 如果报错你要问问题（如果不知道说的是什么，请返回教程顶部看完最前面的一段字）：

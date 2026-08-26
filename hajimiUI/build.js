@@ -44,6 +44,16 @@ if (!fs.existsSync(templatesDir)) {
 console.log('正在构建 Vue 应用...');
 execSync('npx vite build', { stdio: 'inherit' });
 
+// vite 尽管配置了不生成 HTML，仍会往 outDir 喷一份自己的 index.html
+// （引用固定名 /main.js 与 /index.css）。此前它被下方 otherFiles 分支
+// 随机重命名后留在 assets 里并提交入库，还被 /assets 静态目录公开
+// 服务，引用的资源并不存在。此处直接删除。
+const viteIndexHtml = path.join(assetsDir, 'index.html');
+if (fs.existsSync(viteIndexHtml)) {
+  fs.unlinkSync(viteIndexHtml);
+  console.log('已删除 vite 自产的 index.html 残留');
+}
+
 // 生成随机文件名
 function generateRandomFileName(extension) {
   // 生成16字节的随机数据并转换为十六进制字符串

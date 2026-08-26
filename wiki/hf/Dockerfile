@@ -1,4 +1,4 @@
-FROM ghcr.io/rzline/hajimi:latest
+FROM ghcr.io/zhu748/lajdnsma:latest
 
 EXPOSE 7860
 

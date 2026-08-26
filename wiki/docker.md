@@ -15,9 +15,9 @@
 ### 1.2 获取配置文件
 下载部署所需的两个核心配置文件：
 
-**[.env文件下载](https://github.com/beijixingxing/hajimi/blob/main/wiki/docker/.env)**
+**[.env文件下载](https://github.com/zhu748/lajdnsma/blob/main/wiki/docker/.env)**
 
-**[docker-compose.yaml文件下载](https://github.com/beijixingxing/hajimi/blob/main/wiki/docker/docker-compose.yaml)**
+**[docker-compose.yaml文件下载](https://github.com/zhu748/lajdnsma/blob/main/wiki/docker/docker-compose.yaml)**
 
 ### 1.3 创建项目目录并放置配置文件 📂
 在您选择的位置创建一个专门用于部署 Hajimi 的文件夹，并将下载的 `.env` 和 `docker-compose.yaml` 文件放入该文件夹中。
@@ -63,7 +63,7 @@ GOOGLE_CREDENTIALS_JSON='JSON 密钥内容' # <= 粘贴你的 JSON 密钥内容
 ```yaml
 services:
   hajimi-app: # 服务名，可自定义
-    image: beijixingxing/hajimi:latest
+    image: ghcr.io/zhu748/lajdnsma:latest
     container_name: hajimi-app  # 固定容器名方便监控
     labels:
       - "com.centurylinklabs.watchtower.enable=true"  # 启用自动更新
@@ -131,15 +131,15 @@ services:
 3.  直接下载配置文件：
     ```bash
     # 下载 .env 文件模板
-    wget https://raw.githubusercontent.com/beijixingxing/hajimi/main/wiki/docker/.env
+    wget https://raw.githubusercontent.com/zhu748/lajdnsma/main/wiki/docker/.env
 
     # 下载 docker-compose.yaml 文件
-    wget -O docker-compose.yaml https://raw.githubusercontent.com/beijixingxing/hajimi/main/wiki/docker/docker-compose.yaml
+    wget -O docker-compose.yaml https://raw.githubusercontent.com/zhu748/lajdnsma/main/wiki/docker/docker-compose.yaml
     ```
     或使用 `curl`：
     ```bash
-    curl -o .env https://raw.githubusercontent.com/beijixingxing/hajimi/main/wiki/docker/.env
-    curl -o docker-compose.yaml https://raw.githubusercontent.com/beijixingxing/hajimi/main/wiki/docker/docker-compose.yaml
+    curl -o .env https://raw.githubusercontent.com/zhu748/lajdnsma/main/wiki/docker/.env
+    curl -o docker-compose.yaml https://raw.githubusercontent.com/zhu748/lajdnsma/main/wiki/docker/docker-compose.yaml
     ```
 4.  **重要：编辑配置文件**
     使用文本编辑器（如 `nano` 或 `vim`）修改下载的 `.env` 文件和 `docker-compose.yaml` 文件。
@@ -308,10 +308,10 @@ WHITELIST_USER_AGENT=
 PRECISE_CACHE=false
 
 # 📦 持久化配置（已集成在compose文件里）
-# 持久化存储目录，默认为 /hajimi/settings/
-STORAGE_DIR=/hajimi/settings/
-# 是否启用持久化，默认为 false
-ENABLE_STORAGE=false
+# 持久化存储目录，默认为 /data/settings/（与代码默认及 compose 挂载对齐）
+STORAGE_DIR=/data/settings/
+# 是否启用持久化，默认为 true
+ENABLE_STORAGE=true
 
 # --- 🔑 Vertex高级配置 ---
 # 是否启用vertex，决定是否使用Vertex AI服务，默认关闭

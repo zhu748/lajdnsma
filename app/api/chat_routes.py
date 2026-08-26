@@ -1,6 +1,6 @@
 from typing import Union
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 import app.config.settings as settings
 from app.api import route_runtime
@@ -46,7 +46,12 @@ async def vertex_chat_completions(
     _du=Depends(route_runtime.verify_user_agent),
 ):
     vertex_request = build_vertex_openai_request(request)
-    assert route_runtime.current_api_key is not None
+    # Hardening: was `assert` (see model_routes.vertex_list_models).
+    if route_runtime.current_api_key is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Service is still initializing (no API keys loaded), please retry shortly",
+        )
     return await chat_api.chat_completions(
         http_request,
         vertex_request,
