@@ -12,6 +12,65 @@ import app.config.settings as settings
 logger = logging.getLogger("my_logger")
 
 # ---------------------------------------------------------------------------
+# API key parsing (env-var / config-string form)
+# ---------------------------------------------------------------------------
+# Gemini API 密钥目前有两种已知格式：
+#   经典格式（2025 之前签发）: "AIzaSy" + 33 位字符，共 39 字符
+#   新版格式（2025 起 Google AI Studio 签发）: "AQ." 前缀，约 90 字符
+#
+# Bug fix: 旧实现只用 AIzaSy 正则提取密钥，新版 AQ. 格式密钥在
+# 环境变量里会被静默丢弃——而面板"添加密钥"入口（dashboard 的
+# gemini_api_keys 分支）按逗号分割、不做格式过滤，什么格式都能加。
+# 两条路径行为不一致，导致"环境变量加不进去、面板才能加进去"。
+# 现在环境变量解析与面板对齐：任意格式都接受，同时保留正则提取
+# 兜底（兼容把整段 JSON / 自由文本粘进环境变量的旧用法）。
+CLASSIC_KEY_PATTERN = r"AIzaSy[a-zA-Z0-9_-]{33}"
+NEW_FORMAT_KEY_PATTERN = r"AQ\.[A-Za-z0-9_-]{20,}"
+# 低于该长度的 token 一律视为噪声，不可能是一条合法密钥
+# （最短的已知格式——经典 AIzaSy——也有 39 字符）。
+MIN_KEY_LENGTH = 20
+
+
+def _parse_api_keys(raw: str) -> list:
+    """从原始配置字符串中解析出 API 密钥列表。
+
+    解析策略（与面板"添加密钥"行为保持一致）：
+      Pass 1: 按 逗号 / 换行 / 分号 / 空白 切分，去掉首尾引号与空白，
+              接受任何"纯不透明 token"（仅含字母数字 . _ -，长度达标）。
+              这样未来 Google 再换密钥前缀也不会重演本次 bug。
+      Pass 2: 对原始串跑已知格式正则，把嵌在 JSON、URL 或自由文本里
+              的密钥也提取出来（兼容旧版"整段粘贴"用法）。
+    返回保序去重后的列表。
+    """
+    if not raw or not raw.strip():
+        return []
+
+    candidates = []
+
+    # Pass 1: 分隔符切分（任意格式均接受）
+    for token in re.split(r"[\s,;]+", raw):
+        token = token.strip().strip('"').strip("'").strip()
+        if len(token) < MIN_KEY_LENGTH:
+            continue
+        # 只接受纯不透明 token；含 JSON 标点 / URL 结构的碎片
+        # （如 {"key": "AIzaSy..."} 被 split 出的片段）交给 Pass 2 兜底。
+        if re.fullmatch(r"[A-Za-z0-9._-]+", token):
+            candidates.append(token)
+
+    # Pass 2: 已知格式正则提取（兼容整段 JSON / 自由文本粘贴）
+    candidates.extend(re.findall(CLASSIC_KEY_PATTERN, raw))
+    candidates.extend(re.findall(NEW_FORMAT_KEY_PATTERN, raw))
+
+    # 保序去重
+    seen = set()
+    deduped = []
+    for k in candidates:
+        if k not in seen:
+            seen.add(k)
+            deduped.append(k)
+    return deduped
+
+# ---------------------------------------------------------------------------
 # Key cooldown state
 # ---------------------------------------------------------------------------
 
@@ -87,24 +146,44 @@ async def clear_all_cooldowns() -> None:
 
 class APIKeyManager:
     def __init__(self):
-        self.api_keys = re.findall(r"AIzaSy[a-zA-Z0-9_-]{33}", settings.GEMINI_API_KEYS)
-        # 加载更多 GEMINI_API_KEYS
+        # 收集所有密钥来源：主变量 + 编号变量 GEMINI_API_KEYS_1..98
         # Fix: 旧实现在第一个空序号就 break——配置了 _1,_2,_4 时 _4 会被
         # 静默忽略。改为遍历全部检查，空序号跳过。
+        raw_sources = [settings.GEMINI_API_KEYS]
         for i in range(1, 99):
             if keys := os.environ.get(f"GEMINI_API_KEYS_{i}", ""):
-                self.api_keys += re.findall(r"AIzaSy[a-zA-Z0-9_-]{33}", keys)
+                raw_sources.append(keys)
+
+        # 解析（支持 AIzaSy 经典格式与 AQ. 新版格式，详见 _parse_api_keys）
+        parsed = []
+        for raw in raw_sources:
+            parsed.extend(_parse_api_keys(raw))
 
         # Dedupe while preserving order.  The previous code accepted
         # duplicates silently, which inflated effective concurrency for a
         # subset of keys and broke RPM fairness.
         seen = set()
         deduped = []
-        for k in self.api_keys:
+        for k in parsed:
             if k not in seen:
                 seen.add(k)
                 deduped.append(k)
         self.api_keys = deduped
+
+        # 可观测性：配置了密钥内容却一个都没解析出来时，给出显式告警。
+        # 旧实现在此场景下静默得到 0 个密钥，请求时才报"没有配置任何
+        # API 密钥"，排查方向会被带偏（这次的"环境变量识别不了"问题
+        # 正是这种情况——AQ. 新格式密钥被旧正则静默吞掉）。
+        if not self.api_keys:
+            configured = [s for s in raw_sources if s and s.strip()]
+            if configured:
+                log_msg = format_log_message(
+                    "WARNING",
+                    "GEMINI_API_KEYS 已配置内容但未能解析出任何密钥！"
+                    "请检查密钥格式（支持 AIzaSy... 经典格式与 AQ.... 新格式，"
+                    "多个密钥用英文逗号分隔）",
+                )
+                logger.warning(log_msg)
 
         self.key_stack = []  # 初始化密钥栈
         self._reset_key_stack()  # 初始化时创建随机密钥栈

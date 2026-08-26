@@ -380,8 +380,8 @@ function toggleModels(keyId) {
       </div>
       <div class="modal__body">
         <div class="field mb-4">
-          <label class="field__label">密钥（每行一个，或用逗号分隔）</label>
-          <textarea v-model="newApiKeys" class="textarea" rows="6" placeholder="AIza…&#10;AIza…"></textarea>
+          <label class="field__label">密钥（每行一个或逗号分隔，支持 AIzaSy… 经典格式与 AQ.… 新格式）</label>
+          <textarea v-model="newApiKeys" class="textarea" rows="6" placeholder="AIzaSy…&#10;AQ.…."></textarea>
         </div>
         <div v-if="addError" class="banner banner--danger">{{ addError }}</div>
         <div v-if="addSuccess" class="banner banner--success">{{ addSuccess }}</div>

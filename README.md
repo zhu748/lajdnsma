@@ -148,7 +148,7 @@
 
 - `PASSWORD` - API访问密码，默认为"123"
 - `WEB_PASSWORD` - 网页配置密码，默认与PASSWORD相同
-- `GEMINI_API_KEYS` - Gemini API密钥，多个密钥用逗号分隔
+- `GEMINI_API_KEYS` - Gemini API密钥，多个密钥用逗号分隔（同时支持 `AIzaSy…` 经典格式与 `AQ.…` 新格式密钥）
 - `FAKE_STREAMING` - 是否启用假流式传输，默认为true
 - `STORAGE_DIR` - 配置持久化存储目录
 - `ENABLE_STORAGE` - 是否启用配置持久化存储，默认为false
