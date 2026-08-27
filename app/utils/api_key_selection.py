@@ -25,6 +25,13 @@ async def select_valid_api_keys(
     3. 不再在所有 key 都达日额度时强行重置栈取一个出来用——
        这等于绕过自设的日额度上限，会触发上游 RPM 限制。
        现在返回空列表，让调用方走"所有 key 都不可用"路径。
+
+    语义说明（fill 模式）: get_available_key() 在 fill（粘性）模式下
+    恒返回同一栈顶 key，本函数的 checked_keys 去重会让循环在第二个
+    迭代即 break——即 fill 模式下每批恒为 1 个 key。这是有意的反指纹
+    设计（"粘住一个 key 直到不可用"），并非 bug：同一请求并发打到同一
+    key 多次只会白白消耗该 key 的 RPM 配额。需要多 key 并发竞速时请
+    切换 polling 轮换策略。
     """
     valid_keys: List[str] = []
     checked_keys = set()

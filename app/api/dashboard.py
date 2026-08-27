@@ -26,6 +26,9 @@ from app.vertex.vertex_ai_init import (
     reset_global_fallback_client,
 )
 
+# Round 5: 密钥检测完成后清理冷却状态（见 run_api_key_test 注释）
+from app.utils.api_key import clear_all_cooldowns
+
 # 创建路由器
 dashboard_router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -1107,6 +1110,17 @@ async def run_api_key_test(keys):
     except Exception as e:
         log("error", f"API密钥检测过程中发生错误: {str(e)}")
     finally:
+        # Round 5（逻辑 bug）: 检测完成后清理全部冷却状态。
+        # 场景：某 key 早前因 401/403 被永久拉黑（PERMANENT_BLOCK_TS），
+        # 密钥持有者在 Google 侧修复后重新运行检测——检测判定其有效并
+        # 保留在 key_manager.api_keys，但 _key_cooldowns 里的永久拉黑
+        # 条目不会随之满除：get_available_key 会永远跳过该 key，
+        # 面板显示"有效"而运行时从不用它。刚验证过的新池不应继承
+        # 陈旧冷却状态；真实失败会在下次请求时重新触发冷却。
+        try:
+            await clear_all_cooldowns()
+        except Exception as e:
+            log("warning", f"清理密钥冷却状态时出错: {str(e)}")
         # 标记检测完成
         api_key_test_progress.update({"is_running": False, "is_completed": True})
 

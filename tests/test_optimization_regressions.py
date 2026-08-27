@@ -141,22 +141,25 @@ class StatsWorkerBatchDrainTestCase(unittest.TestCase):
         self.assertNotIn("never-seen-key", mgr.api_key_counts)
         self.assertNotIn("never-seen-key", mgr.api_model_counts)
 
-    def test_recent_calls_is_bounded_deque(self):
+    def test_key_rpm_window_is_bounded_deque(self):
+        # Round 5: recent_calls（全局 100 条）已替换为 per-key RPM 滑动窗口
         mod = self._load("stats_opt2")
 
         import asyncio
         from collections import deque
 
         mgr = mod.ApiStatsManager(enable_background=False)
-        self.assertIsInstance(mgr.recent_calls, deque)
-        self.assertEqual(mgr.recent_calls.maxlen, 100)
+        self.assertIsInstance(mgr._key_rpm_windows["k"], deque)
 
         async def fill():
             for i in range(150):
                 await mgr.update_stats("k", "m", 1)
 
         asyncio.run(fill())
-        self.assertEqual(len(mgr.recent_calls), 100)  # deque 自动淘汰旧记录
+        # 同一 key 的窗口不受全局总量影响（旧实现 150 次只记 100 次）；
+        # 新窗口的每 key 上限为 _RPM_WINDOW_MAX_ENTRIES=120（有意的
+        # 防御性封顶：RPM>120 已远超任何配额，精确值无意义）
+        self.assertEqual(mgr.get_calls_last_minute_for_key("k"), 120)
 
 
 class ApiKeyManagerNoSchedulerTestCase(unittest.TestCase):

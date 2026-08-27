@@ -6,6 +6,11 @@ import time
 import threading
 import queue
 
+# Round 5: per-key RPM 滑动窗口参数。
+_RPM_WINDOW_SECONDS = 60          # 与上游 RPM 语义对齐的滑动窗口长度
+_RPM_WINDOW_MAX_ENTRIES = 120     # 每 key 保留的时间戳上限（RPM > 120 已远超任何配额）
+_MAX_TRACKED_KEYS = 4096         # 防御性上限：追踪的 key 数量上限
+
 
 class ApiStatsManager:
     """API调用统计管理器，优化性能的新实现"""
@@ -25,13 +30,23 @@ class ApiStatsManager:
             Counter
         )  # 记录每个API密钥对每个模型的token使用量
 
+        # Round 5（反风控 P0）: per-key RPM 滑动窗口。
+        # 旧实现把全部调用塞进一个全局 recent_calls deque(maxlen=100)
+        # 再线性扫描计数——总调用量一旦超过 100 条/分钟（多 key 并发
+        # 场景轻松达到），60s 窗口内的记录先被全局 maxlen 淘汰，
+        # get_calls_last_minute_for_key 恒返回 0，
+        # select_valid_api_keys 的 RPM 退避完全失效（负载越高越失效），
+        # 热 key 持续被打穿上游 429。改为每 key 独立的时间戳 deque：
+        # 写入时顺手裁剪 60s 前的过期项，读取时同样裁剪后取 len。
+        # 内存有界：每 key ≤ _RPM_WINDOW_MAX_ENTRIES 个 float，
+        # 追踪的 key 数 ≤ _MAX_TRACKED_KEYS（真实密钥池远小于此）。
+        self._key_rpm_windows: dict = defaultdict(
+            lambda: deque(maxlen=_RPM_WINDOW_MAX_ENTRIES)
+        )
+        self._rpm_lock = threading.Lock()
+
         # 用于时间序列分析的数据结构（最近24小时，按分钟分组）
         self.time_buckets = {}  # 格式: {timestamp_minute: {"calls": count, "tokens": count}}
-
-        # 保存与兼容格式相关的调用日志（最小化存储）
-        # deque(maxlen=N) 自动淘汰最旧记录，避免 list.pop(0) 的 O(n) 复制
-        self.recent_calls = deque(maxlen=100)  # 仅保存最近的少量调用，用于前端展示
-        self.max_recent_calls = 100  # 最大保存的最近调用记录数
 
         # 当前时间分钟桶的时间戳（分钟级别）
         self.current_minute = self._get_minute_timestamp(datetime.now())
@@ -43,7 +58,6 @@ class ApiStatsManager:
         # 使用线程锁而不是asyncio锁
         self._counters_lock = threading.Lock()
         self._time_series_lock = threading.Lock()
-        self._recent_calls_lock = threading.Lock()
 
         # 后台处理相关
         self.enable_background = enable_background
@@ -122,7 +136,17 @@ class ApiStatsManager:
                 self.api_model_tokens[api_key][model] += tokens
 
     async def update_stats(self, api_key, model, tokens=0):
-        """更新API调用统计"""
+        """更新API调用统计
+
+        Round 5: 删除了逐笔 "API调用已记录" info 日志——它以每请求一条
+        的频率刷入 LogManager 的有界缓冲，中等 QPS 下几秒内就把冷却
+        触发、429、密钥失败等真正需要运维看到的 warning/error 全部挤出
+        日志面板（可观测性反退化）。每笔调用已有 request start/success
+        等带 key/model 上下文的日志，无需重复。
+        """
+        now = datetime.now()
+        now_ts = now.timestamp()
+
         if self.enable_background:
             # 将更新放入队列
             self._update_queue.put((api_key, model, tokens))
@@ -137,7 +161,6 @@ class ApiStatsManager:
                 self.api_model_tokens[api_key][model] += tokens
 
         # 更新时间序列数据
-        now = datetime.now()
         minute_ts = self._get_minute_timestamp(now)
 
         with self._time_series_lock:
@@ -148,23 +171,19 @@ class ApiStatsManager:
             self.time_buckets[minute_ts]["tokens"] += tokens
             self.current_minute = minute_ts
 
-        # 更新最近调用记录（deque(maxlen) 自动淘汰旧记录，避免
-        # list.pop(0) 的 O(n) 复制）
-        with self._recent_calls_lock:
-            compact_call = {
-                "api_key": api_key,
-                "model": model,
-                "timestamp": now,
-                "tokens": tokens,
-            }
-            self.recent_calls.append(compact_call)
-
-        # 记录日志
-        # Don't log raw key prefix (AIzaSy12 is a recognisable Gemini
-        # key prefix).  Use a stable short hash instead.
-        key_id = "key#" + str(hash(api_key) & 0xFFFFFF)
-        log_message = f"API调用已记录: 秘钥 '{key_id}', 模型 '{model}', 令牌: {tokens if tokens is not None else 0}"
-        log("info", log_message)
+        # 更新 per-key RPM 滑动窗口（写入时顺手裁剪过期项，均摊 O(过期数)）
+        with self._rpm_lock:
+            if (
+                api_key not in self._key_rpm_windows
+                and len(self._key_rpm_windows) >= _MAX_TRACKED_KEYS
+            ):
+                pass  # 防御性上限：密钥池异常庞大时放弃追踪新 key
+            else:
+                window = self._key_rpm_windows[api_key]
+                window.append(now_ts)
+                cutoff = now_ts - _RPM_WINDOW_SECONDS
+                while window and window[0] < cutoff:
+                    window.popleft()
 
     async def cleanup(self):
         """清理超过24小时的时间桶数据"""
@@ -240,25 +259,23 @@ class ApiStatsManager:
     def get_calls_last_minute_for_key(self, api_key: str, now=None) -> int:
         """获取过去一分钟内某个 API key 的调用次数。
 
-        实现方式：扫描 self.recent_calls（保留最近 100 条），过滤
-        timestamp 在过去 60s 内且 api_key 匹配的记录。
-
-        这个范围足够支撑 RPM 限流决策（默认 RPM=15-30，远低于 100 的窗口
-        上限）。  对大池子或超高 QPS 场景，需要切换到独立的滑动窗口
-        实现，但当前实现已足够避免单 Key 短时间被打穿。
+        Round 5: 改读 per-key 滑动窗口（_key_rpm_windows），不再依赖全局
+        recent_calls——旧实现在总调用量 > 100/min 时窗口记录先被 maxlen
+        淘汰，per-key 计数恒为 0，RPM 退避失效（详见 __init__ 注释）。
+        读取时同样从左侧裁剪过期时间戳，之后的 len() 即为窗口内计数。
         """
-        if now is None:
-            now = datetime.now()
-        cutoff = now - timedelta(seconds=60)
+        cutoff = (
+            (time.time() if now is None else now.timestamp())
+            - _RPM_WINDOW_SECONDS
+        )
 
-        with self._recent_calls_lock:
-            return sum(
-                1
-                for call in self.recent_calls
-                if call.get("api_key") == api_key
-                and call.get("timestamp") is not None
-                and call["timestamp"] >= cutoff
-            )
+        with self._rpm_lock:
+            window = self._key_rpm_windows.get(api_key)
+            if not window:
+                return 0
+            while window and window[0] < cutoff:
+                window.popleft()
+            return len(window)
 
     def get_tokens_last_24h(self):
         """获取过去24小时的总Token消耗量"""
@@ -369,8 +386,8 @@ class ApiStatsManager:
         with self._time_series_lock:
             self.time_buckets.clear()
 
-        with self._recent_calls_lock:
-            self.recent_calls.clear()
+        with self._rpm_lock:
+            self._key_rpm_windows.clear()
 
         self.current_minute = self._get_minute_timestamp(datetime.now())
         self.last_cleanup = time.time()

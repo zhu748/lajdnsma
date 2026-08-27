@@ -34,7 +34,7 @@ class LogManager:
     保留为别名以兼容既有导入。
     """
 
-    def __init__(self, max_logs=100):
+    def __init__(self, max_logs=200):
         self.logs = deque(maxlen=max_logs)  # 使用双端队列存储最近的日志
         self.lock = Lock()
 
