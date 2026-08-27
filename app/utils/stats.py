@@ -185,6 +185,35 @@ class ApiStatsManager:
                 while window and window[0] < cutoff:
                     window.popleft()
 
+    def record_outbound_attempt(self, api_key: str, model: str = "") -> None:
+        """Round 6: 在上游请求**发射时**记录 RPM 窗口时间戳（而非完成时）。
+
+        旧实现只在成功完成后（finalize_gemini_response / 空响应分支）
+        调用 update_stats，在途、429/500 失败、超时的请求全部不计入
+        RPM 窗口 —— 并发越高、响应越慢（thinking 模型 30s+），低估越
+        严重，可以在窗口计数未满时持续超发，退避永远慢一拍。
+
+        本方法只写 RPM 窗口（同步、轻量），在三个发射点
+        （nonstream_completion / fake_stream_handlers /
+        native_stream_handlers 创建 GeminiClient 处）调用；
+        update_stats 仍在完成时调用（它同时维护计数器/时间序列/token）。
+        完成路径的窗口写入保留 —— 双写对滑动窗口是幂等的（多计一次
+        会让退避略保守，这正是高负载下需要的方向；反之漏计会让退避
+        失效）。
+        """
+        now_ts = time.time()
+        with self._rpm_lock:
+            if (
+                api_key not in self._key_rpm_windows
+                and len(self._key_rpm_windows) >= _MAX_TRACKED_KEYS
+            ):
+                return  # 防御性上限：密钥池异常庞大时放弃追踪新 key
+            window = self._key_rpm_windows[api_key]
+            window.append(now_ts)
+            cutoff = now_ts - _RPM_WINDOW_SECONDS
+            while window and window[0] < cutoff:
+                window.popleft()
+
     async def cleanup(self):
         """清理超过24小时的时间桶数据"""
         now = datetime.now()
@@ -427,6 +456,11 @@ def get_calls_last_minute_for_key(api_key: str) -> int:
     同步函数，因为底层是同步的；调用方在 async 上下文里直接调用即可。
     """
     return api_stats_manager.get_calls_last_minute_for_key(api_key)
+
+
+def record_outbound_attempt(api_key: str, model: str = "") -> None:
+    """在上游请求发射时记录 RPM 窗口（同步轻量，详见方法 docstring）。"""
+    api_stats_manager.record_outbound_attempt(api_key, model)
 
 
 # Default Gemini free-tier RPM safety threshold.  When a key's last-minute

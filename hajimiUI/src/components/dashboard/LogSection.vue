@@ -1,11 +1,13 @@
 <script setup>
 import { useDashboardStore } from '../../stores/dashboard'
-import { ref, watch, nextTick, onMounted, computed } from 'vue'
+import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue'
 
 const dashboardStore = useDashboardStore()
 const currentFilter = ref('ALL')
 const logContainer = ref(null)
 const isFirstLoad = ref(true)
+// 自动滚动开关：翻看历史日志时自动暂停跟随，回到底部自动恢复
+const autoScroll = ref(true)
 
 const filterLabels = {
   ALL: '全部',
@@ -45,6 +47,58 @@ const levelCounts = computed(() => {
   return counts
 })
 
+// 导出为纯文本：一行一条，带时间戳/级别/上下文，便于粘贴到 issue
+function logsToText() {
+  return filteredLogs.value
+    .map((l) => {
+      const ctx = [l.key, l.request_type, l.model, l.status_code]
+        .filter((x) => x && x !== 'N/A')
+        .map((x) => `[${x}]`)
+        .join('')
+      const err = l.error_message ? ` - ${l.error_message}` : ''
+      return `${l.timestamp} [${l.level}]${ctx} ${l.message}${err}`
+    })
+    .join('\n')
+}
+
+async function copyLogs() {
+  const text = logsToText()
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    copyToast.value = `已复制 ${filteredLogs.value.length} 条日志`
+  } catch (e) {
+    console.error('copy logs:', e)
+    copyToast.value = '复制失败，请改用下载'
+  }
+  showToast()
+}
+
+function downloadLogs() {
+  const text = logsToText()
+  if (!text) return
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  const ts = new Date().toISOString().slice(0, 19).replace(/[T:]/g, '-')
+  a.href = url
+  a.download = `gateway-logs-${ts}.txt`
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+  copyToast.value = '日志已下载'
+  showToast()
+}
+
+const copyToast = ref('')
+let copyToastTimer = null
+function showToast() {
+  clearTimeout(copyToastTimer)
+  copyToastTimer = setTimeout(() => (copyToast.value = ''), 1600)
+}
+onUnmounted(() => clearTimeout(copyToastTimer))
+
 watch(
   () => dashboardStore.logs,
   async () => {
@@ -52,7 +106,7 @@ watch(
     if (isFirstLoad.value) {
       scrollToBottom()
       isFirstLoad.value = false
-    } else if (isAtBottom()) {
+    } else if (autoScroll.value && isAtBottom()) {
       scrollToBottom()
     }
   }
@@ -67,6 +121,13 @@ watch(currentFilter, async () => {
   scrollToBottom()
 })
 
+// 用户主动滚动 = 想看历史：只要离开底部就自动暂停跟随，
+// 不需要手动关开关；滚回底部自动恢复。
+function handleScroll() {
+  if (isFirstLoad.value) return
+  autoScroll.value = isAtBottom()
+}
+
 onMounted(() => {
   if (dashboardStore.logs.length > 0) {
     nextTick(scrollToBottom)
@@ -78,22 +139,49 @@ onMounted(() => {
   <section class="section">
     <div class="section__header">
       <div class="section__title">日志 · {{ dashboardStore.logs.length }}</div>
-      <div class="row log-filters">
-        <button
-          v-for="level in filters"
-          :key="level"
-          class="filter-chip"
-          :class="{ 'filter-chip--active': currentFilter === level }"
-          @click="setFilter(level)"
-        >
-          {{ filterLabels[level] || level }}
-          <span v-if="level !== 'ALL'" class="filter-chip__count">{{ levelCounts[level] || 0 }}</span>
-        </button>
+      <div class="row log-toolbar">
+        <div class="row log-filters">
+          <button
+            v-for="level in filters"
+            :key="level"
+            class="filter-chip"
+            :class="{ 'filter-chip--active': currentFilter === level }"
+            @click="setFilter(level)"
+          >
+            {{ filterLabels[level] || level }}
+            <span v-if="level !== 'ALL'" class="filter-chip__count">{{ levelCounts[level] || 0 }}</span>
+          </button>
+        </div>
+        <div class="row log-actions">
+          <button
+            class="btn btn--ghost btn--sm log-action-btn"
+            title="滚动到底部并恢复自动跟随"
+            @click="autoScroll = true; nextTick(scrollToBottom)"
+          >
+            ↓ 跟随
+          </button>
+          <button
+            class="btn btn--ghost btn--sm log-action-btn"
+            title="复制当前筛选下的全部日志"
+            :disabled="!filteredLogs.length"
+            @click="copyLogs"
+          >
+            复制
+          </button>
+          <button
+            class="btn btn--ghost btn--sm log-action-btn"
+            title="下载为 .txt 文件"
+            :disabled="!filteredLogs.length"
+            @click="downloadLogs"
+          >
+            下载
+          </button>
+        </div>
       </div>
     </div>
 
     <div class="card">
-      <div class="log-container" ref="logContainer">
+      <div class="log-container" ref="logContainer" @scroll.passive="handleScroll">
         <div v-if="!filteredLogs.length" class="empty-state" style="padding:var(--sp-8);">
           <div class="empty-state__icon">∅</div>
           <div class="empty-state__title">暂无日志</div>
@@ -130,13 +218,30 @@ onMounted(() => {
         </div>
       </div>
     </div>
+
+    <!-- 复制/下载反馈 toast -->
+    <Transition name="toast-fade">
+      <div v-if="copyToast" class="copy-toast">{{ copyToast }}</div>
+    </Transition>
   </section>
 </template>
 
 <style scoped>
-/* 日志筛选 chips：窄屏允许换行，不溢出 */
+/* 日志工具行：筛选 chips + 复制/下载按钮，窄屏允许换行 */
+.log-toolbar {
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
 .log-filters {
   flex-wrap: wrap;
+}
+.log-actions {
+  gap: 2px;
+}
+.log-action-btn {
+  height: 24px;
+  padding: 0 8px;
+  font-size: var(--fs-xs);
 }
 
 .filter-chip {
@@ -160,6 +265,11 @@ onMounted(() => {
   .filter-chip {
     height: 30px;
     padding: 0 12px;
+    font-size: var(--fs-sm);
+  }
+  .log-action-btn {
+    height: 30px;
+    padding: 0 10px;
     font-size: var(--fs-sm);
   }
 }
@@ -190,6 +300,9 @@ onMounted(() => {
   font-size: var(--fs-xs);
   line-height: var(--lh-base);
   background: var(--bg);
+  /* 细滚动条：日志面板高频滚动，粗滚动条浪费横向空间 */
+  scrollbar-width: thin;
+  overscroll-behavior: contain;
 }
 
 .log-entry {
@@ -289,5 +402,31 @@ onMounted(() => {
     max-height: 360px;
     font-size: 11px;
   }
+}
+
+/* 复制反馈 toast */
+.copy-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--sp-8) + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  z-index: 200;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--bg-inverse);
+  color: var(--text-inverse);
+  border-radius: var(--r-full);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
+  white-space: nowrap;
+}
+.toast-fade-enter-active,
+.toast-fade-leave-active {
+  transition: opacity var(--dur-base) var(--ease-out), transform var(--dur-base) var(--ease-out);
+}
+.toast-fade-enter-from,
+.toast-fade-leave-to {
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
 }
 </style>

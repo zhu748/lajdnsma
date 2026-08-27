@@ -27,6 +27,8 @@ def load_gemini_module():
 
     fake_http_client = types.ModuleType("app.utils.http_client")
     fake_http_client.get_async_client = lambda: None
+    # Round 6: gemini.py 现在还导入分层超时常量（用于出站请求）。
+    fake_http_client.UPSTREAM_TIMEOUT = None
     sys.modules["app.utils.http_client"] = fake_http_client
 
     fake_logging = types.ModuleType("app.utils.logging")

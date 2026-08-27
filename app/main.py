@@ -22,6 +22,7 @@ from app.api import router, init_router, dashboard_router, init_dashboard_router
 from app.vertex.vertex_ai_init import init_vertex_ai
 from app.vertex.credentials_manager import CredentialManager
 from app.utils.http_client import close_async_client
+from app.utils.maintenance import install_async_exception_handler
 import app.config.settings as settings
 from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 import asyncio
@@ -233,6 +234,10 @@ sys.excepthook = handle_exception
 
 
 async def _startup():
+    # Round 6（详细日志）：接管 asyncio 事件循环的未处理异常 ——
+    # 此后孤儿 Task / 回调异常会进面板日志而不是只打 stderr。
+    install_async_exception_handler()
+
     # 首先加载持久化设置，确保所有配置都是最新的
     load_settings()
 

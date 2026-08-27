@@ -8,6 +8,7 @@ from app.utils.gemini_response_processing import (
     finalize_gemini_response,
     select_safety_settings,
 )
+from app.utils.stats import record_outbound_attempt
 
 
 async def _run_nonstream_completion(
@@ -22,6 +23,12 @@ async def _run_nonstream_completion(
     *,
     use_shield: bool = False,
 ):
+    # Round 6: RPM 窗口在发射时计数（旧逻辑只在完成时计数，在途/失败
+    # 请求全部漏记，高负载下退避系统性迟到）。
+    try:
+        record_outbound_attempt(current_api_key, chat_request.model)
+    except Exception:
+        pass
     gemini_client = GeminiClient(current_api_key)
     gemini_task = asyncio.create_task(
         gemini_client.complete_chat(

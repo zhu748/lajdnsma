@@ -262,6 +262,19 @@ function modelList(stat) {
     .sort((a, b) => b.calls - a.calls)
 }
 
+// 配额水位颜色：<60% 正常，60-85% 警告，>85% 危险
+function usageClass(stat) {
+  const p = stat.usage_percent || 0
+  if (p >= 85) return 'usage-bar--danger'
+  if (p >= 60) return 'usage-bar--warning'
+  return 'usage-bar--ok'
+}
+
+function usageLabel(stat) {
+  const p = Math.round(stat.usage_percent || 0)
+  return p > 0 ? `${p}%` : '—'
+}
+
 function toggleModels(keyId) {
   collapsedKeys.value[keyId] = !collapsedKeys.value[keyId]
 }
@@ -302,6 +315,7 @@ function toggleModels(keyId) {
               <th>密钥</th>
               <th style="text-align:right;">24h 调用</th>
               <th style="text-align:right;">令牌</th>
+              <th style="width:130px;">日额度</th>
               <th>模型</th>
             </tr>
           </thead>
@@ -311,6 +325,14 @@ function toggleModels(keyId) {
                 <td class="mono">{{ stat.api_key }}</td>
                 <td style="text-align:right;" class="mono">{{ fmt(stat.calls_24h) }}</td>
                 <td style="text-align:right;" class="mono">{{ fmt(stat.total_tokens) }}</td>
+                <td>
+                  <div class="usage-cell">
+                    <div class="usage-bar" :title="`${stat.calls_24h}/${stat.limit || 0} 次日额度`">
+                      <div class="usage-bar__fill" :class="usageClass(stat)" :style="{ width: Math.min(100, stat.usage_percent || 0) + '%' }"></div>
+                    </div>
+                    <span class="usage-cell__label mono">{{ usageLabel(stat) }}</span>
+                  </div>
+                </td>
                 <td>
                   <button
                     v-if="modelList(stat).length"
@@ -323,7 +345,7 @@ function toggleModels(keyId) {
                 </td>
               </tr>
               <tr v-if="collapsedKeys[stat.api_key]">
-                <td colspan="4" style="padding:0;border:none;">
+                <td colspan="5" style="padding:0;border:none;">
                   <div class="model-subtable">
                     <table class="table" style="background:transparent;">
                       <thead>
@@ -346,7 +368,7 @@ function toggleModels(keyId) {
               </tr>
             </template>
             <tr v-if="!pageRows.length">
-              <td colspan="4">
+              <td colspan="5">
                 <div class="empty-state" style="padding:var(--sp-8);">
                   <div class="empty-state__icon">∅</div>
                   <div class="empty-state__title">密钥池为空</div>
@@ -520,6 +542,42 @@ function toggleModels(keyId) {
 .model-subtable .table thead th {
   background: transparent;
   font-size: var(--fs-xs);
+}
+
+/* 日额度用量单元格：细进度条 + 百分比标签，水位一目了然 */
+.usage-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-bar {
+  flex: 1;
+  height: 5px;
+  min-width: 56px;
+  background: var(--bg-muted);
+  border-radius: var(--r-full);
+  overflow: hidden;
+}
+.usage-bar__fill {
+  height: 100%;
+  border-radius: var(--r-full);
+  transition: width var(--dur-base) var(--ease-out);
+}
+.usage-bar__fill.usage-bar--ok {
+  background: var(--success);
+}
+.usage-bar__fill.usage-bar--warning {
+  background: var(--warning);
+}
+.usage-bar__fill.usage-bar--danger {
+  background: var(--danger);
+}
+.usage-cell__label {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  min-width: 34px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 .progress {
   height: 6px;

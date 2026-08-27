@@ -46,13 +46,18 @@ async def handle_aistudio_chat_completion(
             detail="Gemini-format request requires a `payload` field",
         )
 
-    cache_key = build_request_cache_key(request, is_gemini=is_gemini)
-
+    # Round 6（性能/防滥用）：限流提前到缓存键计算之前。旧顺序先
+    # build_request_cache_key（对含数 MB base64 图片的请求是一次全量
+    # 哈希，CPU 密集）再 protect_from_abuse —— 已认证客户端可以高频
+    # 发送大 body，在 429 生效前强制服务端做重复重哈希（CPU 放大）。
+    # 先过限流再算键，超频请求的代价只是一次计数器递增。
     await protect_from_abuse(
         http_request,
         settings.MAX_REQUESTS_PER_MINUTE,
         settings.MAX_REQUESTS_PER_DAY_PER_IP,
     )
+
+    cache_key = build_request_cache_key(request, is_gemini=is_gemini)
 
     ensure_model_available(request.model, available_models)
     log(

@@ -20,6 +20,13 @@ function buildOption() {
   const textColor = dark ? '#A1A1AA' : '#71717A'
   const gridColor = dark ? '#27272A' : '#E4E4E7'
   return {
+    // 平滑动画：首次渲染 600ms，后续每 5s 数据刷新时 400ms 过渡，
+    // 折线以插值方式滑动而不是瞬间跳变，观感更「实时」。
+    animation: true,
+    animationDuration: 600,
+    animationDurationUpdate: 400,
+    animationEasing: 'cubicOut',
+    animationEasingUpdate: 'cubicInOut',
     grid: { left: 8, right: 8, top: 8, bottom: 8, containLabel: true },
     tooltip: {
       trigger: 'axis',

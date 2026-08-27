@@ -4,6 +4,7 @@ import os
 import logging
 import asyncio
 import time
+import httpx
 from app.utils.http_client import get_async_client
 from app.utils.logging import format_log_message
 from app.utils.stealth import build_key_probe_headers
@@ -75,20 +76,38 @@ def _parse_api_keys(raw: str) -> list:
 # ---------------------------------------------------------------------------
 
 # Maps api_key -> epoch seconds when the key becomes available again.
-# 429 -> 60s cooldown, 500/503 -> 5s cooldown, 401/403 -> permanent (until
-# process restart or manual reset).  The "permanent" form is encoded as a
-# very large timestamp so existing code can still treat it as a timestamp.
+# Round 7（key 亲和重试）：只有 429（配额耗尽，冷却时长采纳上游
+# retryDelay，默认 60s）与 401/403（密钥失效，进程重启或手动重置前
+# 永久拉黑）会写入冷却 —— 500/503/网络错误不冷却、不换 key，由重试
+# 循环用原 key 退避重试。日额度/RPM 阈值的让位由 select_valid_api_keys
+# 的既有逻辑处理（也属于配额耗尽）。The "permanent" form is encoded
+# as a very large timestamp so existing code can still treat it as a
+# timestamp.
 PERMANENT_BLOCK_TS = 2**62  # ~ year 15 billion
+
+# Round 7（key 亲和重试）：网络类错误不再触发冷却（status_code=0
+# 的调用方已移除）。保留 status_code=0 分支仅为 API 兼容 —— 若运维
+# 手动调用 mark_key_failure(key, 0) 仍可施加短冷却。
+_NETWORK_ERROR_DEFAULT_COOLDOWN_S = 30.0
 
 _key_cooldowns: dict[str, float] = {}
 _key_cooldowns_lock = asyncio.Lock()
 
 
-async def mark_key_failure(api_key: str, status_code: int) -> float:
+async def mark_key_failure(
+    api_key: str, status_code: int, cooldown_seconds: float | None = None
+) -> float:
     """Place a key on cooldown based on the failure type.
 
     Returns the cooldown duration (seconds).  0 means no cooldown applied
     (e.g. unrecognised status code).
+
+    Round 6:
+      * 新增 cooldown_seconds 参数：由调用方覆盖默认冷却时长 ——
+        429 时传入从响应体解析出的上游 retryDelay（见
+        error_handling.extract_retry_delay），网络类错误传入短冷却
+        （status_code=0 表示无 HTTP 状态码的传输层故障）。
+      * status_code=0（网络错误）→ 使用 cooldown_seconds 或 30s 默认。
     """
     if status_code in (401, 403):
         # Invalid / forbidden: permanent block until restart
@@ -102,11 +121,19 @@ async def mark_key_failure(api_key: str, status_code: int) -> float:
         logger.warning(log_msg)
         return cooldown
     if status_code == 429:
-        cooldown = 60.0
+        cooldown = 60.0 if cooldown_seconds is None else float(cooldown_seconds)
     elif status_code in (500, 503):
-        cooldown = 5.0
+        cooldown = 5.0 if cooldown_seconds is None else float(cooldown_seconds)
+    elif status_code == 0:
+        # 网络类错误（超时/连接失败，无 HTTP 状态码）：短冷却，
+        # 让 fill 模式的粘滞 key 能立即轮换到下一个健康 key。
+        cooldown = _NETWORK_ERROR_DEFAULT_COOLDOWN_S if cooldown_seconds is None else float(cooldown_seconds)
     else:
-        return 0.0
+        # 其它状态码但显式传入了冷却时长（防御性路径）
+        if cooldown_seconds is not None and cooldown_seconds > 0:
+            cooldown = float(cooldown_seconds)
+        else:
+            return 0.0
 
     available_at = time.time() + cooldown
     async with _key_cooldowns_lock:
@@ -218,8 +245,12 @@ class APIKeyManager:
 
         Fill 模式（默认，推荐用于反风控）:
             1. 始终返回当前栈顶 key，直到该 key:
-               - 进入冷却（429/401/403/500/503）
+               - 进入冷却（Round 7 起：仅 429 配额耗尽与 401/403 密钥失效；
+                 500/503/网络错误不冷却，配合重试循环的 preferred_keys
+                 机制实现同 key 亲和重试）
                - 当日累计调用数 ≥ API_KEY_DAILY_LIMIT
+               - RPM 达到退避阈值（由 select_valid_api_keys 调用
+                 advance_sticky_key 显式让出）
             2. 满足上述任一条件时 pop 该 key，转到下一个
             3. 栈空时（所有 key 都不可用）才重新随机化并再次循环
 
@@ -235,6 +266,25 @@ class APIKeyManager:
         if self.strategy == "polling":
             return await self._get_available_key_polling()
         return await self._get_available_key_fill()
+
+    async def advance_sticky_key(self):
+        """Round 6: 弹出当前粘滞 key，让全局粘性转移到下一个 key。
+
+        使用场景：fill 模式下粘滞 key 因 RPM 达到退避阈值需要跳过时，
+        由 select_valid_api_keys 调用 —— 若不弹出，下一次
+        get_available_key() 仍返回同一个 key，选择循环空转后返回空
+        列表，池内其余健康 key 完全没被尝试（详见
+        api_key_selection.py 的 Round 6 注释）。
+
+        被弹出的 key 不会丢失：栈空时 _reset_key_stack() 会把全部
+        api_keys 重新洗入。polling 模式下本方法是 no-op（每次取 key
+        本来就 pop）。
+        """
+        if self.strategy == "polling":
+            return
+        async with self.lock:
+            if self.key_stack:
+                self.key_stack.pop()
 
     async def _get_available_key_polling(self):
         """Polling (round-robin) mode: original behaviour."""
@@ -383,5 +433,29 @@ async def test_api_key(api_key: str) -> bool:
         response = await client.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         return True
-    except Exception:
+    except httpx.HTTPStatusError as e:
+        # Round 6（详细日志）：区分"密钥无效"（401/403，预期内）与
+        # "上游拒绝"（429/5xx，可能是探测过快）—— 旧实现对所有异常
+        # 一律静默返回 False，网络故障与密钥无效在日志里不可区分，
+        # 排障方向会被带偏。
+        status = e.response.status_code
+        if status in (401, 403):
+            log_msg = format_log_message(
+                "INFO",
+                f"key#{hash(api_key) & 0xFFFFFF:06x} 探测失败: HTTP {status}（密钥无效或无权限）",
+            )
+            logger.info(log_msg)
+        else:
+            log_msg = format_log_message(
+                "WARNING",
+                f"key#{hash(api_key) & 0xFFFFFF:06x} 探测失败: HTTP {status}",
+            )
+            logger.warning(log_msg)
+        return False
+    except Exception as e:
+        log_msg = format_log_message(
+            "WARNING",
+            f"key#{hash(api_key) & 0xFFFFFF:06x} 探测失败（网络异常）: {type(e).__name__}",
+        )
+        logger.warning(log_msg)
         return False

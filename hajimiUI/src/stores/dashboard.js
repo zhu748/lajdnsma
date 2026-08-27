@@ -75,6 +75,8 @@ export const useDashboardStore = defineStore('dashboard', () => {
   const isRefreshing = ref(false)
   const isConfigLoaded = ref(false)
   const lastError = ref('')
+  // 最近一次成功拉取数据的时间（用于头部「最后更新」指示器）
+  const lastUpdated = ref(null)
 
   // ---------- Dark mode ----------
   const isDarkMode = ref(localStorage.getItem('darkMode') === 'true')
@@ -132,6 +134,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
       }
       const data = await response.json()
       updateDashboardData(data)
+      lastUpdated.value = new Date()
     } catch (err) {
       console.error('fetch dashboard-data:', err)
       lastError.value = err.message || 'NETWORK'
@@ -265,6 +268,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     isUnlocked,
     sessionPassword,
     lastError,
+    lastUpdated,
     // actions
     setSessionPassword,
     fetchDashboardData,

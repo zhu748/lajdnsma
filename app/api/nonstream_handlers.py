@@ -9,6 +9,7 @@ from app.api.nonstream_completion import (
     process_nonstream_request,
 )
 from app.utils.api_key_selection import select_valid_api_keys
+from app.utils.error_handling import should_retry_same_key
 from app.utils.empty_response import (
     build_empty_limit_response,
     log_empty_response_limit,
@@ -47,6 +48,9 @@ async def process_request(
     empty_response_count = 0
     # Round 4: 已失败的批次计数，用于批间 full-jitter 退避（防重试风暴）
     failed_batches = 0
+    # Round 7（key 亲和重试）：上一批因非配额耗尽失败的 key，
+    # 下一批优先重用（"只有配额耗尽才换 key"）。
+    preferred_keys = None
 
     while should_continue_retry(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
@@ -62,6 +66,7 @@ async def process_request(
             batch_num=batch_num,
             request_type="non-stream",
             model=chat_request.model,
+            preferred_keys=preferred_keys,
         )
         if not valid_keys:
             break
@@ -99,6 +104,13 @@ async def process_request(
 
         # 批次失败：计数 +1，下一轮循环顶部会先退避
         failed_batches += 1
+
+        # Round 7（key 亲和重试）：非配额耗尽（500/503/网络错误/空
+        # 响应）失败的 key 下一批继续用 —— 只有配额耗尽（429/日额度/
+        # RPM 阈值）才轮换到下一个 key。
+        preferred_keys = (
+            [k for k in valid_keys if should_retry_same_key(k)] or None
+        )
 
         if valid_keys:
             # Hardening: previously this called increase_concurrency on
@@ -157,6 +169,8 @@ async def process_nonstream_with_keepalive_stream(
             empty_response_count = 0
             # Round 4: 批间退避计数（与 process_request 同策略）
             failed_batches = 0
+            # Round 7（key 亲和重试）：上一批非配额耗尽失败的 key 优先重用
+            preferred_keys = None
 
             while should_continue_retry(
                 current_try_num,
@@ -177,6 +191,7 @@ async def process_nonstream_with_keepalive_stream(
                     batch_num=batch_num,
                     request_type="non-stream",
                     model=chat_request.model,
+                    preferred_keys=preferred_keys,
                 )
                 if not valid_keys:
                     break
@@ -235,6 +250,12 @@ async def process_nonstream_with_keepalive_stream(
 
                 # 批次失败：计数 +1，下一轮循环顶部会先退避
                 failed_batches += 1
+
+                # Round 7（key 亲和重试）：非配额耗尽失败的 key 继续
+                # 用原 key 重试，不轮换。
+                preferred_keys = (
+                    [k for k in valid_keys if should_retry_same_key(k)] or None
+                )
 
                 if valid_keys:
                     if settings.INCREASE_CONCURRENT_ON_FAILURE > 0:

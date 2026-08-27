@@ -41,6 +41,13 @@ async def generate_native_stream_chunks(
 
     stream_generator = None
     try:
+        # Round 6: RPM 窗口发射计数（见 stats.record_outbound_attempt）。
+        try:
+            from app.utils.stats import record_outbound_attempt
+
+            record_outbound_attempt(api_key, chat_request.model)
+        except Exception:
+            pass
         client = GeminiClient(api_key)
         stream_generator = client.stream_chat(
             chat_request,

@@ -13,8 +13,12 @@ def load_http_client_module():
     fake_httpx = types.ModuleType("httpx")
 
     class Timeout:
-        def __init__(self, value):
-            self.value = value
+        # Round 6: 真实 httpx.Timeout 接受 connect/read/write/pool 四个
+        # 关键字参数（或单个标量）。http_client.UPSTREAM_TIMEOUT 现在使用
+        # 分层关键字形式，fake 需要跟随真实签名。
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
 
     class Limits:
         def __init__(self, **kwargs):

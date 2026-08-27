@@ -15,6 +15,7 @@ const isUnlocked = computed(() => dashboardStore.isUnlocked)
 const isDarkMode = computed(() => dashboardStore.isDarkMode)
 const enableVertex = computed(() => dashboardStore.config.enableVertex)
 const lastError = computed(() => dashboardStore.lastError)
+const isRefreshing = computed(() => dashboardStore.isRefreshing)
 
 onMounted(() => {
   if (isUnlocked.value) startPolling()
@@ -165,10 +166,11 @@ function formatTime(t) {
         <button
           v-if="isUnlocked"
           class="btn btn--ghost btn--sm btn--icon"
+          :class="{ 'btn--spinning': isRefreshing }"
           @click="handleRefresh"
           title="刷新数据"
         >
-          ↻
+          <span class="refresh-icon">↻</span>
         </button>
         <button
           v-if="isUnlocked"
@@ -298,5 +300,15 @@ function formatTime(t) {
   background: var(--warning-subtle);
   border-color: var(--warning);
   color: var(--warning-strong);
+}
+
+/* 刷新按钮：拉取数据时图标旋转，给用户「正在刷新」的即时反馈 */
+.btn--spinning .refresh-icon {
+  display: inline-block;
+  animation: refresh-spin 0.9s linear infinite;
+}
+@keyframes refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 </style>

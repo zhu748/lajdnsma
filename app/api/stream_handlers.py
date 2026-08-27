@@ -7,6 +7,7 @@ from app.api.fake_stream_handlers import handle_fake_streaming
 from app.api.native_stream_handlers import generate_native_stream_chunks
 from app.models.schemas import ChatCompletionRequest
 from app.utils.api_key_selection import select_valid_api_keys
+from app.utils.error_handling import should_retry_same_key
 from app.utils.empty_response import (
     build_empty_limit_response,
     log_empty_response_limit,
@@ -47,6 +48,9 @@ async def generate_fake_stream_response(
     empty_response_count = 0
     # Round 4: 已失败批次计数，用于批间 full-jitter 退避（防重试风暴）
     failed_batches = 0
+    # Round 7（key 亲和重试）：上一批非配额耗尽失败的 key 优先重用
+    # （"只有配额耗尽才换 key"）。
+    preferred_keys = None
 
     while should_continue_retry(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
@@ -63,6 +67,7 @@ async def generate_fake_stream_response(
             batch_num=batch_num,
             request_type="stream",
             model=chat_request.model,
+            preferred_keys=preferred_keys,
         )
         if not valid_keys:
             break
@@ -109,6 +114,12 @@ async def generate_fake_stream_response(
 
         # 批次失败：计数 +1，下一轮循环顶部会先退避
         failed_batches += 1
+
+        # Round 7（key 亲和重试）：非配额耗尽（500/503/网络错误/空
+        # 响应）失败的 key 下一批继续用原 key，不轮换。
+        preferred_keys = (
+            [k for k in valid_keys if should_retry_same_key(k)] or None
+        )
 
         if reached_empty_response_limit(empty_response_count, settings.MAX_EMPTY_RESPONSES):
             log_empty_response_limit(
@@ -165,6 +176,8 @@ async def generate_native_stream_response(
     # Round 4: 批间退避计数（与非流式同策略；真流式每批只打 1 个 key，
     # 连环切换 key 的间隔同样不能为零，否则单请求也能形成密集脉冲）
     failed_batches = 0
+    # Round 7（key 亲和重试）：上一批非配额耗尽失败的 key 优先重用
+    preferred_keys = None
 
     while should_continue_retry(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
@@ -177,6 +190,7 @@ async def generate_native_stream_response(
             batch_num=1,
             request_type="stream",
             model=chat_request.model,
+            preferred_keys=preferred_keys,
         )
         if not valid_keys:
             break
@@ -207,6 +221,12 @@ async def generate_native_stream_response(
 
         # 批次失败：计数 +1，下一轮循环顶部会先退避
         failed_batches += 1
+
+        # Round 7（key 亲和重试）：非配额耗尽失败的 key 继续
+        # 用原 key 重试，不轮换。
+        preferred_keys = (
+            [k for k in valid_keys if should_retry_same_key(k)] or None
+        )
 
         if reached_empty_response_limit(empty_response_count, settings.MAX_EMPTY_RESPONSES):
             log_empty_response_limit(

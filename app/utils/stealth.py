@@ -105,6 +105,65 @@ def _x_goog_api_client_for(ua: str) -> Optional[str]:
     return None
 
 
+def _is_browser_ua(ua: str) -> bool:
+    return ua.startswith("Mozilla/")
+
+
+# Chrome "Consistency" 版本字符串到 sec-ch-ua 的映射。Chrome 的
+# major version 与其品牌版本有固定差值（如 Chrome 131 ↔ "Chromium";v="131",
+# "Google Chrome";v="131"），这里只填 major version 即与 UA 一致。
+def _sec_ch_ua_for(ua: str) -> str:
+    import re
+
+    m = re.search(r"Chrome/(\d+)", ua)
+    major = m.group(1) if m else "131"
+    return f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not_A Brand";v="24"'
+
+
+def _sec_ch_platform_for(ua: str) -> str:
+    if "Windows NT" in ua:
+        return '"Windows"'
+    if "Macintosh" in ua or "Mac OS X" in ua:
+        return '"macOS"'
+    if "X11" in ua or "Linux" in ua:
+        return '"Linux"'
+    return '"Windows"'
+
+
+def _sec_ch_mobile_for(ua: str) -> str:
+    return "?1" if any(
+        token in ua for token in ("Android", "iPhone", "iPad", "Mobile")
+    ) else "?0"
+
+
+def _apply_browser_fingerprint_headers(headers: Dict[str, str], ua: str) -> Dict[str, str]:
+    """Round 6: 为浏览器 UA 补齐真实浏览器必带的 Client Hints / Fetch Metadata 头。
+
+    此前 UA 池已保证 UA 与 x-goog-api-client 的一致性，但 UA 选中
+    Chrome 时请求却不携带任何 `sec-ch-ua` / `sec-fetch-*` 头 —— 真实
+    Chrome 发往 Google API 的 XHR 一定带这组头，"Chrome UA + 无 sec 头"
+    是 TLS/UA 一致性修完后剩下的头部层指纹。配套规则：
+
+    * `sec-ch-ua` 系列与 UA 中的 Chrome major version 联动（版本不一致
+      同样是指纹）。
+    * `Origin`/`Referer` 指向 aistudio.google.com —— 因为该 UA 对应的
+      真实流量来源就是 AI Studio Web 客户端。
+    * `sec-fetch-*` 是 XHR 的标准取值组合（dest=empty/mode=cors）。
+    * SDK / curl UA 完全不携带这些头（真实 SDK 也不带）。
+    """
+    if not _is_browser_ua(ua):
+        return headers
+    headers["sec-ch-ua"] = _sec_ch_ua_for(ua)
+    headers["sec-ch-ua-mobile"] = _sec_ch_mobile_for(ua)
+    headers["sec-ch-ua-platform"] = _sec_ch_platform_for(ua)
+    headers["Origin"] = "https://aistudio.google.com"
+    headers["Referer"] = "https://aistudio.google.com/"
+    headers["sec-fetch-dest"] = "empty"
+    headers["sec-fetch-mode"] = "cors"
+    headers["sec-fetch-site"] = "cross-site"
+    return headers
+
+
 def _apply_goog_client_header(headers: Dict[str, str], ua: str) -> Dict[str, str]:
     """Attach x-goog-api-client only when the UA is an SDK client."""
     client_header = _x_goog_api_client_for(ua)
@@ -141,6 +200,7 @@ def build_gemini_headers(
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    _apply_browser_fingerprint_headers(headers, ua)
     return _apply_goog_client_header(headers, ua)
 
 
@@ -160,7 +220,8 @@ def build_openai_compat_headers(
         "Accept-Language": "en-US,en;q=0.9",
     }
     # OpenAI-compat 路径同样只在 SDK UA 下携带 x-goog-api-client，
-    # 保持与 UA 的组合一致性。
+    # 保持与 UA 的组合一致性；浏览器 UA 则补齐 sec-ch-ua/sec-fetch 头。
+    _apply_browser_fingerprint_headers(headers, ua)
     return _apply_goog_client_header(headers, ua)
 
 
@@ -175,6 +236,7 @@ def build_embedding_headers(api_key: Optional[str] = None) -> Dict[str, str]:
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    _apply_browser_fingerprint_headers(headers, ua)
     return _apply_goog_client_header(headers, ua)
 
 
@@ -188,6 +250,7 @@ def build_key_probe_headers(api_key: Optional[str] = None) -> Dict[str, str]:
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    _apply_browser_fingerprint_headers(headers, ua)
     return _apply_goog_client_header(headers, ua)
 
 

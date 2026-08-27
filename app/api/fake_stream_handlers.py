@@ -4,6 +4,7 @@ from app.utils.gemini_response_processing import (
     finalize_gemini_response,
     select_safety_settings,
 )
+from app.utils.stats import record_outbound_attempt
 
 
 async def handle_fake_streaming(
@@ -16,6 +17,11 @@ async def handle_fake_streaming(
     safety_settings_g2,
     cache_key,
 ):
+    # Round 6: RPM 窗口发射计数（见 stats.record_outbound_attempt）。
+    try:
+        record_outbound_attempt(api_key, chat_request.model)
+    except Exception:
+        pass
     gemini_client = GeminiClient(api_key)
 
     try:

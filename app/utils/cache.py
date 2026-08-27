@@ -14,6 +14,78 @@ import heapq
 CacheItem = Dict[str, Any]
 
 
+def _hash_generation_params(h, chat_request, is_gemini: bool) -> None:
+    """Round 6（缓存正确性）：把采样/生成参数纳入缓存键。
+
+    旧键只哈希 model + tools + 最近 N 条消息 —— temperature /
+    max_tokens / top_p / stop 等参数不同但消息相同的两个请求共享
+    缓存键，第二个请求会拿到第一个请求在**不同采样参数**下的答案
+    （CALCULATE_CACHE_ENTRIES=6 截断时更易碰撞）。现在把标量生成
+    参数规范化后增量哈希：None/缺省不写入（保持与旧键兼容的"默认
+    请求"路径），非默认值以「参数名:值」形式写入。
+    """
+    # OpenAI 格式的标量采样参数
+    _OPENAI_SCALARS = (
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "max_completion_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "seed",
+        "logprobs",
+        "top_logprobs",
+    )
+    # Gemini 原生 payload 里除 generationConfig 外基本不含采样参数
+    _GEMINI_CONFIG_KEYS = (
+        "temperature",
+        "topP",
+        "topK",
+        "maxOutputTokens",
+        "stopSequences",
+        "presencePenalty",
+        "frequencyPenalty",
+        "seed",
+        "thinkingConfig",
+        "responseMimeType",
+        "responseModalities",
+        "candidateCount",
+    )
+    try:
+        if is_gemini:
+            payload = getattr(chat_request, "payload", None)
+            config = getattr(payload, "generationConfig", None)
+            if isinstance(config, dict):
+                for k in _GEMINI_CONFIG_KEYS:
+                    v = config.get(k)
+                    if v is None or v == "" or v == []:
+                        continue
+                    h.update(f"gp:{k}=".encode("utf-8"))
+                    h.update(
+                        json.dumps(v, sort_keys=True, default=str).encode(
+                            "utf-8", errors="surrogateescape"
+                        )
+                    )
+        else:
+            for name in _OPENAI_SCALARS:
+                v = getattr(chat_request, name, None)
+                if v is None or v == "":
+                    continue
+                h.update(f"op:{name}=".encode("utf-8"))
+                h.update(str(v).encode("utf-8", errors="surrogateescape"))
+            stop = getattr(chat_request, "stop", None)
+            if stop:
+                h.update(b"op:stop=")
+                h.update(
+                    json.dumps(stop, sort_keys=True, default=str).encode(
+                        "utf-8", errors="surrogateescape"
+                    )
+                )
+    except Exception:
+        # 哈希失败时宁可退化为旧键（碰撞事小，崩溃事大）
+        pass
+
+
 class ResponseCacheManager:
     """管理API响应缓存的类，一个键可以对应多个缓存项（使用deque）"""
 
@@ -38,6 +110,12 @@ class ResponseCacheManager:
         self.max_entries = max_entries  # 总条目数限制
         self.cur_cache_num = 0  # 当前条目数
         self.lock = asyncio.Lock()  # Added lock
+        # Round 6（性能）：精确 LRU 驱逐堆。(created_at, seq, cache_key)
+        # 元组的最小堆；seq 单调递增用于同秒内排序与条目身份验证。
+        # get_and_remove / clean_expired 移除的条目会留下惰性堆节点，
+        # 驱逐时通过比对 deque 内条目的 seq 跳过（详见 _evict_oldest）。
+        self._evict_heap: list = []
+        self._seq: int = 0
 
     async def get_and_remove(self, cache_key: str) -> Tuple[Optional[Any], bool]:
         """获取并删除指定键的第一个有效缓存项。"""
@@ -97,11 +175,60 @@ class ResponseCacheManager:
 
             self.cache[cache_key].append(new_item)  # 追加到deque末尾
             self.cur_cache_num += 1
+            # Round 6: 记录精确驱逐堆节点 + 条目身份 seq。
+            self._seq += 1
+            new_item["seq"] = self._seq
+            heapq.heappush(self._evict_heap, (now, self._seq, cache_key))
             needs_cleaning = self.cur_cache_num > self.max_entries
 
         if needs_cleaning:
             # 在锁外调用清理，避免长时间持有锁
             await self.clean_if_needed()
+
+    def _evict_oldest(self, count: int) -> int:
+        """Round 6（性能）：从堆顶弹出全局最旧的 count 个有效条目。
+
+        旧实现（clean_if_needed）每次全量收集所有条目（O(N)）+
+        heapq.nsmallest + 每项 deque.remove（O(K)）+ 每项一条日志，
+        且全程持有 asyncio 锁 —— 缓存持续满载时每次 store 都触发一遍，
+        所有请求的缓存读写被挂起，是热路径上的性能悬崖。
+
+        新实现：堆顶就是全局最旧，弹出后通过 seq 在对应 deque 里定位
+        条目（deque 通常只有 1-2 项，扫描成本恒定）；get/clean 已移除
+        的条目在堆里留下惰性节点，靠 seq 验证跳过。总计均摊
+        O(count·logN)，且日志合并为单行。
+
+        调用方必须已持有 self.lock。
+        """
+        removed = 0
+        skipped_stale = 0
+        while removed < count and self._evict_heap:
+            created_at, seq, key = heapq.heappop(self._evict_heap)
+            cache_deque = self.cache.get(key)
+            if not cache_deque:
+                skipped_stale += 1
+                continue
+            # 在 deque 里找对应 seq 的条目（deque 短，恒定成本）
+            found_idx = None
+            for idx, item in enumerate(cache_deque):
+                if item.get("seq") == seq:
+                    found_idx = idx
+                    break
+            if found_idx is None:
+                skipped_stale += 1  # 已被 get/clean 移除的惰性堆节点
+                continue
+            del cache_deque[found_idx]
+            removed += 1
+            if not cache_deque:
+                self.cache.pop(key, None)
+        if removed > 0:
+            self.cur_cache_num = max(0, self.cur_cache_num - removed)
+            log(
+                "info",
+                f"缓存容量驱逐：移除 {removed} 个最旧条目"
+                f"（跳过 {skipped_stale} 个失效堆节点），当前 {self.cur_cache_num}/{self.max_entries}",
+            )
+        return removed
 
     async def clean_expired(self):
         """清理所有缓存项中已过期的项。"""
@@ -139,7 +266,11 @@ class ResponseCacheManager:
                 self.cur_cache_num = max(0, self.cur_cache_num - total_cleaned)
 
     async def clean_if_needed(self):
-        """如果缓存总条目数超过限制，清理全局最旧的项目。"""
+        """如果缓存总条目数超过限制，清理全局最旧的项目。
+
+        Round 6：驱逐逻辑迁移到 _evict_oldest（堆式精确 LRU），本方法
+        只做阈值判断与调用，全部在锁内完成但成本均摊 O(logN)。
+        """
 
         async with self.lock:
             if self.cur_cache_num <= self.max_entries:
@@ -151,73 +282,7 @@ class ResponseCacheManager:
                 return
 
             items_to_remove_count = self.cur_cache_num - target_size
-            log(
-                "info",
-                f"缓存总数 {self.cur_cache_num} 超过限制 {self.max_entries}，需要清理 {items_to_remove_count} 个",
-            )
-
-            # 收集所有缓存项及其元数据
-            all_items_meta = []
-            for key, cache_deque in self.cache.items():
-                for item in cache_deque:
-                    all_items_meta.append(
-                        {
-                            "key": key,
-                            "created_at": item.get("created_at", 0),
-                            "item": item,
-                        }
-                    )
-
-            # 找出最旧的 N 项
-            actual_remove_count = min(items_to_remove_count, len(all_items_meta))
-            if actual_remove_count <= 0:
-                return  # 没有项目可移除或无需移除
-
-            items_to_remove = heapq.nsmallest(
-                actual_remove_count, all_items_meta, key=lambda x: x["created_at"]
-            )
-
-            # 执行移除
-            items_actually_removed = 0
-            keys_potentially_empty = set()
-            for item_meta in items_to_remove:
-                key_to_clean = item_meta["key"]
-                item_to_clean = item_meta["item"]
-
-                if key_to_clean in self.cache:
-                    try:
-                        # 直接从 deque 中移除指定的 item 对象
-                        self.cache[key_to_clean].remove(item_to_clean)
-                        items_actually_removed += 1
-                        # 计数器在最后统一更新
-                        log(
-                            "info",
-                            f"因容量限制，删除键 {key_to_clean[:8]}... 的旧缓存项 (创建于 {item_meta['created_at']})。",
-                        )
-                        keys_potentially_empty.add(key_to_clean)
-                    except (KeyError, ValueError):
-                        log(
-                            "warning",
-                            f"尝试因容量限制删除缓存项时未找到 (可能已被提前移除): {key_to_clean[:8]}...",
-                        )
-                        pass
-
-            # 检查是否有 deque 因本次清理变空
-            for key in keys_potentially_empty:
-                if key in self.cache and not self.cache[key]:
-                    del self.cache[key]
-                    log(
-                        "info",
-                        f"因容量限制清理后，键 {key[:8]}... 的deque已空，移除该键。",
-                    )
-
-            # 统一更新缓存计数
-            if items_actually_removed > 0:
-                self.cur_cache_num = max(0, self.cur_cache_num - items_actually_removed)
-                log(
-                    "info",
-                    f"因容量限制，共清理了 {items_actually_removed} 个旧缓存项。清理后缓存数: {self.cur_cache_num}",
-                )
+            self._evict_oldest(items_to_remove_count)
 
 
 def generate_cache_key(
@@ -235,6 +300,10 @@ def generate_cache_key(
 
     # 1. 哈希模型名称
     h.update(chat_request.model.encode("utf-8", errors="surrogateescape"))
+
+    # 1.2 Round 6: 哈希生成/采样参数（temperature/max_tokens/top_p/...），
+    # 防止"同消息不同参数"的请求共享缓存键导致串答（详见函数 docstring）。
+    _hash_generation_params(h, chat_request, is_gemini=is_gemini)
 
     # 1.5 哈希工具定义。
     # Correctness: tools 不属于消息历史，旧的键计算只哈希模型 + 最近 N

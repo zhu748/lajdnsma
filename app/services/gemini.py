@@ -8,7 +8,7 @@ import secrets
 import string
 import app.config.settings as settings
 
-from app.utils.http_client import get_async_client
+from app.utils.http_client import get_async_client, UPSTREAM_TIMEOUT
 from app.utils.logging import log
 from app.utils.sse import iter_sse_json
 from app.utils.stealth import (
@@ -503,12 +503,29 @@ class GeminiClient:
 
         client = await get_async_client()
         async with client.stream(
-            "POST", url, headers=headers, json=data, timeout=600
+            "POST", url, headers=headers, json=data, timeout=UPSTREAM_TIMEOUT
         ) as response:
             try:
                 # 检查响应状态码，如果不是成功，则先消费响应体再抛出异常
                 if response.status_code != 200:
                     await response.aread()
+                    # Round 6（详细日志）：非 200 时把脱敏后的上游错误
+                    # 摘要（message/status/quota 维度）记入面板日志 ——
+                    # 此前 body 被 aread() 消费后直接丢弃，排障只剩
+                    # 状态码。冷却时长也已按 429 retryDelay 调整（见
+                    # error_handling.schedule_key_cooldown）。
+                    try:
+                        from app.utils.error_handling import summarize_upstream_error
+
+                        summary = summarize_upstream_error(response)
+                        if summary:
+                            log(
+                                "warning",
+                                f"上游错误 (stream, HTTP {response.status_code}): {summary}",
+                                extra={**extra_log, "status_code": response.status_code},
+                            )
+                    except Exception:
+                        pass
                     response.raise_for_status()
 
                 async for data in iter_sse_json(response):
@@ -536,7 +553,27 @@ class GeminiClient:
         headers["x-goog-api-key"] = self.api_key
 
         client = await get_async_client()
-        response = await client.post(url, headers=headers, json=data, timeout=600)
+        response = await client.post(url, headers=headers, json=data, timeout=UPSTREAM_TIMEOUT)
+        if response.status_code != 200:
+            # Round 6（详细日志）：与 stream 路径对齐，非 200 时记录
+            # 脱敏后的上游错误摘要。
+            try:
+                from app.utils.error_handling import summarize_upstream_error
+
+                summary = summarize_upstream_error(response)
+                if summary:
+                    log(
+                        "warning",
+                        f"上游错误 (non-stream, HTTP {response.status_code}): {summary}",
+                        extra={
+                            "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
+                            "request_type": "non-stream",
+                            "model": request.model,
+                            "status_code": response.status_code,
+                        },
+                    )
+            except Exception:
+                pass
         response.raise_for_status()  # 检查 HTTP 错误状态
 
         return GeminiResponseWrapper(response.json())
