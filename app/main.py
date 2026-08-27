@@ -25,6 +25,7 @@ from app.utils.http_client import close_async_client
 import app.config.settings as settings
 from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 import asyncio
+import random as _random
 import sys
 import pathlib
 import os
@@ -179,8 +180,6 @@ async def check_remaining_keys_async(keys_to_check: list, initial_invalid_keys: 
     """
     在后台异步检查剩余的 API 密钥。
     """
-    import random as _random
-
     local_invalid_keys = []
     found_valid_keys = False
 
@@ -261,7 +260,14 @@ async def _startup():
     keys_to_check_later = []
 
     # 阻塞式查找第一个有效密钥
+    # Round 4: 探测之间加 0.3-0.8s 轻微 jitter——此前的启动探测循环
+    # 与后台检查循环（2-5s jitter）不同，是零间隔连发：N 个 key 在
+    # 几秒内从同一 IP 逐个探测 /models，正是密钥枚举脚本的节奏特征。
+    # 0.3-0.8s 足够打乱节奏，又不会明显拖慢启动（正常情况下第一个
+    # key 有效，循环只跑一趟）。
     for index, key in enumerate(initial_keys):
+        if index > 0:
+            await asyncio.sleep(_random.uniform(0.3, 0.8))
         is_valid = await test_api_key(key)
         if is_valid:
             log("info", f"找到第一个有效密钥: key#{hash(key) & 0xFFFFFF:06x}")

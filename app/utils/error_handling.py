@@ -13,6 +13,72 @@ from app.utils.stealth import full_jitter_backoff
 logger = logging.getLogger("my_logger")
 
 
+# ---------------------------------------------------------------------------
+# Key-cooldown activation (round 4)
+# ---------------------------------------------------------------------------
+# CRITICAL FIX: 全部 5 条真实请求路径（nonstream_completion /
+# nonstream_status_handlers / native_stream_handlers / fake_stream_handlers /
+# fake_stream_batch_runner）在异常分支调用的都是同步的
+# handle_gemini_error()——它只记日志、从不触发 mark_key_failure()。
+# 唯一会做冷却标记的 handle_api_error() 在整个仓库里没有任何调用方。
+# 结果：429（限流）的密钥从未进入冷却，下一次 select_valid_api_keys
+# 会再次选中同一个密钥 → 反复撞 429 → 持续限流甚至账号被风控升级，
+# 这正是"密钥池被谷歌识别"的最典型加速器。
+#
+# 修复：handle_gemini_error() 在解析出上游 HTTP 状态码后，通过
+# fire-and-forget 任务调度 mark_key_failure()（保持同步签名不变，
+# 所有既有调用点零改动）。任务引用由模块级 set 持有，防止被 GC。
+_cooldown_tasks: set = set()
+
+_COOLDOWN_ELIGIBLE_STATUS = {429, 401, 403, 500, 503}
+
+
+def _extract_status_code(error) -> int | None:
+    """Best-effort HTTP status extraction from an upstream exception."""
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    # httpx.HTTPStatusError also exposes .request/.response; some
+    # wrapped exceptions re-raise with the code embedded in args[0].
+    if error.args and isinstance(error.args[0], int):
+        return error.args[0]
+    return None
+
+
+def schedule_key_cooldown(error, api_key: str) -> None:
+    """Fire-and-forget: place the failing key on cooldown per its status code.
+
+    Safe to call from sync contexts inside a running event loop (which is
+    always the case for the request handlers).  No-op when there is no
+    running loop (e.g. unit tests calling handle_gemini_error directly).
+    """
+    if not api_key:
+        return
+    status_code = _extract_status_code(error)
+    if status_code not in _COOLDOWN_ELIGIBLE_STATUS:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _mark():
+        try:
+            from app.utils.api_key import mark_key_failure
+
+            await mark_key_failure(api_key, status_code)
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("schedule_key_cooldown: mark_key_failure failed", exc_info=True)
+
+    try:
+        task = loop.create_task(_mark())
+        _cooldown_tasks.add(task)
+        task.add_done_callback(_cooldown_tasks.discard)
+    except RuntimeError:  # pragma: no cover - loop shutting down
+        pass
+
+
 def _key_id(api_key: str) -> str:
     """Return a stable hash-based key identifier for logging.
 
@@ -36,11 +102,19 @@ def sanitize_string(text: str) -> str:
     effectively equivalent to telling the client "this is a Gemini
     key".  We now replace matched keys with a hash identifier so no
     part of the real key reaches the client.
+
+    Round 4: 2025 起 Google AI Studio 签发的新版 `AQ.` 前缀密钥（见
+    api_key.py 的 NEW_FORMAT_KEY_PATTERN）此前不在脱敏范围内——若
+    上游错误串里嵌有该格式密钥，会原样泄露给客户端。现在两种
+    已知格式都会被替换为 hash 标识。
     """
-    api_key_pattern = re.compile(r"(AIza[A-Za-z0-9\-_]{35})")
+    # 经典格式：AIza + 35 位（总长 39）；新版格式：AQ. + 至少 20 位
+    api_key_pattern = re.compile(
+        r"(AIza[A-Za-z0-9\-_]{35})|(AQ\.[A-Za-z0-9_-]{20,})"
+    )
 
     def redact_key(match):
-        key = match.group(1)
+        key = match.group(1) or match.group(2)
         # Use a stable hash identifier — no part of the real key is
         # preserved, and the `key#` prefix mirrors the logging format
         # used elsewhere so logs and client-facing messages stay
@@ -56,7 +130,14 @@ def handle_gemini_error(error, current_api_key) -> str:
 
     所有返回给客户端的错误信息都不再包含 "Gemini API" 字样，避免
     暴露上游服务供应商的身份。
+
+    Round 4: 这里同时调度密钥冷却（schedule_key_cooldown）——此前
+    冷却机制只存在于从未被调用的 handle_api_error() 里，导致 429
+    密钥反复被选中（详见模块顶部注释）。
     """
+    # 先调度冷却标记（fire-and-forget，不阻塞错误处理本身）
+    schedule_key_cooldown(error, current_api_key)
+
     # 清洗完整的错误字符串
     sanitized_full_error_str = sanitize_string(str(error))
     key_for_log = _key_id(current_api_key)

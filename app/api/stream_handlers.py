@@ -19,6 +19,7 @@ from app.utils.response_loop_helpers import (
     log_concurrency_increase,
 )
 from app.utils.retry_state import (
+    compute_inter_batch_backoff,
     increase_concurrency,
     decrease_concurrency,
     next_batch_size,
@@ -44,10 +45,18 @@ async def generate_fake_stream_response(
     max_retry_num = settings.MAX_RETRY_NUM
     current_try_num = 0
     empty_response_count = 0
+    # Round 4: 已失败批次计数，用于批间 full-jitter 退避（防重试风暴）
+    failed_batches = 0
 
     while should_continue_retry(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
     ):
+        # 批间退避：仅在已经失败过至少一批、且循环还会继续时才等待。
+        # 对 SSE 流来说 cap 8s 的静默完全可接受（假流式本身每秒都在发
+        # keepalive chunk，此处退避发生在批次之间，客户端已有数据流）。
+        if failed_batches:
+            await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+
         batch_num = next_batch_size(current_try_num, max_retry_num, current_concurrent)
         valid_keys = await select_valid_api_keys(
             key_manager=key_manager,
@@ -97,6 +106,9 @@ async def generate_fake_stream_response(
         empty_response_count = batch_summary["empty_response_count"]
         if batch_summary["success"]:
             return
+
+        # 批次失败：计数 +1，下一轮循环顶部会先退避
+        failed_batches += 1
 
         if reached_empty_response_limit(empty_response_count, settings.MAX_EMPTY_RESPONSES):
             log_empty_response_limit(
@@ -150,10 +162,16 @@ async def generate_native_stream_response(
     max_retry_num = settings.MAX_RETRY_NUM
     current_try_num = 0
     empty_response_count = 0
+    # Round 4: 批间退避计数（与非流式同策略；真流式每批只打 1 个 key，
+    # 连环切换 key 的间隔同样不能为零，否则单请求也能形成密集脉冲）
+    failed_batches = 0
 
     while should_continue_retry(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
     ):
+        if failed_batches:
+            await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+
         valid_keys = await select_valid_api_keys(
             key_manager=key_manager,
             batch_num=1,
@@ -186,6 +204,9 @@ async def generate_native_stream_response(
 
         if stream_summary["success"]:
             return
+
+        # 批次失败：计数 +1，下一轮循环顶部会先退避
+        failed_batches += 1
 
         if reached_empty_response_limit(empty_response_count, settings.MAX_EMPTY_RESPONSES):
             log_empty_response_limit(

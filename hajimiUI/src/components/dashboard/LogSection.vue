@@ -55,8 +55,11 @@ watch(
     } else if (isAtBottom()) {
       scrollToBottom()
     }
-  },
-  { deep: true }
+  }
+  // Perf(round4): 移除 deep: true —— store 每次轮询都是 logs.value = data.logs
+  // 整体替换引用，浅层 watch 已能触发回调；deep 模式还要递归遍历数百条
+  // 日志对象的全部字段（每 5s 一次），属于纯浪费。若未来变为原地修改
+  // 数组元素，才需要重新加回 deep。
 )
 
 watch(currentFilter, async () => {

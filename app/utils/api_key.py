@@ -366,6 +366,12 @@ class APIKeyManager:
 async def test_api_key(api_key: str) -> bool:
     """
     测试 API 密钥是否有效。
+
+    Round 4: 探测超时从 60s 降到 15s —— 这只是一个轻量 GET
+    /v1beta/models，正常网络下秒级返回；60s 意味着网络黑洞时每个
+    失效密钥都要占用启动路径整整一分钟（若首批 10 个 key 全部
+    黑洞，服务要 10 分钟后才能就绪）。15s 已远超真实 P99，同时
+    把最坏情况的启动阻塞缩短到原来的 1/4。
     """
     try:
         # Key moved from ?key=... to header to avoid leaking it into
@@ -374,7 +380,7 @@ async def test_api_key(api_key: str) -> bool:
         headers = build_key_probe_headers(api_key)
         headers["x-goog-api-key"] = api_key
         client = await get_async_client()
-        response = await client.get(url, headers=headers, timeout=60)
+        response = await client.get(url, headers=headers, timeout=15)
         response.raise_for_status()
         return True
     except Exception:

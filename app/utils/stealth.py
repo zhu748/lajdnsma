@@ -30,19 +30,34 @@ from typing import Dict, Optional
 # These mirror the UA strings emitted by the official Google Gen AI SDKs.
 # Using one of these (rather than httpx's default "python-httpx/x.x.x")
 # dramatically reduces the most obvious fingerprint of an unofficial client.
+#
+# Round 4 refresh: 旧池只有 7 条且版本已过时（Chrome 126 / SDK 0.6.0，
+# 2024 年中水平）——一个从不升级的 UA 版本本身就是长期指纹。现扩充
+# 到当前主流版本段（Chrome 13x / genai-sdk 1.x），并保留少量旧版本
+# 模拟"懒更新的真实客户端"，让池内版本呈自然分布而非全员最新。
 _USER_AGENT_POOL = (
-    # google-genai-sdk-python (most common in 2024-2025)
+    # google-genai-sdk-python 1.x (2025 主流版本)
+    "google-genai-sdk-python/1.0.10 gl-python/3.12.3",
+    "google-genai-sdk-python/1.5.0 gl-python/3.11.9",
+    "google-genai-sdk-python/1.8.2 gl-python/3.12.6",
+    "google-genai-sdk-python/1.12.1 gl-python/3.13.1",
+    # google-genai-sdk-python 0.x (仍有大量存量用户)
+    "google-genai-sdk-python/0.8.5 gl-python/3.11.4",
     "google-genai-sdk-python/0.3.0 gl-python/3.11.4",
-    "google-genai-sdk-python/0.4.1 gl-python/3.11.6",
-    "google-genai-sdk-python/0.5.2 gl-python/3.12.0",
-    "google-genai-sdk-python/0.6.0 gl-python/3.11.4",
     # AI Studio web client fallback (used by generativelanguage.googleapis.com)
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     # curl fallback (some official scripts use curl)
     "curl/8.4.0",
+    "curl/8.9.1",
 )
 
 # Lock-protected cache that pins each API key to a stable UA so the same
@@ -71,6 +86,33 @@ def pick_user_agent(api_key: Optional[str] = None) -> str:
     return random.choice(_USER_AGENT_POOL)
 
 
+def _x_goog_api_client_for(ua: str) -> Optional[str]:
+    """Derive a CONSISTENT `x-goog-api-client` value from the chosen UA.
+
+    Round 4 consistency fix: 此前该头硬编码为
+    `google-genai-sdk-python gl-python/3.11`，而同一请求的 User-Agent
+    可能随机选中 Chrome 或 curl —— "UA=curl 却携带 SDK 头"这种自相
+    矛盾的组合本身就是可检测的代理指纹。真实流量的规则是：
+      * google-genai-sdk-python 客户端 → 发送 x-goog-api-client，
+        内容与 UA 中的 SDK/Python 版本一致；
+      * 浏览器（AI Studio）与 curl → 不发送该头。
+    现在与 UA 联动：SDK UA 时返回匹配版本的头，否则返回 None（省略）。
+    """
+    if ua.startswith("google-genai-sdk-python/"):
+        # UA 形如 "google-genai-sdk-python/1.8.2 gl-python/3.12.6"，
+        # 官方 SDK 发送的 x-goog-api-client 与其完全一致。
+        return ua
+    return None
+
+
+def _apply_goog_client_header(headers: Dict[str, str], ua: str) -> Dict[str, str]:
+    """Attach x-goog-api-client only when the UA is an SDK client."""
+    client_header = _x_goog_api_client_for(ua)
+    if client_header:
+        headers["x-goog-api-client"] = client_header
+    return headers
+
+
 # ---------------------------------------------------------------------------
 # Outbound header builders
 # ---------------------------------------------------------------------------
@@ -85,7 +127,9 @@ def build_gemini_headers(
 
     Key hardening vs. previous behaviour:
     * `User-Agent` is set (was missing -> defaulted to `python-httpx/x.x`).
-    * `x-goog-api-client` is set to mimic the official Python SDK.
+    * `x-goog-api-client` is set to mimic the official Python SDK
+      (round 4: now consistent with the chosen UA, see
+      _x_goog_api_client_for).
     * `Accept` is set per request type (SSE vs JSON).
     * `Accept-Encoding`, `Accept-Language` are added like real SDKs.
     """
@@ -96,10 +140,8 @@ def build_gemini_headers(
         "Accept": "text/event-stream" if streaming else "application/json",
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
-        # Official google-genai-sdk-python sets this header on every call.
-        "x-goog-api-client": "google-genai-sdk-python gl-python/3.11",
     }
-    return headers
+    return _apply_goog_client_header(headers, ua)
 
 
 def build_openai_compat_headers(
@@ -110,40 +152,43 @@ def build_openai_compat_headers(
     """Headers for calls to the OpenAI-compat endpoint on
     generativelanguage.googleapis.com/v1beta/openai/..."""
     ua = pick_user_agent(api_key)
-    return {
+    headers = {
         "Content-Type": "application/json",
         "User-Agent": ua,
         "Accept": "text/event-stream" if streaming else "application/json",
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
     }
+    # OpenAI-compat 路径同样只在 SDK UA 下携带 x-goog-api-client，
+    # 保持与 UA 的组合一致性。
+    return _apply_goog_client_header(headers, ua)
 
 
 def build_embedding_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Headers for embedding endpoint.  Already used `x-goog-api-key`,
     we just add the rest of the realistic header set."""
     ua = pick_user_agent(api_key)
-    return {
+    headers = {
         "Content-Type": "application/json",
         "User-Agent": ua,
         "Accept": "application/json",
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
-        "x-goog-api-client": "google-genai-sdk-python gl-python/3.11",
     }
+    return _apply_goog_client_header(headers, ua)
 
 
 def build_key_probe_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Headers for the `/v1beta/models` key probe.  Same shape as real
     SDK calls so a probe doesn't stand out from real traffic."""
     ua = pick_user_agent(api_key)
-    return {
+    headers = {
         "User-Agent": ua,
         "Accept": "application/json",
         "Accept-Encoding": "gzip, deflate",
         "Accept-Language": "en-US,en;q=0.9",
-        "x-goog-api-client": "google-genai-sdk-python gl-python/3.11",
     }
+    return _apply_goog_client_header(headers, ua)
 
 
 # ---------------------------------------------------------------------------

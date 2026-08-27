@@ -18,9 +18,24 @@ const lastError = computed(() => dashboardStore.lastError)
 
 onMounted(() => {
   if (isUnlocked.value) startPolling()
+  // Perf(round4): 标签页隐藏时暂停 5s 轮询（后台标签里的仪表盘刷新
+  // 没有意义，只会持续消耗服务端 /api/dashboard-data 与日志聚合开销；
+  // 回到前台时立即拉一次最新数据再恢复轮询。
+  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
-onUnmounted(() => stopPolling())
+onUnmounted(() => {
+  stopPolling()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+})
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    stopPolling()
+  } else if (isUnlocked.value) {
+    startPolling() // startPolling 内部有防重入 + 立即拉一次
+  }
+}
 
 // 会话失效（401 时 store 清空密码回到锁屏）也要停掉轮询——
 // 此前只有手动 Lock / 卸载会停，401 后定时器继续空转打 401。

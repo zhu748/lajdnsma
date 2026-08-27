@@ -23,6 +23,7 @@ from app.utils.response_loop_helpers import (
     log_concurrency_increase,
 )
 from app.utils.retry_state import (
+    compute_inter_batch_backoff,
     increase_concurrency,
     decrease_concurrency,
     next_batch_size,
@@ -44,10 +45,17 @@ async def process_request(
     max_retry_num = settings.MAX_RETRY_NUM
     current_try_num = 0
     empty_response_count = 0
+    # Round 4: 已失败的批次计数，用于批间 full-jitter 退避（防重试风暴）
+    failed_batches = 0
 
     while should_continue_retry(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
     ):
+        # 批间退避：仅在已经失败过至少一批、且循环还会继续时才等待，
+        # 首个批次与成功路径零延迟。
+        if failed_batches:
+            await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+
         batch_num = next_batch_size(current_try_num, max_retry_num, current_concurrent)
         valid_keys = await select_valid_api_keys(
             key_manager=key_manager,
@@ -88,6 +96,9 @@ async def process_request(
         empty_response_count = batch_result["empty_response_count"]
         if batch_result["status"] == "success":
             return batch_result["response"]
+
+        # 批次失败：计数 +1，下一轮循环顶部会先退避
+        failed_batches += 1
 
         if valid_keys:
             # Hardening: previously this called increase_concurrency on
@@ -144,6 +155,8 @@ async def process_nonstream_with_keepalive_stream(
             max_retry_num = settings.MAX_RETRY_NUM
             current_try_num = 0
             empty_response_count = 0
+            # Round 4: 批间退避计数（与 process_request 同策略）
+            failed_batches = 0
 
             while should_continue_retry(
                 current_try_num,
@@ -151,6 +164,11 @@ async def process_nonstream_with_keepalive_stream(
                 empty_response_count,
                 settings.MAX_EMPTY_RESPONSES,
             ):
+                # 批间退避：cap 8s，远小于 keepalive 间隔（默认 30s），
+                # 不会造成客户端断连；此处不做分片 yield，保持简单。
+                if failed_batches:
+                    await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+
                 batch_num = next_batch_size(
                     current_try_num, max_retry_num, current_concurrent
                 )
@@ -214,6 +232,9 @@ async def process_nonstream_with_keepalive_stream(
                 if batch_result["status"] == "success":
                     yield batch_result["response"]
                     return
+
+                # 批次失败：计数 +1，下一轮循环顶部会先退避
+                failed_batches += 1
 
                 if valid_keys:
                     if settings.INCREASE_CONCURRENT_ON_FAILURE > 0:

@@ -102,10 +102,14 @@ function buildOption() {
 function refreshChart() {
   if (!chart) return
   const series = dashboardStore.timeSeriesData
+  // Fix(round4): 后端 get_time_series_data() 返回的点结构是 {time, value}，
+  // 此前这里读的是 p.count —— 永远 undefined → || 0 兜底，导致图表
+  // 无论真实调用量多少都恒画 0 的平线。现在优先读 value，同时兼容
+  // 可能返回 count 的旧载荷。
   chartData.value = {
     timestamps: (series.calls || []).map((p) => p.time || ''),
-    apiCalls: (series.calls || []).map((p) => p.count || 0),
-    tokens: (series.tokens || []).map((p) => p.count || 0),
+    apiCalls: (series.calls || []).map((p) => p.value ?? p.count ?? 0),
+    tokens: (series.tokens || []).map((p) => p.value ?? p.count ?? 0),
   }
   chart.setOption(buildOption(), { notMerge: true })
 }
@@ -124,8 +128,11 @@ watch(
   () => dashboardStore.timeSeriesData,
   () => {
     nextTick(refreshChart)
-  },
-  { deep: true }
+  }
+  // Perf(round4): 移除 deep: true —— store 每次轮询都是整体替换
+  // timeSeriesData.value.calls / .tokens 的数组引用，浅层 watch 即可
+  // 触发；deep 模式会额外全树遍历 31 个数据点 × 2 条序列，转而变成
+  // 每 5s 一次的纯浪费。
 )
 
 watch(isDark, () => {
