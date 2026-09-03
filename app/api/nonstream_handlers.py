@@ -8,7 +8,7 @@ from app.api.nonstream_completion import (
     build_nonstream_task,
     process_nonstream_request,
 )
-from app.utils.api_key_selection import select_valid_api_keys
+from app.utils.api_key_selection import effective_max_retries, select_valid_api_keys
 from app.utils.error_handling import should_retry_same_key
 from app.utils.empty_response import (
     build_empty_limit_response,
@@ -25,6 +25,7 @@ from app.utils.response_loop_helpers import (
 )
 from app.utils.retry_state import (
     compute_inter_batch_backoff,
+    elevate_pvp_backoff,
     increase_concurrency,
     decrease_concurrency,
     next_batch_size,
@@ -43,7 +44,10 @@ async def process_request(
 ):
     is_gemini, contents, system_instruction = prepare_request_messages(chat_request)
     current_concurrent = settings.CONCURRENT_REQUESTS
-    max_retry_num = settings.MAX_RETRY_NUM
+    # Round 8（PVP）：钉住 key 时用专用重试预算 PVP_MAX_RETRIES 替代
+    # 全局 MAX_RETRY_NUM —— PVP 下每次尝试都打同一个 key，预算语义从
+    # "最多轮几个 key"变为"最多重试多少次"（防无限重试的安全阀）。
+    max_retry_num = effective_max_retries()
     current_try_num = 0
     empty_response_count = 0
     # Round 4: 已失败的批次计数，用于批间 full-jitter 退避（防重试风暴）
@@ -56,9 +60,12 @@ async def process_request(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
     ):
         # 批间退避：仅在已经失败过至少一批、且循环还会继续时才等待，
-        # 首个批次与成功路径零延迟。
+        # 首个批次与成功路径零延迟。PVP 模式下若钉住 key 处于上游 429
+        # 冷却窗口，会在 SSE 安全上限内抬高等待（见 elevate_pvp_backoff）。
         if failed_batches:
-            await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+            await asyncio.sleep(
+                await elevate_pvp_backoff(compute_inter_batch_backoff(failed_batches))
+            )
 
         batch_num = next_batch_size(current_try_num, max_retry_num, current_concurrent)
         valid_keys = await select_valid_api_keys(
@@ -164,7 +171,8 @@ async def process_nonstream_with_keepalive_stream(
         try:
             _, contents, system_instruction = prepare_request_messages(chat_request)
             current_concurrent = settings.CONCURRENT_REQUESTS
-            max_retry_num = settings.MAX_RETRY_NUM
+            # Round 8（PVP）：重试预算与 process_request 同策略
+            max_retry_num = effective_max_retries()
             current_try_num = 0
             empty_response_count = 0
             # Round 4: 批间退避计数（与 process_request 同策略）
@@ -180,8 +188,14 @@ async def process_nonstream_with_keepalive_stream(
             ):
                 # 批间退避：cap 8s，远小于 keepalive 间隔（默认 30s），
                 # 不会造成客户端断连；此处不做分片 yield，保持简单。
+                # PVP 模式下若钉住 key 处于上游 429 冷却窗口，会在同一
+                # 安全上限内抬高等待（见 elevate_pvp_backoff）。
                 if failed_batches:
-                    await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+                    await asyncio.sleep(
+                        await elevate_pvp_backoff(
+                            compute_inter_batch_backoff(failed_batches)
+                        )
+                    )
 
                 batch_num = next_batch_size(
                     current_try_num, max_retry_num, current_concurrent

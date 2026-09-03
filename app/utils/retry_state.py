@@ -33,6 +33,30 @@ def compute_inter_batch_backoff(
     return random.uniform(0.0, expo)
 
 
+async def elevate_pvp_backoff(base: float) -> float:
+    """Round 8（PVP）：批间退避的增强层（可选，缺依赖时恒等于 base）。
+
+    PVP 模式把重试钉在同一个 key 上；若该 key 刚被 429，上游通过
+    冷却时间戳告知了 retryDelay，那么在 base 的 full-jitter 之上把
+    等待抬高到冷却剩余时间（封顶 PVP_BACKOFF_CAP_S=8s，与批间退避
+    cap 一致，保证 SSE/keepalive 路径不会因退避而长时间静默），
+    避免把重试预算砸在必然 429 的窗口里。
+
+    非 PVP / 未冷却 / app.utils.pvp 缺位 / 任何异常 → 原样返回
+    base（fail-open：绝不比旧行为更差，也绝不阻塞退避本身）。
+    延迟导入与本文件"零依赖纯函数"的设计兼容——pvp 缺位时本函数
+    退化为恒等透传。
+    """
+    if base <= 0:
+        return base
+    try:
+        from app.utils.pvp import elevate_backoff
+
+        return await elevate_backoff(base)
+    except Exception:
+        return base
+
+
 def next_batch_size(current_try_num: int, max_retry_num: int, current_concurrent: int) -> int:
     return min(max_retry_num - current_try_num, current_concurrent)
 

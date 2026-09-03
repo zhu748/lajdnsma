@@ -11,6 +11,35 @@ from app.utils.stats import (
 from app.utils.api_key import is_key_cooled_down
 
 
+def _try_import_pvp():
+    """延迟加载 PVP 模块（缺位/不可导入时返回 None，行为回退默认轮换）。
+
+    为什么不顶层导入：本模块会被多个假环境测试（round6/round7）以
+    最小依赖集加载，顶层 import 会引入对 app.utils.pvp 的硬依赖。
+    PVP 是可选增强（Round 8），选 key 路径必须在其缺位时保持原行为。
+    """
+    try:
+        import app.utils.pvp as pvp
+
+        return pvp
+    except Exception:
+        return None
+
+
+def effective_max_retries() -> int:
+    """单个请求的重试预算：PVP 模式用 PVP_MAX_RETRIES，否则全局上限。
+
+    PVP 把整批重试钉在同一个 key 上（每批 1 个），总尝试次数由
+    PVP_MAX_RETRIES 单独控制，避免复用面向多 key 轮换的
+    MAX_RETRY_NUM（PVP 下它语义变成"重试多少次"而非"轮几个 key"，
+    默认值也可能过大/过小）。
+    """
+    pvp = _try_import_pvp()
+    if pvp is not None and pvp.is_pvp_enabled():
+        return pvp.get_pvp_max_retries()
+    return getattr(settings, "MAX_RETRY_NUM", 15)
+
+
 def _key_hash(api_key: str) -> str:
     return f"key#{hash(api_key) & 0xFFFFFF:06x}"
 
@@ -59,7 +88,27 @@ async def select_valid_api_keys(
     advance_sticky_key() 把该 key 弹出粘滞位（全局粘性转移到下一个
     key），让本轮循环能继续评估后续 key。被弹出的 key 会在栈空重置
     时自然回归——这与"冷却/日额度导致的轮换"语义完全一致。
+
+    Round 8（PVP 模式）: 运维在面板开启 PVP 并指定 key 后，本函数
+    在亲和/轮换之前直接返回 [钉住 key]，冷却/RPM/日额度三重校验
+    全部跳过（这正是 PVP 的语义：钉住一个 key 持续重试直到出结果）。
+    唯二例外：钉住 key 已死（401/403）→ 返回空列表提前终止；选择器
+    无法解析 → 回落到正常轮换（warn-once，不 fail-closed）。
     """
+    # ------------------------------------------------------------------
+    # Round 8: PVP 模式 —— 钉住指定 key，优先级高于一切轮换/亲和逻辑。
+    # ------------------------------------------------------------------
+    pvp = _try_import_pvp()
+    if pvp is not None and pvp.is_pvp_enabled():
+        pinned = pvp.resolve_pvp_key(key_manager)
+        if pinned is not None:
+            if pvp.is_pvp_key_dead(pinned):
+                pvp.log_dead_key_abort(pinned)
+                return []
+            return [pinned]
+        # 解析失败：resolve_pvp_key 内部已 warn-once，此处回落到
+        # 亲和 + 轮换的既有路径，绝不因 PVP 配置问题拒绝服务。
+
     valid_keys: List[str] = []
     # 本轮已入选 valid_keys 的 key（亲和 + 轮换共用，防重复入选）
     selected_keys = set()

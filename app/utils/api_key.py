@@ -166,6 +166,22 @@ async def clear_key_cooldown(api_key: str) -> None:
         _key_cooldowns.pop(api_key, None)
 
 
+async def peek_key_cooldown_remaining(api_key: str) -> float:
+    """返回该 key 的剩余冷却秒数（只读，不触发过期清理），无冷却返回 0。
+
+    Round 8（PVP）：与 is_key_cooled_down 的区别在于本函数返回剩余
+    时长而非布尔值，且**不清除**已过期的条目 —— PVP 批间退避用它把
+    等待时间抬高到上游 429 指示的 retryDelay 之内（封顶由调用方
+    控制），避免在必然 429 的窗口里空烧重试预算。永久拉黑
+    （PERMANENT_BLOCK_TS）会返回天文数字，由调用方封顶处理。
+    """
+    async with _key_cooldowns_lock:
+        available_at = _key_cooldowns.get(api_key)
+    if not available_at:
+        return 0.0
+    return max(0.0, available_at - time.time())
+
+
 async def clear_all_cooldowns() -> None:
     async with _key_cooldowns_lock:
         _key_cooldowns.clear()
@@ -262,7 +278,22 @@ class APIKeyManager:
             1. 维护一个随机排序的栈
             2. 每次调用从栈顶取出一个未冷却的 key 返回
             3. 栈空时重新随机化
+
+        Round 8（PVP 模式）: 开启后（且选择器可解析）无论 fill/polling
+        都直接返回钉住的 key —— embedding 等不经 select_valid_api_keys
+        的直接取 key 路径也保持 PVP 语义。选择器未启用/解析失败时
+        静默回退正常策略（resolve 内部已 warn-once）。
         """
+        try:
+            from app.utils.pvp import is_pvp_enabled, resolve_pvp_key
+
+            if is_pvp_enabled():
+                pinned = resolve_pvp_key(self)
+                if pinned:
+                    return pinned
+        except Exception:
+            pass
+
         if self.strategy == "polling":
             return await self._get_available_key_polling()
         return await self._get_available_key_fill()

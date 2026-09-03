@@ -121,6 +121,30 @@ MAX_EMPTY_RESPONSES = int(
     os.environ.get("MAX_EMPTY_RESPONSES", "5")
 )  # 默认最多允许5次空响应
 
+# ---------- PVP 模式（Round 8：指定 key 持续重试） ----------
+# 开启后不再按 fill/polling 轮换密钥池，而是把所有请求钉在 PVP_KEY
+# 指定的那一个 key 上持续重试，直到出结果或达到 PVP_MAX_RETRIES
+# 次数上限。冷却 / RPM / 日额度都不构成换 key 理由；唯二安全阀是
+# "key 已死（401/403）立即终止" 与 "最大重试次数"。实现见
+# app/utils/pvp.py。
+PVP_MODE = os.environ.get("PVP_MODE", "false").lower() in ["true", "1", "yes"]
+# 钉住的 key 选择器，支持：完整密钥 / "#0"（池内序号）/
+# "key#1a2b3c"（面板哈希标识）/ 密钥尾片段（>=4 位）。
+# 完整密钥在保存/回显时会被自动脱敏为尾片段，不落盘明文。
+# 内联 sanitize 规则（权威实现在 pvp.sanitize_pvp_selector，此处不能
+# 导入它——会形成 settings ↔ pvp 循环依赖）：长度 >= 20 的纯 token
+# 视为完整密钥，只保留尾 6 位，保证 ENABLE_STORAGE 落盘的
+# settings.json 永远不含 PVP 明文密钥（与 GEMINI_API_KEYS 被排除
+# 出持久化的安全决策一致）。
+_raw_pvp_key = os.environ.get("PVP_KEY", "").strip()
+PVP_KEY = (
+    _raw_pvp_key
+    if len(_raw_pvp_key) < 20 or "#" in _raw_pvp_key
+    else _raw_pvp_key[-6:]
+)
+# PVP 模式下单个请求的最大重试次数（防止无限重试）
+PVP_MAX_RETRIES = int(os.environ.get("PVP_MAX_RETRIES", "50"))
+
 # ---------- 以下是其他配置信息 ----------
 
 # 访问限制

@@ -29,6 +29,9 @@ from app.vertex.vertex_ai_init import (
 # Round 5: 密钥检测完成后清理冷却状态（见 run_api_key_test 注释）
 from app.utils.api_key import clear_all_cooldowns
 
+# Round 8（PVP 模式）：指定 key 持续重试的配置读写与选择器脱敏
+from app.utils.pvp import resolve_pvp_key, sanitize_pvp_selector
+
 # 创建路由器
 dashboard_router = APIRouter(prefix="/api", tags=["dashboard"])
 
@@ -290,6 +293,12 @@ async def get_dashboard_data(
         "max_retry_num": settings.MAX_RETRY_NUM,
         # 添加空响应重试次数限制
         "max_empty_responses": settings.MAX_EMPTY_RESPONSES,
+        # Round 8（PVP 模式）：指定 key 持续重试
+        "pvp_mode": getattr(settings, "PVP_MODE", False),
+        # 选择器经 sanitize 后存储/回显：完整密钥只会以尾片段形式出现，
+        # 不经由本接口泄露（与 GEMINI_API_KEYS 不回传同一安全决策）。
+        "pvp_key": sanitize_pvp_selector(getattr(settings, "PVP_KEY", "")),
+        "pvp_max_retries": getattr(settings, "PVP_MAX_RETRIES", 50),
     }
 
 
@@ -820,6 +829,67 @@ async def update_config(config_data: dict):
                 f"({'粘住一个 key 直到额度耗尽' if normalized == 'fill' else '轮询轮换所有 key'})",
             )
 
+        elif config_key == "pvp_mode":
+            # Round 8（PVP）：开启后所有请求钉在 pvp_key 指定的 key 上
+            # 持续重试（见 app/utils/pvp.py）。
+            if not isinstance(config_value, bool):
+                raise HTTPException(
+                    status_code=422, detail="参数类型错误：pvp_mode 应为布尔值"
+                )
+            settings.PVP_MODE = config_value
+            log("info", f"PVP 模式已更新为：{config_value}")
+            # Round 8 优化：开启时若未指定 Key，明确提示不会生效（避免
+            # 运维以为已生效却在日志里找不到 PVP 行为的原因）。
+            if config_value and not str(getattr(settings, "PVP_KEY", "") or "").strip():
+                log(
+                    "warning",
+                    "PVP 模式已开启但未指定 Key（pvp_key 为空），"
+                    "本次开启不会生效；请在面板填写指定 Key",
+                )
+
+        elif config_key == "pvp_key":
+            # 钉住的 key 选择器。完整密钥会被 sanitize 成尾片段（不落盘
+            # 明文、不经 API 回显）；序号/哈希/片段写法原样保留。
+            if not isinstance(config_value, str):
+                raise HTTPException(
+                    status_code=422, detail="参数类型错误：pvp_key 应为字符串"
+                )
+            selector = sanitize_pvp_selector(config_value)
+            settings.PVP_KEY = selector
+
+            if not selector:
+                log("info", "PVP 指定密钥已清空（PVP 模式将不再生效）")
+            else:
+                # 尽力校验：解析失败不拒绝保存 —— 密钥池可能在之后变化
+                # （新增密钥/重测后恢复），届时选择器会自动生效。
+                # force=True：允许"先存 key、后开 PVP 模式"的操作顺序。
+                try:
+                    resolved = resolve_pvp_key(key_manager, force=True)
+                except Exception:
+                    resolved = None
+                if resolved:
+                    log(
+                        "info",
+                        f"PVP 指定密钥已设置，匹配到 key#{hash(resolved) & 0xFFFFFF:06x}",
+                    )
+                else:
+                    log(
+                        "warning",
+                        "PVP 指定密钥已保存，但当前密钥池未匹配到该标识；"
+                        "密钥池变化后自动生效，期间回退正常轮换策略",
+                    )
+
+        elif config_key == "pvp_max_retries":
+            # PVP 模式的防无限重试安全阀（最少 1 次）。
+            try:
+                value = int(config_value)
+                if value < 1:
+                    raise ValueError("PVP 最大重试次数必须大于等于 1")
+                settings.PVP_MAX_RETRIES = value
+                log("info", f"PVP 最大重试次数已更新为：{value}")
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+
         else:
             raise HTTPException(status_code=400, detail=f"不支持的配置项：{config_key}")
         save_settings()
@@ -1121,6 +1191,16 @@ async def run_api_key_test(keys):
             await clear_all_cooldowns()
         except Exception as e:
             log("warning", f"清理密钥冷却状态时出错: {str(e)}")
+        # Round 8（PVP）：同步清空失败类别记录。PVP 的"死 key 短路"
+        # 依赖 error_handling._key_failure_kinds 里的 401/403 记录；
+        # 若持有者已在 Google 侧修复并重测通过，陈旧的 dead 标记会让
+        # PVP 拒绝一个刚被验证有效的 key（与上方冷却清理同一道理）。
+        try:
+            from app.utils.error_handling import reset_key_failure_kinds
+
+            reset_key_failure_kinds()
+        except Exception as e:
+            log("warning", f"清理密钥失败类别记录时出错: {str(e)}")
         # 标记检测完成
         api_key_test_progress.update({"is_running": False, "is_completed": True})
 

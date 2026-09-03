@@ -16,6 +16,9 @@ const localConfig = reactive({
   increaseConcurrentOnFailure: 0,
   maxConcurrentRequests: 1,
   maxEmptyResponses: 0,
+  pvpMode: false,
+  pvpKey: '',
+  pvpMaxRetries: 50,
   responsesDefaultModel: '',
   responsesModelAliases: [],
   claudeDefaultModel: '',
@@ -47,6 +50,9 @@ watch(
       increaseConcurrentOnFailure: v.increaseConcurrentOnFailure,
       maxConcurrentRequests: v.maxConcurrentRequests,
       maxEmptyResponses: v.maxEmptyResponses,
+      pvpMode: v.pvpMode || false,
+      pvpKey: v.pvpKey || '',
+      pvpMaxRetries: v.pvpMaxRetries || 50,
       responsesDefaultModel: v.responsesDefaultModel || '',
       responsesModelAliases: aliasesToRows(v.responsesModelAliases),
       claudeDefaultModel: v.claudeDefaultModel || '',
@@ -121,6 +127,9 @@ async function saveComponentConfigs(passwordFromParent) {
     increaseConcurrentOnFailure: '失败调整值',
     maxConcurrentRequests: '最大并发',
     maxEmptyResponses: '最大空响应次数',
+    pvpMode: 'PVP模式',
+    pvpKey: 'PVP指定Key',
+    pvpMaxRetries: 'PVP最大重试次数',
   }
   const mappingKeys = [
     'responsesDefaultModel',
@@ -208,6 +217,39 @@ defineExpose({ saveComponentConfigs, localConfig })
       <div class="field">
         <label class="field__label">伪流式间隔（秒）</label>
         <input v-model.number="localConfig.fakeStreamingInterval" type="number" min="0" step="0.1" class="input">
+      </div>
+    </div>
+
+    <!-- PVP 模式：指定 key 持续重试 -->
+    <div class="grid grid--2">
+      <div class="field">
+        <label class="field__label">PVP 模式</label>
+        <div class="row row--between">
+          <span class="text-muted" style="font-size:var(--fs-sm);">钉住指定 Key 持续重试，直到出结果。</span>
+          <button class="toggle" :class="{ 'toggle--on': localConfig.pvpMode }" @click="localConfig.pvpMode = !localConfig.pvpMode">
+            <span class="toggle__thumb"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="localConfig.pvpMode && !(localConfig.pvpKey || '').trim()" class="pvp-warning">
+      未指定 Key，PVP 模式不会生效；请在下方填写指定 Key。
+    </div>
+
+    <div v-if="localConfig.pvpMode" class="grid grid--2">
+      <div class="field">
+        <label class="field__label">指定 Key</label>
+        <input v-model="localConfig.pvpKey" list="pvp-key-options" type="text" class="input" placeholder="key#编号 / #序号 / 密钥尾片段">
+        <datalist id="pvp-key-options">
+          <option v-for="stat in dashboardStore.apiKeyStats" :key="stat.api_key" :value="stat.api_key"></option>
+        </datalist>
+        <div class="field__hint">可填密钥状态页的 key# 编号、池内序号（如 #0）或密钥尾片段（≥4 位）；留空则 PVP 不生效。</div>
+      </div>
+      <div class="field">
+        <label class="field__label">PVP 最大重试次数</label>
+        <input v-model.number="localConfig.pvpMaxRetries" type="number" min="1" class="input">
+        <div class="field__hint">钉住的 Key 最多重试这么多次，防止无限重试。</div>
       </div>
     </div>
 
@@ -322,5 +364,10 @@ defineExpose({ saveComponentConfigs, localConfig })
   .alias-row .text-subtle {
     display: none;
   }
+}
+
+.pvp-warning {
+  font-size: var(--fs-sm);
+  color: var(--warning-strong);
 }
 </style>

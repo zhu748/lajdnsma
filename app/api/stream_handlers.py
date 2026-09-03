@@ -6,7 +6,7 @@ from app.api.fake_stream_batch_runner import run_fake_stream_batch_until_success
 from app.api.fake_stream_handlers import handle_fake_streaming
 from app.api.native_stream_handlers import generate_native_stream_chunks
 from app.models.schemas import ChatCompletionRequest
-from app.utils.api_key_selection import select_valid_api_keys
+from app.utils.api_key_selection import effective_max_retries, select_valid_api_keys
 from app.utils.error_handling import should_retry_same_key
 from app.utils.empty_response import (
     build_empty_limit_response,
@@ -21,6 +21,7 @@ from app.utils.response_loop_helpers import (
 )
 from app.utils.retry_state import (
     compute_inter_batch_backoff,
+    elevate_pvp_backoff,
     increase_concurrency,
     decrease_concurrency,
     next_batch_size,
@@ -43,7 +44,9 @@ async def generate_fake_stream_response(
     system_instruction,
 ):
     current_concurrent = settings.CONCURRENT_REQUESTS
-    max_retry_num = settings.MAX_RETRY_NUM
+    # Round 8（PVP）：钉住 key 时用专用重试预算 PVP_MAX_RETRIES 替代
+    # 全局 MAX_RETRY_NUM（防无限重试的安全阀，语义见 nonstream 侧注释）。
+    max_retry_num = effective_max_retries()
     current_try_num = 0
     empty_response_count = 0
     # Round 4: 已失败批次计数，用于批间 full-jitter 退避（防重试风暴）
@@ -58,8 +61,12 @@ async def generate_fake_stream_response(
         # 批间退避：仅在已经失败过至少一批、且循环还会继续时才等待。
         # 对 SSE 流来说 cap 8s 的静默完全可接受（假流式本身每秒都在发
         # keepalive chunk，此处退避发生在批次之间，客户端已有数据流）。
+        # PVP 模式下若钉住 key 处于上游 429 冷却窗口，会在同一安全
+        # 上限内抬高等待（见 elevate_pvp_backoff）。
         if failed_batches:
-            await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+            await asyncio.sleep(
+                await elevate_pvp_backoff(compute_inter_batch_backoff(failed_batches))
+            )
 
         batch_num = next_batch_size(current_try_num, max_retry_num, current_concurrent)
         valid_keys = await select_valid_api_keys(
@@ -170,7 +177,8 @@ async def generate_native_stream_response(
     contents,
     system_instruction,
 ):
-    max_retry_num = settings.MAX_RETRY_NUM
+    # Round 8（PVP）：重试预算与假流式循环同策略
+    max_retry_num = effective_max_retries()
     current_try_num = 0
     empty_response_count = 0
     # Round 4: 批间退避计数（与非流式同策略；真流式每批只打 1 个 key，
@@ -183,7 +191,9 @@ async def generate_native_stream_response(
         current_try_num, max_retry_num, empty_response_count, settings.MAX_EMPTY_RESPONSES
     ):
         if failed_batches:
-            await asyncio.sleep(compute_inter_batch_backoff(failed_batches))
+            await asyncio.sleep(
+                await elevate_pvp_backoff(compute_inter_batch_backoff(failed_batches))
+            )
 
         valid_keys = await select_valid_api_keys(
             key_manager=key_manager,
