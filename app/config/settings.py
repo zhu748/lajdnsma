@@ -109,6 +109,47 @@ search = {
 RANDOM_STRING = os.environ.get("RANDOM_STRING", "true").lower() in ["true", "1", "yes"]
 RANDOM_STRING_LENGTH = int(os.environ.get("RANDOM_STRING_LENGTH", "5"))
 
+# ---------- Prefill / model-turn 结尾兼容补丁 ----------
+# Google 自 gemini-3.5-flash-lite / 3.6-flash（2026-07-21 发布）起的
+# 新世代模型拒绝"请求以 model turn 结尾"（即 prefill / 前缀续写），
+# 返回 400 INVALID_ARGUMENT：
+#   "Requests ending with a model turn are not supported."
+# prefill 是通用技巧，覆盖但不限于：回答截断后继续输出、酒馆
+# 填表/续写、结构化输出前缀强制（如预填 "{"）、抑制前言等场景。
+# 开启本补丁后，命中受限模型名单（>= 3.5 世代 / 4+ / *-latest）且
+# contents 以 model turn 结尾时，自动在末尾追加一条非空文本的
+# user turn（官方迁移指南要求的兼容形态），语义为通用的
+# "从停下的地方继续，不要重复"。旧模型（2.5 / 3.0 /
+# 3.1 等）不受影响，保持原生 prefill 行为。判断实现见
+# app/utils/model_mapping.py::needs_model_turn_fix。
+PREFILL_FIX = os.environ.get("PREFILL_FIX", "true").lower() in ["true", "1", "yes"]
+# 追加的 user turn 文本（官方要求 nonempty text）。默认英文明确版
+# 指令，覆盖截断续写 / 填表 / 结构化前缀等全部 prefill 场景：
+# 从停下的地方继续、不重复已有内容（避免模型重写 prefill 部分）。
+# 可按需改成中文，如 "从你停下的地方继续，不要重复任何内容。"
+_prefill_prompt_raw = os.environ.get(
+    "PREFILL_FIX_PROMPT", "Continue from where you left off, without repeating any content."
+).strip().strip('"')
+PREFILL_FIX_PROMPT = (
+    _prefill_prompt_raw
+    if _prefill_prompt_raw
+    else "Continue from where you left off, without repeating any content."
+)
+# 额外白名单：逗号分隔的模型名/前缀/通配符，强制对这些模型启用补丁
+# （用于点名 antigravity / omni 等未纳入世代启发式的专用模型）。
+PREFILL_FIX_MODELS = [
+    item.strip()
+    for item in os.environ.get("PREFILL_FIX_MODELS", "").split(",")
+    if item.strip()
+]
+# 黑名单：逗号分隔的模型名/前缀/通配符，对这些模型停用补丁（优先级
+# 最高，可用于"该模型其实支持 prefill"的纠偏）。
+PREFILL_FIX_EXCLUDE_MODELS = [
+    item.strip()
+    for item in os.environ.get("PREFILL_FIX_EXCLUDE_MODELS", "").split(",")
+    if item.strip()
+]
+
 # 是否全局启用思考过程
 ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "true").lower() in [
     "true",

@@ -10,6 +10,7 @@ import app.config.settings as settings
 
 from app.utils.http_client import get_async_client, UPSTREAM_TIMEOUT
 from app.utils.logging import log
+from app.utils.model_mapping import needs_model_turn_fix
 from app.utils.sse import iter_sse_json
 from app.utils.stealth import (
     build_gemini_headers,
@@ -837,6 +838,50 @@ class GeminiClient:
                 },
             )
             log("INFO", "伪装消息成功")
+
+        # --- Prefill / model-turn 结尾兼容补丁（全场景通用） ---
+        # 新世代 Gemini 模型（3.5+/3.6/3.7/3.8/4-argon/*-latest，
+        # 详见 model_mapping.needs_model_turn_fix）拒绝以 model turn
+        # 结尾的请求，返回 400："Requests ending with a model turn are
+        # not supported."。prefill（请求以 assistant 消息结尾让模型
+        # 续写）是通用技巧，覆盖：回答截断后继续输出、酒馆填表/
+        # 续写、结构化输出前缀强制、抑制前言等全部场景，这些请求
+        # 在新模型上都命中该限制。此处按 Google 官方迁移指南的
+        # 要求，在末尾追加一条非空文本的 user turn 恢复兼容，
+        # 追加语义为通用续写指令（从停下的地方继续、不重复）；
+        # 旧模型（2.5 / 3.0 / 3.1 等）保持原生 prefill 行为不动，
+        # 避免改变其续写语义。
+        # 必须放在 RANDOM_STRING 注入之后执行，保证追加的 user
+        # turn 位于 contents 的绝对末尾（Google 校验的是最后一个
+        # 非空 turn 的角色）。
+        # 配置一律 getattr 防御性读取：settings 属性可能来自旧持久
+        # 化快照或测试桩，缺键时按 settings.py 的默认值（启用 +
+        # 通用续写指令）处理；追加文本保底非空（官方要求 nonempty）。
+        _prefill_fix_prompt = (
+            getattr(settings, "PREFILL_FIX_PROMPT", None)
+            or "Continue from where you left off, without repeating any content."
+        )
+        if (
+            getattr(settings, "PREFILL_FIX", True)
+            and model
+            and gemini_history
+            and gemini_history[-1]["role"] == "model"
+            and needs_model_turn_fix(
+                model,
+                extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
+                exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
+            )
+        ):
+            gemini_history.append(
+                {
+                    "role": "user",
+                    "parts": [{"text": _prefill_fix_prompt}],
+                }
+            )
+            log(
+                "INFO",
+                f"已追加 user turn 修复 prefill 兼容（{model} -> 追加文本: {_prefill_fix_prompt!r}）",
+            )
 
         return gemini_history, system_instruction
 
