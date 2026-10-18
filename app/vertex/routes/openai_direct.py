@@ -204,7 +204,7 @@ async def openai_true_stream_generator(
 # ---------------------------------------------------------------------------
 
 
-async def _base_fake_stream_engine(
+async def _openai_fake_stream_engine(
     api_call_task_creator,
     extract_text_from_response_func,
     is_valid_response_func,
@@ -215,9 +215,9 @@ async def _base_fake_stream_engine(
     reasoning_text_to_yield="",
     actual_content_text_to_yield="",
 ):
-    """OpenAI Direct 伪流式引擎（注意与 api_helpers 中的 Gemini 版本
-    是两份独立实现：keepalive 位置、空响应处理与异常重抛语义不同，
-    详见两处 docstring 与调用方契约）。"""
+    """OpenAI Direct 伪流式引擎。与 api_helpers._base_fake_stream_engine
+    （Gemini 版本）是两份独立实现——keepalive 位置、空响应处理与异常
+    重抛语义不同，刻意不合并；命名区分以避免误读为同一实现。"""
     try:
         # Wait for the API call to complete
         api_response = await api_call_task_creator()
@@ -345,7 +345,7 @@ async def _base_fake_stream_engine(
         # and emits a neutral message.
         vertex_log(
             "error",
-            f"_base_fake_stream_engine error (internal only, model: {sse_model_name}): {type(e).__name__}: {e}",
+            f"_openai_fake_stream_engine error (internal only, model: {sse_model_name}): {type(e).__name__}: {e}",
         )
         if not is_auto_attempt:  # Only yield error for non-auto attempts
             err_resp = create_openai_error_response(
@@ -453,7 +453,7 @@ async def openai_fake_stream_generator(
             def _is_openai_response_valid(response: Any) -> bool:
                 return bool(response.choices and response.choices[0].message is not None)
 
-            async for chunk in _base_fake_stream_engine(
+            async for chunk in _openai_fake_stream_engine(
                 api_call_task_creator=lambda: asyncio.create_task(
                     asyncio.sleep(0, result=full_api_response)
                 ),
