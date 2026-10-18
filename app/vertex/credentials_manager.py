@@ -54,7 +54,6 @@ def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
     credentials_list = []
     nesting_level = 0
     current_object_start = -1
-    str_length = len(json_str)
 
     for i, char in enumerate(json_str):
         if char == "{":

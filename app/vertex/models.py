@@ -1,6 +1,5 @@
 from pydantic import BaseModel, ConfigDict  # Field removed
 from typing import List, Dict, Any, Optional, Union, Literal
-from app.utils.logging import vertex_log
 
 
 # Define data models
@@ -43,53 +42,3 @@ class OpenAIRequest(BaseModel):
 
     # Allow extra fields to pass through without causing validation errors
     model_config = ConfigDict(extra="allow")
-
-
-class TokenUsage(BaseModel):
-    completion_tokens: int = 0
-    prompt_tokens: int = 0
-    total_tokens: int = 0
-
-
-class GeminiMessage(BaseModel):
-    role: str  # 'user' or 'model'
-    content: str
-    name: Optional[str] = None
-
-
-class GeminiChatRequest(BaseModel):
-    model: str
-    messages: List[GeminiMessage]
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.95
-    top_k: Optional[int] = 40
-    max_output_tokens: Optional[int] = 2048
-    stream: Optional[bool] = False
-
-    def log_request(self):
-        vertex_log("info", f"Chat request for model: {self.model}")
-        vertex_log(
-            "debug",
-            f"Request parameters: temp={self.temperature}, top_p={self.top_p}, max_tokens={self.max_output_tokens}",
-        )
-
-
-class GeminiCompletionRequest(BaseModel):
-    model: str
-    prompt: str
-    temperature: Optional[float] = 0.7
-    top_p: Optional[float] = 0.95
-    top_k: Optional[int] = 40
-    max_output_tokens: Optional[int] = 2048
-    stream: Optional[bool] = False
-
-    def log_request(self):
-        vertex_log("info", f"Completion request for model: {self.model}")
-        vertex_log(
-            "debug",
-            f"Request parameters: temp={self.temperature}, top_p={self.top_p}, max_tokens={self.max_output_tokens}",
-        )
-        prompt_preview = (
-            self.prompt[:50] + "..." if len(self.prompt) > 50 else self.prompt
-        )
-        vertex_log("debug", f"Prompt preview: {prompt_preview}")

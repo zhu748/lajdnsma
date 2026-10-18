@@ -29,7 +29,7 @@ from app.utils.logging import log
 from app.utils.pvp import resolve_pvp_key, sanitize_pvp_selector
 from app.vertex.credentials_manager import parse_multiple_json_credentials
 from app.vertex.model_loader import refresh_models_config_cache
-from app.vertex.vertex_ai_init import reset_global_fallback_client
+from app.vertex.vertex_ai_init import reset_client_pool
 import app.config.settings as settings
 import app.vertex.config as app_config
 
@@ -314,8 +314,9 @@ async def _update_google_credentials_json(config_value):
     settings.GOOGLE_CREDENTIALS_JSON = config_value
     log("info", "Google Credentials JSON 设置已更新 (内容未记录)。")
 
-    # 先重置全局回退 client，再重载凭证
-    reset_global_fallback_client()
+    # 凭证变更后立即清空客户端池，避免旧凭证客户端继续服务直到 TTL 过期
+    # （原 global fallback 单例已随死代码移除，池即唯一的客户端缓存）
+    reset_client_pool()
 
     # 注：走到这里时 config_value 必非空（空值已在上方早退）
     credential_manager = runtime.credential_manager

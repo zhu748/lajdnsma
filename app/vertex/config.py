@@ -62,7 +62,8 @@ if hasattr(settings, "VERTEX_EXPRESS_API_KEY") and settings.VERTEX_EXPRESS_API_K
             f"Loaded {len(VERTEX_EXPRESS_API_KEY_VAL)} Vertex Express API keys from settings",
         )
 
-# 假流式响应配置
+# 假流式响应配置（历史 FAKE_STREAMING_CHUNK_SIZE / DELAY_PER_CHUNK 已随
+# 引擎改用随机分块而失效，随死代码清理移除）
 FAKE_STREAMING_ENABLED = (
     settings.FAKE_STREAMING if hasattr(settings, "FAKE_STREAMING") else False
 )
@@ -71,19 +72,9 @@ FAKE_STREAMING_INTERVAL_SECONDS = (
     if hasattr(settings, "FAKE_STREAMING_INTERVAL")
     else 1.0
 )
-FAKE_STREAMING_CHUNK_SIZE = (
-    settings.FAKE_STREAMING_CHUNK_SIZE
-    if hasattr(settings, "FAKE_STREAMING_CHUNK_SIZE")
-    else 10
-)
-FAKE_STREAMING_DELAY_PER_CHUNK = (
-    settings.FAKE_STREAMING_DELAY_PER_CHUNK
-    if hasattr(settings, "FAKE_STREAMING_DELAY_PER_CHUNK")
-    else 0.1
-)
 vertex_log(
     "info",
-    f"Fake streaming is {'enabled' if FAKE_STREAMING_ENABLED else 'disabled'} with interval {FAKE_STREAMING_INTERVAL_SECONDS} seconds, chunk size {FAKE_STREAMING_CHUNK_SIZE}, delay per chunk {FAKE_STREAMING_DELAY_PER_CHUNK} seconds",
+    f"Fake streaming is {'enabled' if FAKE_STREAMING_ENABLED else 'disabled'} with interval {FAKE_STREAMING_INTERVAL_SECONDS} seconds",
 )
 
 
@@ -203,16 +194,6 @@ def update_config(name, value):
         global FAKE_STREAMING_INTERVAL_SECONDS
         FAKE_STREAMING_INTERVAL_SECONDS = value
         vertex_log("info", f"Updated FAKE_STREAMING_INTERVAL to {value}")
-    elif name == "FAKE_STREAMING_CHUNK_SIZE":
-        settings.FAKE_STREAMING_CHUNK_SIZE = value
-        global FAKE_STREAMING_CHUNK_SIZE
-        FAKE_STREAMING_CHUNK_SIZE = value
-        vertex_log("info", f"Updated FAKE_STREAMING_CHUNK_SIZE to {value}")
-    elif name == "FAKE_STREAMING_DELAY_PER_CHUNK":
-        settings.FAKE_STREAMING_DELAY_PER_CHUNK = value
-        global FAKE_STREAMING_DELAY_PER_CHUNK
-        FAKE_STREAMING_DELAY_PER_CHUNK = value
-        vertex_log("info", f"Updated FAKE_STREAMING_DELAY_PER_CHUNK to {value}")
     else:
         vertex_log("warning", f"Unknown config variable: {name}")
         return

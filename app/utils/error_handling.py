@@ -3,9 +3,7 @@ import httpx
 import logging
 import asyncio
 import re
-from fastapi import HTTPException
 from app.utils.logging import log
-from app.utils.stealth import full_jitter_backoff
 
 # Cleanup: `requests` 依赖已移除 —— 全部出站请求已统一走共享的 httpx
 # AsyncClient，旧的 requests.exceptions.* isinstance 分支永远不会命中。
@@ -19,8 +17,10 @@ logger = logging.getLogger("my_logger")
 # CRITICAL FIX: 全部 5 条真实请求路径（nonstream_completion /
 # nonstream_status_handlers / native_stream_handlers / fake_stream_handlers /
 # fake_stream_batch_runner）在异常分支调用的都是同步的
-# handle_gemini_error()——它只记日志、从不触发 mark_key_failure()。
-# 唯一会做冷却标记的 handle_api_error() 在整个仓库里没有任何调用方。
+# handle_gemini_error()——它此前只记日志、从不触发 mark_key_failure()。
+# （历史遗留的 handle_api_error() 曾是唯一会做冷却标记的入口，但全仓
+# 无任何调用方，已删除；其冷却/切换语义由下方的 schedule_key_cooldown
+# 与 _key_failure_kinds 承接。）
 # 结果：429（限流）的密钥从未进入冷却，下一次 select_valid_api_keys
 # 会再次选中同一个密钥 → 反复撞 429 → 持续限流甚至账号被风控升级，
 # 这正是"密钥池被谷歌识别"的最典型加速器。
@@ -322,9 +322,9 @@ def handle_gemini_error(error, current_api_key) -> str:
     所有返回给客户端的错误信息都不再包含 "Gemini API" 字样，避免
     暴露上游服务供应商的身份。
 
-    Round 4: 这里同时调度密钥冷却（schedule_key_cooldown）——此前
-    冷却机制只存在于从未被调用的 handle_api_error() 里，导致 429
-    密钥反复被选中（详见模块顶部注释）。
+    Round 4: 这里同时调度密钥冷却（schedule_key_cooldown）——历史上
+    冷却机制只存在于从未被调用的 handle_api_error() 里（该死函数已
+    删除），曾导致 429 密钥反复被选中（详见模块顶部注释）。
 
     Round 7: 入口处**同步**记录失败类别（quota/dead/transient）——
     重试循环用它决定下一批是否继续用原 key；冷却标记仍是
@@ -475,113 +475,3 @@ def translate_error(message: str) -> str:
     if "service unavailable" in lower:
         return "Upstream service unavailable"
     return message
-
-
-async def handle_api_error(
-    e: Exception,
-    api_key: str,
-    key_manager,
-    request_type: str,
-    model: str,
-    retry_count: int = 0,
-):
-    """统一处理API错误。
-
-    Hardening:
-    * 用 full-jitter 退避代替指数退避（无抖动版本会让并发重试同步风暴）
-    * 429（配额耗尽）时把该 key 冷却 + 切换 key
-    * 401/403 时把该 key 永久拉黑 + 切换
-    * 500/503/网络错误时**不冷却、不切换**，同一个 key 退避重试
-      （Round 7：这些错误与 key 无关，换 key 无意义且暴露轮换指纹）
-    * 抛给客户端的 HTTPException detail 不再含 "Gemini API" 字样
-    """
-    key_id = _key_id(api_key)
-
-    # httpx HTTP 错误
-    if isinstance(e, httpx.HTTPStatusError):
-        status_code = e.response.status_code
-
-        # 429 -> 切换 key + 冷却当前 key
-        if status_code == 429:
-            error_message = "Rate limited or quota exhausted"
-            log(
-                "WARNING",
-                f"{key_id} 429 resource exhausted, switching key",
-                extra={
-                    "key": key_id,
-                    "status_code": status_code,
-                    "error_message": error_message,
-                },
-            )
-            # 把这个 key 加冷却 60s（如果 key_manager 支持）
-            try:
-                from app.utils.api_key import mark_key_failure
-                await mark_key_failure(api_key, 429)
-            except Exception:
-                pass
-            return {
-                "remove_cache": False,
-                "error": error_message,
-                "should_switch_key": True,
-            }
-
-        # 401/403 -> 永久拉黑当前 key + 切换
-        if status_code in (401, 403):
-            error_message = "Permission denied" if status_code == 403 else "Unauthorized"
-            log(
-                "ERROR",
-                f"{key_id} {status_code} {error_message}, marking key invalid",
-                extra={
-                    "key": key_id,
-                    "status_code": status_code,
-                },
-            )
-            try:
-                from app.utils.api_key import mark_key_failure
-                await mark_key_failure(api_key, status_code)
-            except Exception:
-                pass
-            return {
-                "remove_cache": False,
-                "error": error_message,
-                "should_switch_key": True,
-            }
-
-        # 500/503 -> 用 full-jitter 退避**用同一个 key** 重试（Round 7：
-        # 上游内部错误与 key 无关，不冷却、不换 key —— 换 key 只会
-        # 暴露多 key 池轮换指纹，对成功率毫无帮助）
-        if retry_count < 3 and status_code in (500, 503):
-            error_message = (
-                "Upstream internal error"
-                if status_code == 500
-                else "Upstream service unavailable"
-            )
-            # AWS-recommended full jitter — spreads concurrent retriers
-            # uniformly across [0, 2**attempt] so they don't retry at
-            # the exact same instant (which is a bot fingerprint).
-            wait_time = full_jitter_backoff(retry_count, base=1.0, cap=16.0)
-            log(
-                "warning",
-                f"{key_id} {error_message}, waiting {wait_time:.1f}s before retry ({retry_count + 1}/3)",
-                extra={
-                    "key": key_id,
-                    "request_type": request_type,
-                    "model": model,
-                    "status_code": int(status_code),
-                },
-            )
-            await asyncio.sleep(wait_time)
-            return {"remove_cache": False, "should_switch_key": False}
-
-        # 其它 HTTP 错误 -> 透传状态码 + 通用消息（不含 "Gemini API"）
-        error_detail = handle_gemini_error(e, api_key)
-        raise HTTPException(
-            status_code=int(status_code),
-            # 之前是 "Gemini API 服务器错误({status_code})，请稍后重试"
-            # 现在不再泄露上游身份
-            detail=f"Upstream service error ({status_code}). Please retry later.",
-        )
-
-    # 对于其他错误，返回切换密钥的信号，并输出错误信息到日志中
-    error_detail = handle_gemini_error(e, api_key)
-    return {"should_switch_key": True, "error": error_detail, "remove_cache": True}

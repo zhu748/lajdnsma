@@ -257,33 +257,28 @@ class ApiStatsManager:
         with self._counters_lock:
             return sum(self.api_key_counts.values())
 
+    def _sum_time_buckets(self, field: str, cutoff_ts: int):
+        """按截止时间戳聚合 time_buckets 中指定字段（calls / tokens）。"""
+        with self._time_series_lock:
+            return sum(
+                data[field]
+                for ts, data in self.time_buckets.items()
+                if ts >= cutoff_ts
+            )
+
     def get_calls_last_hour(self, now=None):
         """获取过去一小时的总调用次数"""
         if now is None:
             now = datetime.now()
-
         hour_ago_ts = self._get_minute_timestamp(now - timedelta(hours=1))
-
-        with self._time_series_lock:
-            return sum(
-                data["calls"]
-                for ts, data in self.time_buckets.items()
-                if ts >= hour_ago_ts
-            )
+        return self._sum_time_buckets("calls", hour_ago_ts)
 
     def get_calls_last_minute(self, now=None) -> int:
         """获取过去一分钟的总调用次数"""
         if now is None:
             now = datetime.now()
-
         minute_ago_ts = self._get_minute_timestamp(now - timedelta(minutes=1))
-
-        with self._time_series_lock:
-            return sum(
-                data["calls"]
-                for ts, data in self.time_buckets.items()
-                if ts >= minute_ago_ts
-            )
+        return self._sum_time_buckets("calls", minute_ago_ts)
 
     def get_calls_last_minute_for_key(self, api_key: str, now=None) -> int:
         """获取过去一分钟内某个 API key 的调用次数。
@@ -315,29 +310,15 @@ class ApiStatsManager:
         """获取过去一小时的总Token消耗量"""
         if now is None:
             now = datetime.now()
-        
         hour_ago_ts = self._get_minute_timestamp(now - timedelta(hours=1))
-        
-        with self._time_series_lock:
-            return sum(
-                data["tokens"]
-                for ts, data in self.time_buckets.items()
-                if ts >= hour_ago_ts
-            )
+        return self._sum_time_buckets("tokens", hour_ago_ts)
 
     def get_tokens_last_minute(self, now=None):
         """获取过去一分钟的总Token消耗量"""
         if now is None:
             now = datetime.now()
-        
         minute_ago_ts = self._get_minute_timestamp(now - timedelta(minutes=1))
-        
-        with self._time_series_lock:
-            return sum(
-                data["tokens"]
-                for ts, data in self.time_buckets.items()
-                if ts >= minute_ago_ts
-            )
+        return self._sum_time_buckets("tokens", minute_ago_ts)
 
     def get_time_series_data(self, minutes=30, now=None):
         """获取过去N分钟的时间序列数据"""

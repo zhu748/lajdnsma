@@ -107,12 +107,9 @@ async def process_nonstream_request_with_keepalive(
     safety_settings,
     safety_settings_g2,
     cache_key: str,
-    keepalive_interval: float = 30.0,
 ):
-    # 兼容签名：keepalive_interval 由 build_nonstream_task 透传，但实际
-    # 的 keepalive 行为在流式包装层实现，此参数已不使用（保留以避免
-    # 波及全部调用方）。
-    _ = keepalive_interval
+    """keepalive 流式包装层的单 key 非流式完成（不带 shield —— 取消
+    语义由外层流式生成器管理）。"""
     return await _run_nonstream_completion(
         chat_request,
         contents,
@@ -146,7 +143,6 @@ def build_nonstream_task(
                 safety_settings,
                 safety_settings_g2,
                 cache_key,
-                settings.NONSTREAM_KEEPALIVE_INTERVAL,
             )
         )
 

@@ -151,9 +151,3 @@ def _parse_sse_json_events(chunk: str) -> List[Dict[str, Any]]:
 
     flush_event()
     return events
-
-
-def _parse_sse_json(chunk: str) -> Optional[Dict[str, Any]]:
-    """Parse SSE chunk and return the first JSON payload, if present."""
-    events = _parse_sse_json_events(chunk)
-    return events[0] if events else None

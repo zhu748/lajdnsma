@@ -176,6 +176,31 @@ def _apply_goog_client_header(headers: Dict[str, str], ua: str) -> Dict[str, str
 # Outbound header builders
 # ---------------------------------------------------------------------------
 
+
+def _build_request_headers(
+    api_key: Optional[str],
+    *,
+    accept: str,
+    content_type: Optional[str] = "application/json",
+) -> Dict[str, str]:
+    """四个对外 header 构建器的共享实现（历史版本四份近同构代码）。
+
+    统一注入：UA 池选取 + Accept/Accept-Encoding/Accept-Language +
+    浏览器指纹头（sec-ch-ua/sec-fetch 系列）+ SDK UA 时的一致性
+    x-goog-api-client。content_type 传 None 则不携带（如 key 探测）。
+    """
+    ua = pick_user_agent(api_key)
+    headers: Dict[str, str] = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    headers["User-Agent"] = ua
+    headers["Accept"] = accept
+    headers["Accept-Encoding"] = "gzip, deflate"
+    headers["Accept-Language"] = "en-US,en;q=0.9"
+    _apply_browser_fingerprint_headers(headers, ua)
+    return _apply_goog_client_header(headers, ua)
+
+
 def build_gemini_headers(
     api_key: Optional[str] = None,
     *,
@@ -192,16 +217,10 @@ def build_gemini_headers(
     * `Accept` is set per request type (SSE vs JSON).
     * `Accept-Encoding`, `Accept-Language` are added like real SDKs.
     """
-    ua = pick_user_agent(api_key)
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": ua,
-        "Accept": "text/event-stream" if streaming else "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    _apply_browser_fingerprint_headers(headers, ua)
-    return _apply_goog_client_header(headers, ua)
+    return _build_request_headers(
+        api_key,
+        accept="text/event-stream" if streaming else "application/json",
+    )
 
 
 def build_openai_compat_headers(
@@ -210,48 +229,30 @@ def build_openai_compat_headers(
     streaming: bool = False,
 ) -> Dict[str, str]:
     """Headers for calls to the OpenAI-compat endpoint on
-    generativelanguage.googleapis.com/v1beta/openai/..."""
-    ua = pick_user_agent(api_key)
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": ua,
-        "Accept": "text/event-stream" if streaming else "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    # OpenAI-compat 路径同样只在 SDK UA 下携带 x-goog-api-client，
-    # 保持与 UA 的组合一致性；浏览器 UA 则补齐 sec-ch-ua/sec-fetch 头。
-    _apply_browser_fingerprint_headers(headers, ua)
-    return _apply_goog_client_header(headers, ua)
+    generativelanguage.googleapis.com/v1beta/openai/...
+
+    OpenAI-compat 路径同样只在 SDK UA 下携带 x-goog-api-client，
+    保持与 UA 的组合一致性；浏览器 UA 则补齐 sec-ch-ua/sec-fetch 头。
+    """
+    return _build_request_headers(
+        api_key,
+        accept="text/event-stream" if streaming else "application/json",
+    )
 
 
 def build_embedding_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Headers for embedding endpoint.  Already used `x-goog-api-key`,
     we just add the rest of the realistic header set."""
-    ua = pick_user_agent(api_key)
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": ua,
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    _apply_browser_fingerprint_headers(headers, ua)
-    return _apply_goog_client_header(headers, ua)
+    return _build_request_headers(api_key, accept="application/json")
 
 
 def build_key_probe_headers(api_key: Optional[str] = None) -> Dict[str, str]:
     """Headers for the `/v1beta/models` key probe.  Same shape as real
-    SDK calls so a probe doesn't stand out from real traffic."""
-    ua = pick_user_agent(api_key)
-    headers = {
-        "User-Agent": ua,
-        "Accept": "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    _apply_browser_fingerprint_headers(headers, ua)
-    return _apply_goog_client_header(headers, ua)
+    SDK calls so a probe doesn't stand out from real traffic.
+    （GET 探测不携带 Content-Type）"""
+    return _build_request_headers(
+        api_key, accept="application/json", content_type=None
+    )
 
 
 # ---------------------------------------------------------------------------

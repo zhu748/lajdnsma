@@ -15,8 +15,8 @@ from app.utils.logging import vertex_log
 # The constant VERTEX_EXPRESS_MODELS previously defined here is removed.
 # Consumers should use get_vertex_express_models() from model_loader.
 
-# 全局客户端，用于作为回退
-global_fallback_client = None
+# 全局客户端池：按 project_id 缓存 genai.Client（原 global_fallback_client
+# 单例随死代码 get_vertex_ai_client 一并移除，统一走池）
 
 # Hardened: client pool keyed by project_id, so we don't re-create the
 # genai.Client (and re-negotiate TLS) on every request.  TTL is 50
@@ -53,12 +53,10 @@ def _get_client_from_pool(project_id: str, creds, location: str = "global"):
         return None
 
 
-def reset_global_fallback_client():
-    """重置全局回退客户端"""
-    global global_fallback_client
-    global_fallback_client = None
+def reset_client_pool():
+    """清空全局客户端池（凭证更新后由 dashboard 调用）。"""
     _client_pool.clear()
-    vertex_log("info", "全局回退客户端已重置")
+    vertex_log("info", "Vertex 客户端池已重置")
 
 
 async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
@@ -70,8 +68,6 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
 
     Returns True if any credentials seem available in the manager, False otherwise.
     """
-    global global_fallback_client
-
     # 如果未传入credential_manager，则创建一个新的实例
     if credential_manager is None:
         vertex_log("info", "Creating new CredentialManager instance")
@@ -248,58 +244,3 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
     except Exception as e:
         vertex_log("error", f"CRITICAL ERROR during Vertex AI credential setup: {e}")
         return False
-
-
-async def get_vertex_ai_client(credential_manager=None):
-    """
-    Get a Vertex AI client using a credential from the manager.
-    If no credential manager is passed, checks for a global fallback client.
-    Returns None if no client could be created.
-
-    Hardened: uses an in-process client pool keyed by project_id so the
-    same project reuses the same client (and TLS session) instead of
-    re-negotiating TLS on every request.
-    """
-    global global_fallback_client
-
-    # If no credential manager, try to use global fallback client
-    if credential_manager is None:
-        if global_fallback_client is not None:
-            vertex_log("info", "Using global fallback client")
-            return global_fallback_client
-
-        vertex_log(
-            "warning",
-            "No credential manager provided and no global fallback client available",
-        )
-        return None
-
-    # Try to get a credential from the manager
-    creds, project_id = credential_manager.get_random_credentials()
-    if not creds or not project_id:
-        vertex_log("error", "No valid credentials available in credential manager")
-        return None
-
-    client = _get_client_from_pool(project_id, creds, location="global")
-    if client is None:
-        return None
-    vertex_log(
-        "info",
-        f"Using Vertex AI client (cached) for project: {project_id}",
-    )
-
-    # If we don't have a global fallback client, set this as the fallback
-    if global_fallback_client is None:
-        vertex_log("info", "Setting new client as global fallback client")
-        global_fallback_client = client
-
-    return client
-
-
-async def re_init_vertex_ai(credential_manager=None) -> bool:
-    """
-    Re-initialize Vertex AI connections.
-    Resets the global fallback client and reinitializes.
-    """
-    reset_global_fallback_client()
-    return await init_vertex_ai(credential_manager)

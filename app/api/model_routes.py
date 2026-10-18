@@ -2,24 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 import app.config.settings as settings
 from app.api import route_runtime
-from app.api.model_handlers import build_aistudio_model_list
-try:
-    from app.api.model_handlers import build_claude_model_list
-except ImportError:
-    def build_claude_model_list(
-        available_models,
-        whitelist_models,
-        blocked_models,
-        aliases=None,
-        default_model="",
-    ):
-        filtered_models = [
-            model
-            for model in available_models
-            if (not whitelist_models or model in whitelist_models)
-            and model not in blocked_models
-        ]
-        return {"data": [{"type": "model", "id": model} for model in filtered_models]}
+from app.api.model_handlers import build_aistudio_model_list, build_claude_model_list
 from app.models.schemas import ModelList
 from app.services import GeminiClient
 from app.utils.auth import custom_verify_password

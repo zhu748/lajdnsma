@@ -1,7 +1,6 @@
 import json
 import os
 from app.models.schemas import ChatCompletionRequest
-from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
 import secrets
 import string
@@ -144,12 +143,6 @@ def _key_log_id(api_key: str) -> str:
     # key prefix).  Use a stable hash so the same key still shows
     # up as the same identifier in the dashboard.
     return "key#" + str(hash(api_key) & 0xFFFFFF)
-
-
-@dataclass
-class GeneratedText:
-    text: str
-    finish_reason: Optional[str] = None
 
 
 class GeminiResponseWrapper:
@@ -310,16 +303,6 @@ class GeminiClient:
                 data = request.payload.model_dump(exclude_none=True, by_alias=True)
                 if "systemInstruction" in data:
                     data.pop("system_instruction", None)
-            # # 注入搜索提示
-            # if settings.search["search_mode"] and request.model and request.model.endswith("-search"):
-            #     data.insert(len(data)-2,{'role': 'user', 'parts': [{'text':settings.search["search_prompt"]}]})
-
-            # # 注入随机字符串
-            # if settings.RANDOM_STRING:
-            #     data.insert(1,{'role': 'user', 'parts': [{'text': generate_secure_random_string(settings.RANDOM_STRING_LENGTH)}]})
-            #     data.insert(len(data)-1,{'role': 'user', 'parts': [{'text': generate_secure_random_string(settings.RANDOM_STRING_LENGTH)}]})
-            #     log('INFO', "伪装消息成功")
-
         else:
             api_version, data = self._convert_openAI_request(
                 request, contents, safety_settings, system_instruction
@@ -548,8 +531,6 @@ class GeminiClient:
             if getattr(settings, "PREFILL_FIX_STRIP_ECHO", True)
             else ""
         )
-        #log("INFO", f"Request body to Google: {json.dumps(data, ensure_ascii=False)}")
-
         # Hardening: API key moved from URL query (?key=...) to the
         # `x-goog-api-key` header.  URL query is logged by every layer in
         # the path (Google access logs, CDN, any intermediate proxy), so
@@ -603,8 +584,6 @@ class GeminiClient:
         api_version, model, data = self._convert_request_data(
             request, contents, safety_settings, system_instruction
         )
-        #log("INFO", f"Request body to Google: {json.dumps(data, ensure_ascii=False)}")
-
         url = f"https://generativelanguage.googleapis.com/{api_version}/models/{model}:generateContent"
         headers = build_gemini_headers(self.api_key, streaming=False)
         headers["x-goog-api-key"] = self.api_key

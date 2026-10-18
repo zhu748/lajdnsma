@@ -162,6 +162,13 @@ def load_routes_module():
             "blocked": blocked,
         }
     )
+    # 桩需镜像真实模块的完整导出面（model_routes.py 无防御性
+    # ImportError 回退，见死代码清理说明）
+    fake_model_handlers.build_claude_model_list = (
+        lambda available, whitelist, blocked, aliases=None, default_model="": {
+            "data": [{"type": "model", "id": model} for model in available]
+        }
+    )
 
     fake_embedding_handlers = types.ModuleType("app.api.embedding_handlers")
 

@@ -336,16 +336,12 @@ if os.environ.get("DISABLE_UVICORN_LOG", "1").lower() != "false":
     logging.getLogger("uvicorn.error").setLevel(logging.WARNING)
 
 
-# ---------- 以下配置信息已废弃 ----------
+# ---------- 假流式配置 ----------
 
-# 假流式请求的空内容返回间隔（秒）
+# 假流式请求的空内容返回间隔（秒；keepalive 心跳周期）
+# （历史同项 FAKE_STREAMING_CHUNK_SIZE / FAKE_STREAMING_DELAY_PER_CHUNK
+# 已随引擎改用随机分块而失效，随死代码清理移除）
 FAKE_STREAMING_INTERVAL = float(os.environ.get("FAKE_STREAMING_INTERVAL", "1"))
-# 假流式响应的每个块大小
-FAKE_STREAMING_CHUNK_SIZE = int(os.environ.get("FAKE_STREAMING_CHUNK_SIZE", "10"))
-# 假流式响应的每个块之间的延迟（秒）
-FAKE_STREAMING_DELAY_PER_CHUNK = float(
-    os.environ.get("FAKE_STREAMING_DELAY_PER_CHUNK", "0.1")
-)
 
 # 非流式请求TCP保活配置
 # Hardening default: previously true.  Sending empty-content delta

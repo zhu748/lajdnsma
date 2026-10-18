@@ -14,8 +14,15 @@ from app.utils.protocol_adapters import (
 from app.utils.errors import anthropic_error_response
 
 
-def _resolve_claude_model_alias(request):
-    """Map Claude model IDs to an available Gemini model for Anthropic clients."""
+def _map_to_available_model(request, aliases_attr: str, default_attr: str, log_message: str):
+    """把客户端协议的模型名解析为可用 Gemini 模型（两级回退 + 白名单兑底）。
+
+    Claude / Responses 两个协议共享的实现（历史版本两份同构 38 行）：
+      1. 模型已在可用列表 → 原样返回；
+      2. 别名表命中且目标可用 → 用别名目标；
+      3. 协议默认模型可用 → 用默认；
+      4. 白名单内首个可用模型兑底；全部失败则不改写。
+    """
     try:
         import app.config.settings as settings
         from app.services import GeminiClient
@@ -26,54 +33,13 @@ def _resolve_claude_model_alias(request):
     if request.model in GeminiClient.AVAILABLE_MODELS:
         return
 
-    fallback_model = select_alias_model(
-        request.model, getattr(settings, "CLAUDE_MODEL_ALIASES", {}) or {}
-    )
-    if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
-        fallback_model = ""
-
-    if not fallback_model:
-        fallback_model = settings.CLAUDE_DEFAULT_MODEL
-    if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
-        fallback_model = ""
-
-    if not fallback_model:
-        whitelisted = [
-            model
-            for model in GeminiClient.AVAILABLE_MODELS
-            if not settings.WHITELIST_MODELS or model in settings.WHITELIST_MODELS
-        ]
-        fallback_model = whitelisted[0] if whitelisted else ""
-
-    if fallback_model:
-        original_model = request.model
-        request.model = fallback_model
-        log(
-            "info",
-            "Claude 模型名已映射到 Gemini 模型",
-            extra={"model": original_model, "mapped_model": fallback_model},
-        )
-
-
-def _resolve_responses_model_alias(request):
-    """Map OpenAI/Codex model IDs to an available Gemini model for Responses clients."""
-    try:
-        import app.config.settings as settings
-        from app.services import GeminiClient
-        from app.utils.logging import log
-    except ImportError:
-        return
-
-    if request.model in GeminiClient.AVAILABLE_MODELS:
-        return
-
-    aliases = getattr(settings, "RESPONSES_MODEL_ALIASES", {}) or {}
+    aliases = getattr(settings, aliases_attr, {}) or {}
     fallback_model = select_alias_model(request.model, aliases)
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 
     if not fallback_model:
-        fallback_model = settings.RESPONSES_DEFAULT_MODEL
+        fallback_model = getattr(settings, default_attr, "")
     if fallback_model and fallback_model not in GeminiClient.AVAILABLE_MODELS:
         fallback_model = ""
 
@@ -90,9 +56,29 @@ def _resolve_responses_model_alias(request):
         request.model = fallback_model
         log(
             "info",
-            "Responses model mapped to Gemini model",
+            log_message,
             extra={"model": original_model, "mapped_model": fallback_model},
         )
+
+
+def _resolve_claude_model_alias(request):
+    """Map Claude model IDs to an available Gemini model for Anthropic clients."""
+    _map_to_available_model(
+        request,
+        "CLAUDE_MODEL_ALIASES",
+        "CLAUDE_DEFAULT_MODEL",
+        "Claude 模型名已映射到 Gemini 模型",
+    )
+
+
+def _resolve_responses_model_alias(request):
+    """Map OpenAI/Codex model IDs to an available Gemini model for Responses clients."""
+    _map_to_available_model(
+        request,
+        "RESPONSES_MODEL_ALIASES",
+        "RESPONSES_DEFAULT_MODEL",
+        "Responses model mapped to Gemini model",
+    )
 
 
 async def handle_responses_request(payload: dict, http_request, auth_dep, user_agent_dep, chat_handler):
