@@ -513,5 +513,228 @@ class ConvertMessagesPrefillFixTests(unittest.TestCase):
         self.assertEqual(contents[-1]["role"], "user")
 
 
+class LastNonemptyTurnRoleTests(unittest.TestCase):
+    """共享谓词：Google 校验的是「最后一个非空 turn」的角色。"""
+
+    def setUp(self):
+        self.mm = load_real_model_mapping()
+
+    def test_regular_roles(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "prefill"}]},
+        ]
+        self.assertEqual(self.mm.last_nonempty_turn_role(contents), "model")
+
+    def test_empty_parts_turn_is_skipped(self):
+        # 末尾的空 model turn（parts 缺失/为空）不算最后非空 turn。
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": []},
+        ]
+        self.assertEqual(self.mm.last_nonempty_turn_role(contents), "user")
+        contents[-1] = {"role": "model"}
+        self.assertEqual(self.mm.last_nonempty_turn_role(contents), "user")
+
+    def test_whitespace_text_turn_is_skipped(self):
+        contents = [
+            {"role": "model", "parts": [{"text": "prefill"}]},
+            {"role": "user", "parts": [{"text": "   "}]},
+        ]
+        self.assertEqual(self.mm.last_nonempty_turn_role(contents), "model")
+
+    def test_inline_data_part_counts_as_nonempty(self):
+        # 图片 part（无 text）是实际内容，算非空 turn。
+        contents = [
+            {"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": "x"}}]},
+        ]
+        self.assertEqual(self.mm.last_nonempty_turn_role(contents), "user")
+
+    def test_empty_and_invalid_inputs(self):
+        self.assertEqual(self.mm.last_nonempty_turn_role([]), "")
+        self.assertEqual(self.mm.last_nonempty_turn_role(None), "")
+        self.assertEqual(self.mm.last_nonempty_turn_role("not-a-list"), "")
+        self.assertEqual(
+            self.mm.last_nonempty_turn_role([{"role": "model", "parts": []}]),
+            "",
+        )
+
+    def test_object_form_reads_role_attribute(self):
+        # google-genai 的 Content 对象走 getattr(role)。
+        from types import SimpleNamespace
+
+        contents = [SimpleNamespace(role="model")]
+        self.assertEqual(self.mm.last_nonempty_turn_role(contents), "model")
+
+    def test_build_prefill_user_turn_structure(self):
+        turn = self.mm.build_prefill_user_turn("继续")
+        self.assertEqual(turn["role"], "user")
+        self.assertEqual(turn["parts"], [{"text": "继续"}])
+
+
+class _FakeGeminiPayload:
+    """原生 Gemini 请求 payload 的最小替代（只需 model_dump）。"""
+
+    def __init__(self, contents):
+        self._contents = contents
+
+    def model_dump(self, exclude_none=True, by_alias=True):
+        return {"contents": self._contents}
+
+
+class _FakeNativeRequest:
+    """原生 Gemini 协议请求对象的最小替代。"""
+
+    def __init__(self, model, contents, api_version=None):
+        self.model = model
+        self.format_type = "gemini"
+        self.api_version = api_version
+        self.payload = _FakeGeminiPayload(contents)
+
+
+class NativeGeminiPrefillFixTests(unittest.TestCase):
+    """原生 Gemini 协议路径（payload 直接透传）的 prefill 补丁。
+
+    该路径不经 convert_messages，补丁挂在 _convert_request_data 的
+    sanitize（assistant→model 归一）之后。"""
+
+    def _convert(self, module, request, **settings_overrides):
+        if settings_overrides:
+            module, _ = load_gemini_module(fake_settings_attrs=settings_overrides)
+        return module.GeminiClient("fake-key")._convert_request_data(
+            request, [], [], None
+        )
+
+    def setUp(self):
+        self.module, self.mm = load_gemini_module()
+
+    def test_native_model_turn_tail_appends_user(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "介绍黑洞"}]},
+                {"role": "model", "parts": [{"text": "黑洞是一种"}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        contents = data["contents"]
+        self.assertEqual(contents[-1]["role"], "user")
+        self.assertEqual(contents[-1]["parts"], [{"text": DEFAULT_PROMPT}])
+        self.assertEqual(contents[-2]["role"], "model")
+
+    def test_native_assistant_tail_normalized_then_fixed(self):
+        # 客户端直发 role=assistant（非标准但 sanitize 会归一为 model）
+        # —— 补丁必须识别归一化后的 model 结尾（验证 sanitize 后执行）。
+        request = _FakeNativeRequest(
+            "gemini-4-argon",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "assistant", "parts": [{"text": "prefill"}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        contents = data["contents"]
+        self.assertEqual(contents[-2]["role"], "model")
+        self.assertEqual(contents[-1]["role"], "user")
+
+    def test_native_unrestricted_model_untouched(self):
+        request = _FakeNativeRequest(
+            "gemini-2.5-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "prefill"}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        self.assertEqual(len(data["contents"]), 2)
+        self.assertEqual(data["contents"][-1]["role"], "model")
+
+    def test_native_user_turn_tail_untouched(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "resp"}]},
+                {"role": "user", "parts": [{"text": "next"}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        self.assertEqual(len(data["contents"]), 3)
+        self.assertEqual(data["contents"][-1]["parts"], [{"text": "next"}])
+
+    def test_native_empty_tail_turn_is_ignored(self):
+        # 末尾空 model turn + 倒数第二 user：Google 看到的最后非空
+        # turn 是 user，不会 400，不应追加。
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": []},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        self.assertEqual(len(data["contents"]), 2)
+
+    def test_native_model_behind_empty_user_tail_still_fixed(self):
+        # 末尾空 user turn + 倒数第二 model turn：Google 看到的最后
+        # 非空 turn 是 model（会 400），应追加。
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "model", "parts": [{"text": "prefill"}]},
+                {"role": "user", "parts": [{"text": "   "}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        contents = data["contents"]
+        self.assertEqual(contents[-1]["role"], "user")
+        self.assertEqual(contents[-1]["parts"], [{"text": DEFAULT_PROMPT}])
+
+    def test_native_disabled_switch_and_custom_prompt(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "p"}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request, PREFILL_FIX=False)
+        self.assertEqual(data["contents"][-1]["role"], "model")
+
+        _, _, data = self._convert(
+            self.module, request, PREFILL_FIX_PROMPT="从停下的地方继续"
+        )
+        self.assertEqual(
+            data["contents"][-1]["parts"], [{"text": "从停下的地方继续"}]
+        )
+
+    def test_native_exclude_models_flow_through(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "p"}]},
+            ],
+        )
+        _, _, data = self._convert(
+            self.module, request, PREFILL_FIX_EXCLUDE_MODELS=["gemini-3.8-flash"]
+        )
+        self.assertEqual(data["contents"][-1]["role"], "model")
+
+    def test_native_search_suffix_still_fixed(self):
+        # needs_model_turn_fix 内部自行剥离 -search 装饰，后缀模型
+        # 同样命中补丁（联网剥离与否不影响判断）。
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash-search",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "p"}]},
+            ],
+        )
+        _, _, data = self._convert(self.module, request)
+        self.assertEqual(data["contents"][-1]["role"], "user")
+        self.assertEqual(data["contents"][-1]["parts"], [{"text": DEFAULT_PROMPT}])
+
+
 if __name__ == "__main__":
     unittest.main()

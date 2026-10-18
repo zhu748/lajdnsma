@@ -189,6 +189,15 @@
 
 以上三项均可在网页控制台「功能配置」中直接开关/编辑；等级制模型（3.x/4.x）上出现的 budget 会自动就近换算为等级，避免 4.x 报 400 错误。
 
+### 预填充兼容配置
+
+- `PREFILL_FIX` - 预填充（prefill）兼容补丁开关，默认为true。新世代模型（3.5+/3.6/3.7/3.8/4-argon/-latest）拒绝以 model turn（assistant 消息）结尾的请求（返回 400），开启后自动在末尾追加一条续写指令的 user turn 恢复兼容；旧模型（2.5/3.0/3.1）不受影响，保持原生 prefill 行为
+- `PREFILL_FIX_PROMPT` - 追加的 user turn 文本（官方要求非空），默认为 "Continue from where you left off, without repeating any content."（从停下的地方继续、不重复已有内容）
+- `PREFILL_FIX_MODELS` - 额外白名单，逗号分隔的模型名/前缀/通配符，强制对这些模型启用补丁
+- `PREFILL_FIX_EXCLUDE_MODELS` - 黑名单，逗号分隔，对这些模型停用补丁（优先级最高，可用于"该模型其实支持 prefill"的纠偏）
+
+补丁覆盖全部三条链路：OpenAI/Claude/Responses 协议转换、原生 Gemini 协议透传、Vertex 模式。
+
 ### 安全配置
 
 - `RANDOM_STRING` - 是否启用随机字符串伪装，默认为true

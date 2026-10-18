@@ -1,4 +1,10 @@
 # 更新日志
+* v1.0.16（第十轮优化：prefill 补丁全路径覆盖——原生 Gemini 协议 + Vertex 模式）
+   * **修复：prefill（model-turn 结尾）兼容补丁只覆盖 OpenAI/Claude/Responses 协议转换路径**——该补丁原挂在 convert_messages（协议转换层），而原生 Gemini 协议（payload 直接透传不经转换）与 Vertex 模式（create_gemini_prompt 独立构造）完全没有补丁，这两条路径上的 prefill 请求打新世代模型（3.5+/4-argon/-latest）照样 400（"Requests ending with a model turn are not supported."）
+   * **原生 Gemini 协议路径补齐**——在 _convert_request_data 的 sanitize（assistant→model 角色归一）之后接入同一补丁语义；判断用「最后一个非空 turn」口径（与 Google 校验一致）：末尾空 turn 被跳过、藏在空 user turn 之后的 model turn 也能正确识别
+   * **Vertex 模式补齐**——在 execute_gemini_call（Vertex 全部调用分支的唯一汇聚点：auto 三连 attempt 与普通模型都经此）的 prompt_func 产出后统一追加，一处接入覆盖整个 Vertex 链路；单 Content（非列表）返回同样包装处理
+   * **共享谓词下沉到 model_mapping.py（纯函数，不引 settings）**——last_nonempty_turn_role（Google 校验口径的最后非空 turn 角色，dict 与 genai Content 对象双形态）、_turn_is_nonempty（空 parts / 空白 text / inlineData 等非 text part 判定）、build_prefill_user_turn（统一追加 turn 构造）；convert_messages 的既有补丁同步升级为共享实现，三条链路行为完全一致
+   * 测试：新增 24 项回归（共享谓词 7 + 原生路径 9 + Vertex 汇聚点 8），全套 390 项测试通过
 * v1.0.15（第九轮优化：最高思考强度——全局最高档 + 按模型指定等级 + 4.x 防呆）
    * **新增「最高思考强度」开关（MAX_THINKING，默认开启，面板可关）**——开启后忽略请求携带的思考强度参数，对所有支持思考的模型直接使用其家族最高档位：2.5 Pro → budget 32768、2.5 Flash/Flash-Lite → budget 24576、3.x/4.x/nano-banana-2·pro/-latest 别名/robotics-er → thinkingLevel=high；TTS/Embedding/Lyria/Transcribe/Gemma/Omni/deep-research/antigravity/computer-use/2.0 及更早等不支持思考的模型自动跳过（不附加任何配置）
    * **新增按模型指定思考等级（MAX_THINKING_MODEL_LEVELS，JSON 映射）**——优先级高于全局最高档开关；值支持 minimal/low/medium/high 等级、off（关闭；2.5 Pro 不可关闭自动退化为最低 128）、dynamic（2.5 系动态思考 -1）与数字 budget（2.5 系直接生效并钳制到上限；3.x/4.x 按区间就近换算成等级）；模型名先精确匹配、再最长前缀匹配（填 gemini-3.8 即可覆盖全部 3.8 变体）

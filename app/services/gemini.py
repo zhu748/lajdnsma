@@ -10,7 +10,11 @@ import app.config.settings as settings
 
 from app.utils.http_client import get_async_client, UPSTREAM_TIMEOUT
 from app.utils.logging import log
-from app.utils.model_mapping import needs_model_turn_fix
+from app.utils.model_mapping import (
+    build_prefill_user_turn,
+    last_nonempty_turn_role,
+    needs_model_turn_fix,
+)
 from app.utils.sse import iter_sse_json
 from app.utils.thinking import (
     apply_thinking_override,
@@ -331,6 +335,36 @@ class GeminiClient:
 
             data.setdefault("tools", []).append({"google_search": {}})
             model = request.model.removesuffix("-search")
+
+        # --- Prefill 补丁：原生 Gemini 协议路径 ---
+        # OpenAI / Claude / Responses 协议的补丁在 convert_messages 末尾；
+        # 原生 Gemini 请求（format_type="gemini"）的 payload 直接 dump
+        # 透传、不经 convert_messages，此前完全无补丁 —— 新世代模型上
+        # 以 model turn 结尾的原生 prefill 请求同样命中 400
+        # （"Requests ending with a model turn are not supported."）。
+        # 必须放在 sanitize_gemini_payload（assistant→model 角色归一）
+        # 之后，否则识别不到被归一化的 assistant 结尾。
+        if (
+            format_type == "gemini"
+            and getattr(settings, "PREFILL_FIX", True)
+            and model
+            and last_nonempty_turn_role(data.get("contents")) == "model"
+            and needs_model_turn_fix(
+                model,
+                extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
+                exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
+            )
+        ):
+            data.setdefault("contents", []).append(
+                build_prefill_user_turn(
+                    getattr(settings, "PREFILL_FIX_PROMPT", None)
+                    or "Continue from where you left off, without repeating any content."
+                )
+            )
+            log(
+                "INFO",
+                f"已追加 user turn 修复原生 Gemini prefill 兼容（{model}）",
+            )
 
         # 最高思考强度覆盖（见 app/utils/thinking.py）：
         # 对两条路径（Gemini 原生 payload / OpenAI 转换产物）的最终 data
@@ -881,19 +915,15 @@ class GeminiClient:
             getattr(settings, "PREFILL_FIX", True)
             and model
             and gemini_history
-            and gemini_history[-1]["role"] == "model"
+            and last_nonempty_turn_role(gemini_history) == "model"
             and needs_model_turn_fix(
                 model,
                 extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
                 exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
             )
         ):
-            gemini_history.append(
-                {
-                    "role": "user",
-                    "parts": [{"text": _prefill_fix_prompt}],
-                }
-            )
+            # 共享构造器保证与原生 Gemini 路径追加的 turn 结构完全一致
+            gemini_history.append(build_prefill_user_turn(_prefill_fix_prompt))
             log(
                 "INFO",
                 f"已追加 user turn 修复 prefill 兼容（{model} -> 追加文本: {_prefill_fix_prompt!r}）",

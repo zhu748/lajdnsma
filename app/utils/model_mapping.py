@@ -112,3 +112,55 @@ def needs_model_turn_fix(model: str, *, extra_include=(), exclude=()) -> bool:
     # 模型，以及 nano-banana 等图像模型）不参与 chat prefill 场景，
     # 默认不修，需要时用 PREFILL_FIX_MODELS 白名单点名。
     return False
+
+
+# ---------------------------------------------------------------------------
+# Prefill 补丁的共享谓词（纯函数，不依赖 settings —— 各接入路径自行
+# 传入配置，供 OpenAI 协议转换、原生 Gemini 透传、Vertex 三条链路复用）
+# ---------------------------------------------------------------------------
+
+def _turn_is_nonempty(content) -> bool:
+    """判断一条 Gemini turn（dict 形式）是否为非空（Google 校验口径）。
+
+    空 turn = parts 缺失/为空，或所有 part 都没有实际内容（text 为
+    空白，且不含 inlineData / fileData / functionCall 等其他键）。
+    非 dict 对象（如 google-genai 的 Content）一律视为非空，角色
+    判断交给调用方。
+    """
+    if not isinstance(content, dict):
+        return bool(content)
+    parts = content.get("parts")
+    if not isinstance(parts, list) or not parts:
+        return False
+    for part in parts:
+        if not isinstance(part, dict):
+            return True
+        text = part.get("text")
+        if isinstance(text, str) and text.strip():
+            return True
+        if any(key != "text" for key in part):
+            return True
+    return False
+
+
+def last_nonempty_turn_role(contents) -> str:
+    """返回 contents 中最后一个非空 turn 的角色（Google 校验的就是它）。
+
+    空列表 / 无非空 turn / 非列表输入返回 ""。dict 形式读 "role"，
+    对象形式（genai Content）读 role 属性。
+    """
+    if not isinstance(contents, list) or not contents:
+        return ""
+    for content in reversed(contents):
+        if _turn_is_nonempty(content):
+            if isinstance(content, dict):
+                role = content.get("role")
+            else:
+                role = getattr(content, "role", None)
+            return role if isinstance(role, str) else ""
+    return ""
+
+
+def build_prefill_user_turn(prompt_text: str) -> dict:
+    """构造补丁用的非空 user turn（Gemini REST / camelCase dict 形式）。"""
+    return {"role": "user", "parts": [{"text": prompt_text}]}

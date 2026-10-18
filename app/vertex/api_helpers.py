@@ -21,6 +21,7 @@ from app.vertex.message_processing import (
 import app.vertex.config as app_config  # Changed from relative
 from app.config import settings  # 导入settings模块
 from app.utils.stealth import gen_openai_chunk_id
+from app.utils.model_mapping import needs_model_turn_fix
 # Bug fix: `vertex_log` was called in three streaming error handlers
 # (and below in place of stray print()s) but never imported — the first
 # upstream error hit a NameError that replaced the original exception,
@@ -448,6 +449,46 @@ async def execute_gemini_call(
     is_auto_attempt: bool = False,
 ):
     actual_prompt_for_call = prompt_func(request_obj.messages)
+
+    # --- Prefill / model-turn 结尾兼容补丁（Vertex 路径） ---
+    # 与 Gemini API 路径同一语义（见 app/utils/model_mapping.py）：
+    # 新世代模型（3.5+/3.6/3.7/3.8/4-argon/*-latest）拒绝以 model
+    # turn 结尾的请求（400: "Requests ending with a model turn are
+    # not supported."）。execute_gemini_call 是 Vertex 全部调用分支
+    # （auto 三连 attempt 与普通模型）的唯一汇聚点，在 prompt_func
+    # 产出后统一追加，保证补丁覆盖整个 Vertex 链路。
+    _prefill_fix_prompt = (
+        getattr(settings, "PREFILL_FIX_PROMPT", None)
+        or "Continue from where you left off, without repeating any content."
+    )
+    _prompt_list = (
+        actual_prompt_for_call
+        if isinstance(actual_prompt_for_call, list)
+        else ([actual_prompt_for_call] if actual_prompt_for_call is not None else [])
+    )
+    if (
+        getattr(settings, "PREFILL_FIX", True)
+        and _prompt_list
+        and getattr(_prompt_list[-1], "role", None) == "model"
+        and needs_model_turn_fix(
+            model_to_call,
+            extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
+            exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
+        )
+    ):
+        _prefill_user_content = types.Content(
+            role="user", parts=[types.Part(text=_prefill_fix_prompt)]
+        )
+        if isinstance(actual_prompt_for_call, list):
+            actual_prompt_for_call.append(_prefill_user_content)
+        else:
+            actual_prompt_for_call = [actual_prompt_for_call, _prefill_user_content]
+        vertex_log(
+            "info",
+            f"已追加 user turn 修复 prefill 兼容（Vertex {model_to_call} -> "
+            f"追加文本: {_prefill_fix_prompt!r}）",
+        )
+
     client_model_name_for_log = getattr(
         current_client, "model_name", "unknown_direct_client_object"
     )
