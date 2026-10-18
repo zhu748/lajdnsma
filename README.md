@@ -191,12 +191,16 @@
 
 ### 预填充兼容配置
 
-- `PREFILL_FIX` - 预填充（prefill）兼容补丁开关，默认为true。新世代模型（3.5+/3.6/3.7/3.8/4-argon/-latest）拒绝以 model turn（assistant 消息）结尾的请求（返回 400），开启后自动在末尾追加一条续写指令的 user turn 恢复兼容；旧模型（2.5/3.0/3.1）不受影响，保持原生 prefill 行为
-- `PREFILL_FIX_PROMPT` - 追加的 user turn 文本（官方要求非空），默认为 "Continue from where you left off, without repeating any content."（从停下的地方继续、不重复已有内容）
+- `PREFILL_FIX` - 预填充（prefill）兼容补丁开关，默认为true。新世代模型（3.5-flash-lite 与 3.6/3.7/3.8/4-argon/-latest）拒绝以 model turn（assistant 消息）结尾的请求（返回 400），开启后自动修复兼容；旧模型（2.5/3.0/3.1/3.5-flash 等规则生效前发布的模型）不受影响，保持原生 prefill 行为。修复策略（对齐社区实现 vertex-master 的成熟语义）：
+  - 末尾是**纯文本** model turn 且前一轮是 user/function → 末尾追加一条续写指令的 user turn（官方迁移指南要求的兼容形态，保留 prefill 原文角色）；
+  - **model-only / 连续 model turn** 等畸形历史（追加指令也修不好的结构）→ 兜底改写：移除末尾 model turn，prefill 原文以 JSON 数据形式内嵌进 user 指令（明确告知是已输出文本、不是待执行的指令，防提示注入）；
+  - 末尾 model turn 含 **functionCall / thought / 媒体** part 的是真实历史（如待回复的工具调用），保持原样让上游按官方语义校验，不做猜测改写
+- `PREFILL_FIX_PROMPT` - 追加的 user turn 文本（官方要求非空），默认为 "Continue the immediately preceding assistant response. Output only its continuation; do not repeat, explain, or restart it."（锚定"紧邻的上一条 assistant 回复"，避免被误解为续写用户消息）
+- `PREFILL_FIX_STRIP_ECHO` - 响应侧回显剥离，默认为true。追加续写指令后，模型有相当概率先把 prefill 原文复述一遍再续写（客户端拼接后内容重复）；开启后在 Gemini API / Vertex 的全部流式与非流式路径上，用跨 chunk 状态机精确剥离回显前缀——仅在输出仍与前缀逐字匹配期间暂存、失配立即放行（正常输出首 chunk 即释放，零额外延迟），thought/工具/媒体 part 不受影响，流中途断开时未决内容按真实输出原样释放、绝不吞内容。行为异常时可关闭本开关回退
 - `PREFILL_FIX_MODELS` - 额外白名单，逗号分隔的模型名/前缀/通配符，强制对这些模型启用补丁
 - `PREFILL_FIX_EXCLUDE_MODELS` - 黑名单，逗号分隔，对这些模型停用补丁（优先级最高，可用于"该模型其实支持 prefill"的纠偏）
 
-补丁覆盖全部三条链路：OpenAI/Claude/Responses 协议转换、原生 Gemini 协议透传、Vertex 模式。
+补丁覆盖全部三条链路：OpenAI/Claude/Responses 协议转换、原生 Gemini 协议透传、Vertex 模式（真流式/伪流式/非流式均含回显剥离）。
 
 ### 安全配置
 

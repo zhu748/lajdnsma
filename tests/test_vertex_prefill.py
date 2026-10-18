@@ -40,7 +40,8 @@ def _fresh_real_modules():
 
 
 DEFAULT_PROMPT = (
-    "Continue from where you left off, without repeating any content."
+    "Continue the immediately preceding assistant response. "
+    "Output only its continuation; do not repeat, explain, or restart it."
 )
 
 
@@ -139,15 +140,57 @@ class VertexPrefillFixTests(unittest.TestCase):
 
     def test_single_content_object_is_wrapped(self):
         # create_gemini_prompt 对单条消息可能返回单个 Content 对象；
-        # model turn 结尾时同样需要追加（包装成新列表，局部变量重
-        # 绑定，外部容器观察不到 —— 以追加日志为断言依据）。
+        # 单 model Content 属于 model-only 畸形历史 → 兑底改写（包装成
+        # 新列表后移除 model 轮、以 JSON 指令新建 user 轮；本地变量重
+        # 绑定，外部容器观察不到 —— 以兑底日志 + 非流分支前的行为为断言）。
         single = self._content("model", "prefill")
         with self.assertLogs(level="INFO") as cm:
             _, _response = self._run("gemini-4-argon", single)
         self.assertTrue(
-            any("已追加 user turn 修复 prefill 兼容" in line for line in cm.output),
-            msg=f"追加日志未出现: {cm.output}",
+            any("已按 JSON 兑底改写" in line for line in cm.output),
+            msg=f"兑底日志未出现: {cm.output}",
         )
+
+    def test_consecutive_model_turns_use_fallback(self):
+        # [user, model, model]：nudge 修不了连续 model，兑底改写为
+        # [user, model, user(指令)]。
+        contents, _ = self._run(
+            "gemini-3.8-flash",
+            [
+                self._content("user", "hi"),
+                self._content("model", "resp"),
+                self._content("model", "prefill"),
+            ],
+        )
+        self.assertEqual([c.role for c in contents], ["user", "model", "user"])
+        tail_text = contents[-1].parts[0].text
+        self.assertTrue(tail_text.startswith("The JSON string below represents"))
+        self.assertIn('"prefill"', tail_text)
+
+    def test_tool_call_part_tail_left_as_is(self):
+        # genai 无 functionCall 构造便捷方法，用带 function_call 的 Part
+        # 模拟：非文本 part 结尾的 model 轮是真实历史，保持原样。
+        from google.genai import types
+
+        contents, _ = self._run(
+            "gemini-3.8-flash",
+            [
+                self._content("user", "hi"),
+                types.Content(
+                    role="model",
+                    parts=[
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name="get_weather", args={"city": "Beijing"}
+                            )
+                        )
+                    ],
+                ),
+            ],
+        )
+        self.assertEqual(len(contents), 2)
+        self.assertEqual(contents[-1].role, "model")
+        self.assertIsNotNone(contents[-1].parts[0].function_call)
 
     def test_disabled_switch_disables_fix(self):
         self.settings.PREFILL_FIX = False

@@ -11,9 +11,17 @@ import app.config.settings as settings
 from app.utils.http_client import get_async_client, UPSTREAM_TIMEOUT
 from app.utils.logging import log
 from app.utils.model_mapping import (
+    DEFAULT_PREFILL_FIX_PROMPT,
+    build_prefill_fallback_instruction,
     build_prefill_user_turn,
-    last_nonempty_turn_role,
+    extract_trailing_model_prefill,
     needs_model_turn_fix,
+)
+from app.utils.prefill_echo import (
+    PrefillEchoStreamFilter,
+    build_tail_chunk,
+    get_current_prefill_echo,
+    set_current_prefill_echo,
 )
 from app.utils.sse import iter_sse_json
 from app.utils.thinking import (
@@ -344,27 +352,70 @@ class GeminiClient:
         # （"Requests ending with a model turn are not supported."）。
         # 必须放在 sanitize_gemini_payload（assistant→model 角色归一）
         # 之后，否则识别不到被归一化的 assistant 结尾。
+        #
+        # 升级（对齐 vertex-master 成熟语义）：
+        #   1. 只把「末尾纯文本 model turn」识别为 prefill（functionCall/
+        #      thought/媒体结尾是真实历史，保持原样让上游按官方语义
+        #      校验，而非猜测改写）；
+        #   2. 前一非空轮是 user/function → 追加 nudge；model-only /
+        #      连续 model 等畸形历史 → 兑底改写为 JSON 数据内嵌的 user
+        #      指令（结构上必然合法）；
+        #   3. prefill 原文经 ContextVar 透传给响应侧回显剥离
+        #      （PREFILL_FIX_STRIP_ECHO 可关）。
+        _prefill_echo = None
         if (
             format_type == "gemini"
             and getattr(settings, "PREFILL_FIX", True)
             and model
-            and last_nonempty_turn_role(data.get("contents")) == "model"
             and needs_model_turn_fix(
                 model,
                 extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
                 exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
             )
         ):
-            data.setdefault("contents", []).append(
-                build_prefill_user_turn(
+            _prefill_ctx = extract_trailing_model_prefill(data.get("contents"))
+            if _prefill_ctx is not None:
+                _prefill_text, _preceding_role, _prefill_index = _prefill_ctx
+                _fix_prompt = (
                     getattr(settings, "PREFILL_FIX_PROMPT", None)
-                    or "Continue from where you left off, without repeating any content."
+                    or DEFAULT_PREFILL_FIX_PROMPT
                 )
-            )
-            log(
-                "INFO",
-                f"已追加 user turn 修复原生 Gemini prefill 兼容（{model}）",
-            )
+                if _preceding_role in ("user", "function"):
+                    data.setdefault("contents", []).append(
+                        build_prefill_user_turn(_fix_prompt)
+                    )
+                    log(
+                        "INFO",
+                        f"已追加 user turn 修复原生 Gemini prefill 兼容（{model}）",
+                    )
+                else:
+                    # 畸形历史兑底：移除末尾 model turn，prefill 原文以
+                    # JSON 数据形式内嵌进 user 指令（并入既有 user 轮，
+                    # 或新建 user 轮 —— 两种部保证结尾合法）。
+                    _contents = data.get("contents") or []
+                    del _contents[_prefill_index]
+                    _instruction = build_prefill_fallback_instruction(_prefill_text)
+                    _merged = False
+                    if _contents and isinstance(_contents[-1], dict) and _contents[-1].get("role") == "user":
+                        _contents[-1].setdefault("parts", []).append(
+                            {"text": _instruction}
+                        )
+                        _merged = True
+                    if not _merged:
+                        _contents.append(
+                            {"role": "user", "parts": [{"text": _instruction}]}
+                        )
+                    log(
+                        "INFO",
+                        f"检测到畸形历史（model-only/连续 model），已按 JSON 兑底"
+                        f"改写原生 Gemini prefill（{model}）",
+                    )
+                _prefill_echo = _prefill_text
+        # 同一 async 任务内的请求/响应共享上下文：这里必须显式写入
+        # （含 None），避免上一请求的值泄漏；OpenAI 协议路径由
+        # convert_messages 在请求准备阶段写入，此分支不覆盖。
+        if format_type == "gemini":
+            set_current_prefill_echo(_prefill_echo)
 
         # 最高思考强度覆盖（见 app/utils/thinking.py）：
         # 对两条路径（Gemini 原生 payload / OpenAI 转换产物）的最终 data
@@ -541,6 +592,15 @@ class GeminiClient:
         api_version, model, data = self._convert_request_data(
             request, contents, safety_settings, system_instruction
         )
+        # Prefill 回显剥离（响应侧）：请求侧补丁已把 prefill 原文写入
+        # ContextVar（同一请求任务内可见）。这里创建跨 chunk 状态机，
+        # 过滤上游输出中重复回显的 prefill 前缀；PREFILL_FIX_STRIP_ECHO
+        # 关闭时退化恒为 no-op 过滤器（prefill=""）。
+        _echo_filter = PrefillEchoStreamFilter(
+            get_current_prefill_echo()
+            if getattr(settings, "PREFILL_FIX_STRIP_ECHO", True)
+            else ""
+        )
         #log("INFO", f"Request body to Google: {json.dumps(data, ensure_ascii=False)}")
 
         # Hardening: API key moved from URL query (?key=...) to the
@@ -580,7 +640,18 @@ class GeminiClient:
                     response.raise_for_status()
 
                 async for data in iter_sse_json(response):
+                    # 原地改写本 chunk 的普通文本 part（thought/工具/媒体
+                    # 不动）；遇真实 finishReason 帧时在同一 chunk 内释放
+                    # 未决暂存，不产生额外帧。
+                    _echo_filter.filter_gemini_chunk(data)
                     yield GeminiResponseWrapper(data)
+
+                # 上游流关闭却仍有未决暂存（无 finishReason 帧，如连接
+                # 异常中断）的罕见场景：按真实内容原样释放，合成一个
+                # 普通形态的文本 chunk 补发给下游，绝不吞输出。
+                _tail_chunk = build_tail_chunk(_echo_filter.finalize_gemini())
+                if _tail_chunk is not None:
+                    yield GeminiResponseWrapper(_tail_chunk)
 
             except Exception as e:
                 # 在重新抛出异常之前，确保响应体被完全读取
@@ -627,6 +698,12 @@ class GeminiClient:
                 pass
         response.raise_for_status()  # 检查 HTTP 错误状态
 
+        # Prefill 回显剥离（非流式）：一次性过滤完整响应（含最终释放），
+        # 语义与流式路径完全一致；未命中补丁时为 no-op。
+        if getattr(settings, "PREFILL_FIX_STRIP_ECHO", True):
+            _data = response.json()
+            PrefillEchoStreamFilter(get_current_prefill_echo()).filter_complete_response(_data)
+            return GeminiResponseWrapper(_data)
         return GeminiResponseWrapper(response.json())
 
     # OpenAI 格式请求转换为 gemini 格式请求
@@ -890,44 +967,85 @@ class GeminiClient:
             log("INFO", "伪装消息成功")
 
         # --- Prefill / model-turn 结尾兼容补丁（全场景通用） ---
-        # 新世代 Gemini 模型（3.5+/3.6/3.7/3.8/4-argon/*-latest，
-        # 详见 model_mapping.needs_model_turn_fix）拒绝以 model turn
-        # 结尾的请求，返回 400："Requests ending with a model turn are
-        # not supported."。prefill（请求以 assistant 消息结尾让模型
-        # 续写）是通用技巧，覆盖：回答截断后继续输出、酒馆填表/
-        # 续写、结构化输出前缀强制、抑制前言等全部场景，这些请求
-        # 在新模型上都命中该限制。此处按 Google 官方迁移指南的
-        # 要求，在末尾追加一条非空文本的 user turn 恢复兼容，
-        # 追加语义为通用续写指令（从停下的地方继续、不重复）；
-        # 旧模型（2.5 / 3.0 / 3.1 等）保持原生 prefill 行为不动，
-        # 避免改变其续写语义。
+        # 新世代 Gemini 模型（3.5-flash-lite 与 3.6/3.7/3.8/4-argon/
+        # *-latest，详见 model_mapping.needs_model_turn_fix）拒绝以
+        # model turn 结尾的请求，返回 400："Requests ending with a
+        # model turn are not supported."。prefill（请求以 assistant
+        # 消息结尾让模型续写）是通用技巧，覆盖：回答截断后继续输出、
+        # 酒馆填表/续写、结构化输出前缀强制、抑制前言等全部场景。
+        #
+        # 升级（对齐 vertex-master 成熟语义）：
+        #   1. 只把「末尾纯文本 model turn」识别为 prefill ——
+        #      assistant 携带 tool_calls（functionCall part）、thought
+        #      思考回放、媒体结尾是真实历史，保持原样让上游按官方
+        #      语义校验（此前的实现一律追加 nudge，会掩蔽结构错误）；
+        #   2. 前一非空轮是 user/function → 追加 nudge；model-only /
+        #      连续 model 等畸形历史 → 兑底改写为 JSON 数据内嵌的
+        #      user 指令（结构上必然合法）；
+        #   3. prefill 原文经 ContextVar 透传给响应侧回显剥离。
+        #
         # 必须放在 RANDOM_STRING 注入之后执行，保证追加的 user
         # turn 位于 contents 的绝对末尾（Google 校验的是最后一个
         # 非空 turn 的角色）。
         # 配置一律 getattr 防御性读取：settings 属性可能来自旧持久
         # 化快照或测试桩，缺键时按 settings.py 的默认值（启用 +
-        # 通用续写指令）处理；追加文本保底非空（官方要求 nonempty）。
-        _prefill_fix_prompt = (
-            getattr(settings, "PREFILL_FIX_PROMPT", None)
-            or "Continue from where you left off, without repeating any content."
-        )
+        # 新默认指令）处理；追加文本保底非空（官方要求 nonempty）。
+        _prefill_echo = None
         if (
             getattr(settings, "PREFILL_FIX", True)
             and model
             and gemini_history
-            and last_nonempty_turn_role(gemini_history) == "model"
             and needs_model_turn_fix(
                 model,
                 extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
                 exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
             )
         ):
-            # 共享构造器保证与原生 Gemini 路径追加的 turn 结构完全一致
-            gemini_history.append(build_prefill_user_turn(_prefill_fix_prompt))
-            log(
-                "INFO",
-                f"已追加 user turn 修复 prefill 兼容（{model} -> 追加文本: {_prefill_fix_prompt!r}）",
-            )
+            _prefill_ctx = extract_trailing_model_prefill(gemini_history)
+            if _prefill_ctx is not None:
+                _prefill_text, _preceding_role, _prefill_index = _prefill_ctx
+                _fix_prompt = (
+                    getattr(settings, "PREFILL_FIX_PROMPT", None)
+                    or DEFAULT_PREFILL_FIX_PROMPT
+                )
+                if _preceding_role in ("user", "function"):
+                    # 常规 prefill：保留 model turn 原文，末尾追加续写
+                    # 指令（官方迁移指南要求的兼容形态）。
+                    gemini_history.append(build_prefill_user_turn(_fix_prompt))
+                    log(
+                        "INFO",
+                        f"已追加 user turn 修复 prefill 兼容（{model} -> "
+                        f"追加文本: {_fix_prompt!r}）",
+                    )
+                else:
+                    # 畸形历史兑底（model-only / 连续 model turn，本路径
+                    # 因同角色合并只剩 model-only 可达）：移除末尾 model
+                    # turn，prefill 原文以 JSON 数据形式内嵌进 user 指令。
+                    del gemini_history[_prefill_index]
+                    _instruction = build_prefill_fallback_instruction(_prefill_text)
+                    _merged = False
+                    if (
+                        gemini_history
+                        and isinstance(gemini_history[-1], dict)
+                        and gemini_history[-1].get("role") == "user"
+                    ):
+                        gemini_history[-1].setdefault("parts", []).append(
+                            {"text": _instruction}
+                        )
+                        _merged = True
+                    if not _merged:
+                        gemini_history.append(
+                            {"role": "user", "parts": [{"text": _instruction}]}
+                        )
+                    log(
+                        "INFO",
+                        f"检测到畸形历史（model-only/连续 model），已按 JSON "
+                        f"兑底改写 prefill（{model}）",
+                    )
+                _prefill_echo = _prefill_text
+        # 显式写入（含 None）：响应侧（stream_chat/complete_chat）经
+        # ContextVar 读取本值做回显剥离；同任务多请求场景防泄漏。
+        set_current_prefill_echo(_prefill_echo)
 
         return gemini_history, system_instruction
 

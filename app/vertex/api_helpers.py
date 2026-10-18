@@ -21,7 +21,12 @@ from app.vertex.message_processing import (
 import app.vertex.config as app_config  # Changed from relative
 from app.config import settings  # 导入settings模块
 from app.utils.stealth import gen_openai_chunk_id
-from app.utils.model_mapping import needs_model_turn_fix
+from app.utils.model_mapping import (
+    DEFAULT_PREFILL_FIX_PROMPT,
+    build_prefill_fallback_instruction,
+    needs_model_turn_fix,
+)
+from app.utils.prefill_echo import PrefillEchoStreamFilter
 # Bug fix: `vertex_log` was called in three streaming error handlers
 # (and below in place of stray print()s) but never imported — the first
 # upstream error hit a NameError that replaced the original exception,
@@ -301,6 +306,7 @@ async def gemini_fake_stream_generator(
     gen_config_for_api_call: Dict[str, Any],
     request_obj: OpenAIRequest,
     is_auto_attempt: bool,
+    prefill_echo: str = "",
 ):
     model_name_for_log = getattr(
         gemini_client_instance, "model_name", "unknown_gemini_model_object"
@@ -382,6 +388,14 @@ async def gemini_fake_stream_generator(
             separated_actual_content_text, request_obj.model
         )
 
+        # Prefill 回显剥离（假流式）：完整响应已知，一次性过滤即可
+        # （final=True 含未决释放语义：恰好整段是回显 → 剥为空串；
+        # 仅部分匹配前缀 → 原样保留）。reasoning 不受影响。
+        if prefill_echo:
+            final_actual_content_text = PrefillEchoStreamFilter(
+                prefill_echo
+            ).filter_text(final_actual_content_text, final=True, index=0)
+
         # Define block checking for the raw response
         def _check_gemini_block_wrapper(response_to_check: Any):
             if (
@@ -438,6 +452,47 @@ async def gemini_fake_stream_generator(
         api_call_task.cancel()
 
 
+def _vertex_trailing_model_prefill(
+    prompt_list: List[Any],
+) -> Optional[tuple]:
+    """genai Content 对象形态的末尾纯文本 model turn 提取。
+
+    返回 (prefill_text, preceding_role) 或 None。语义与
+    model_mapping.extract_trailing_model_prefill 一致：functionCall /
+    thought / 媒体 part 结尾的 model turn 不是 prefill，返回 None
+    （调用方保持原样，让上游按官方语义校验）。
+    """
+    if not prompt_list:
+        return None
+    last = prompt_list[-1]
+    if getattr(last, "role", None) != "model":
+        return None
+    parts = list(getattr(last, "parts", None) or [])
+    if not parts:
+        return None
+
+    texts = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        if not isinstance(text, str):
+            # 非 text part（inline_data / function_call / ...）是真实历史。
+            return None
+        if getattr(part, "thought", None):
+            # thought=True 的文本是思考摘要回放，不是 prefill。
+            return None
+        texts.append(text)
+    prefill_text = "".join(texts)
+    if not prefill_text:
+        return None
+
+    preceding_role = ""
+    for prev in reversed(prompt_list[:-1]):
+        if list(getattr(prev, "parts", None) or []):
+            preceding_role = getattr(prev, "role", None) or ""
+            break
+    return prefill_text, preceding_role
+
+
 async def execute_gemini_call(
     current_client: Any,
     model_to_call: str,
@@ -452,42 +507,85 @@ async def execute_gemini_call(
 
     # --- Prefill / model-turn 结尾兼容补丁（Vertex 路径） ---
     # 与 Gemini API 路径同一语义（见 app/utils/model_mapping.py）：
-    # 新世代模型（3.5+/3.6/3.7/3.8/4-argon/*-latest）拒绝以 model
-    # turn 结尾的请求（400: "Requests ending with a model turn are
-    # not supported."）。execute_gemini_call 是 Vertex 全部调用分支
+    # 新世代模型（3.5-flash-lite 与 3.6/3.7/3.8/4-argon/*-latest）拒绝
+    # 以 model turn 结尾的请求（400: "Requests ending with a model turn
+    # are not supported."）。execute_gemini_call 是 Vertex 全部调用分支
     # （auto 三连 attempt 与普通模型）的唯一汇聚点，在 prompt_func
-    # 产出后统一追加，保证补丁覆盖整个 Vertex 链路。
+    # 产出后统一处理，保证补丁覆盖整个 Vertex 链路。
+    #
+    # 升级（对齐 vertex-master 成熟语义）：
+    #   1. 只把「末尾纯文本 model turn」识别为 prefill（functionCall/
+    #      thought/媒体结尾是真实历史，保持原样）；
+    #   2. 前一非空轮是 user/function → 追加 nudge；model-only /
+    #      连续 model 等畸形历史 → 兑底改写为 JSON 数据内嵌的 user
+    #      指令；
+    #   3. prefill 原文传给三个响应分支（真流/假流/非流）做回显剥离
+    #      （PREFILL_FIX_STRIP_ECHO 可关）。
     _prefill_fix_prompt = (
         getattr(settings, "PREFILL_FIX_PROMPT", None)
-        or "Continue from where you left off, without repeating any content."
+        or DEFAULT_PREFILL_FIX_PROMPT
     )
+    _prompt_is_list = isinstance(actual_prompt_for_call, list)
     _prompt_list = (
         actual_prompt_for_call
-        if isinstance(actual_prompt_for_call, list)
+        if _prompt_is_list
         else ([actual_prompt_for_call] if actual_prompt_for_call is not None else [])
     )
+    _prefill_echo = ""
     if (
         getattr(settings, "PREFILL_FIX", True)
         and _prompt_list
-        and getattr(_prompt_list[-1], "role", None) == "model"
         and needs_model_turn_fix(
             model_to_call,
             extra_include=getattr(settings, "PREFILL_FIX_MODELS", None) or [],
             exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
         )
     ):
-        _prefill_user_content = types.Content(
-            role="user", parts=[types.Part(text=_prefill_fix_prompt)]
-        )
-        if isinstance(actual_prompt_for_call, list):
-            actual_prompt_for_call.append(_prefill_user_content)
-        else:
-            actual_prompt_for_call = [actual_prompt_for_call, _prefill_user_content]
-        vertex_log(
-            "info",
-            f"已追加 user turn 修复 prefill 兼容（Vertex {model_to_call} -> "
-            f"追加文本: {_prefill_fix_prompt!r}）",
-        )
+        _prefill_ctx = _vertex_trailing_model_prefill(_prompt_list)
+        if _prefill_ctx is not None:
+            _prefill_text, _preceding_role = _prefill_ctx
+            if _preceding_role in ("user", "function"):
+                # 常规 prefill：保留 model turn 原文，末尾追加续写指令。
+                _prefill_user_content = types.Content(
+                    role="user", parts=[types.Part(text=_prefill_fix_prompt)]
+                )
+                _prompt_list.append(_prefill_user_content)
+                vertex_log(
+                    "info",
+                    f"已追加 user turn 修复 prefill 兼容（Vertex {model_to_call} -> "
+                    f"追加文本: {_prefill_fix_prompt!r}）",
+                )
+            else:
+                # 畸形历史兑底：移除末尾 model turn，prefill 原文以 JSON
+                # 数据形式内嵌进 user 指令（并入既有 user 轮，或新建）。
+                _prompt_list.pop()
+                _instruction_part = types.Part(
+                    text=build_prefill_fallback_instruction(_prefill_text)
+                )
+                _merged = False
+                if _prompt_list and getattr(_prompt_list[-1], "role", None) == "user":
+                    _prev = _prompt_list[-1]
+                    _prompt_list[-1] = types.Content(
+                        role="user",
+                        parts=list(getattr(_prev, "parts", None) or []) + [_instruction_part],
+                    )
+                    _merged = True
+                if not _merged:
+                    _prompt_list.append(
+                        types.Content(role="user", parts=[_instruction_part])
+                    )
+                vertex_log(
+                    "info",
+                    f"检测到畸形历史（model-only/连续 model），已按 JSON 兑底"
+                    f"改写 Vertex prefill（{model_to_call}）",
+                )
+            # 单 Content（非列表）输入：包装后的列表是本地新对象，必须
+            # 回写；列表输入原地修改自然生效。
+            if not _prompt_is_list:
+                actual_prompt_for_call = _prompt_list
+            _prefill_echo = _prefill_text
+    if not getattr(settings, "PREFILL_FIX_STRIP_ECHO", True):
+        _prefill_echo = ""
 
     client_model_name_for_log = getattr(
         current_client, "model_name", "unknown_direct_client_object"
@@ -519,6 +617,7 @@ async def execute_gemini_call(
                     gen_config_for_call,
                     request_obj,
                     is_auto_attempt,
+                    prefill_echo=_prefill_echo,
                 ),
                 media_type="text/event-stream",
             )
@@ -533,6 +632,9 @@ async def execute_gemini_call(
 
         async def _gemini_real_stream_generator_inner():
             try:
+                # Prefill 回显剥离（真流式）：跨 chunk 状态机，只在输出
+                # 仍与前缀逐字匹配期间暂存，失配立即放行。
+                _echo_filter = PrefillEchoStreamFilter(_prefill_echo)
                 async for (
                     chunk_item_call
                 ) in await current_client.aio.models.generate_content_stream(
@@ -543,7 +645,26 @@ async def execute_gemini_call(
                     yield convert_chunk_to_openai(
                         chunk_item_call, request_obj.model, response_id_for_stream, 0,
                         created_ts=created_ts_for_stream,
+                        echo_filter=_echo_filter,
                     )
+                # 流结束释放仍处于未决状态的暂存前缀（罕见：连接异常
+                # 中断且无 finish 帧）——按真实内容原样补发，绝不吞输出。
+                _tail_text = _echo_filter.finalize_text()
+                if _tail_text:
+                    _tail_chunk_data = {
+                        "id": response_id_for_stream,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts_for_stream,
+                        "model": request_obj.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": _tail_text},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                    yield f"data: {json.dumps(_tail_chunk_data)}\n\n"
                 yield create_final_chunk(
                     request_obj.model, response_id_for_stream, cand_count_stream,
                     created_ts=created_ts_for_stream,
@@ -596,5 +717,7 @@ async def execute_gemini_call(
                 f"Invalid non-streaming Gemini response for model string '{model_to_call}'. Resp: {str(response_obj_call)[:200]}"
             )
         return JSONResponse(
-            content=convert_to_openai_format(response_obj_call, request_obj.model)
+            content=convert_to_openai_format(
+                response_obj_call, request_obj.model, prefill_echo=_prefill_echo
+            )
         )

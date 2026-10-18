@@ -13,6 +13,7 @@ from app.vertex.models import (
 )  # Changed from relative
 from app.utils.logging import vertex_log
 from app.utils.stealth import gen_openai_chunk_id
+from app.utils.prefill_echo import PrefillEchoStreamFilter
 
 # Define supported roles for Gemini API
 SUPPORTED_ROLES = ["user", "model"]
@@ -507,9 +508,17 @@ def parse_gemini_response_for_reasoning_and_content(
     return "".join(reasoning_text_parts), "".join(normal_text_parts)
 
 
-def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
-    """Converts Gemini response to OpenAI format, applying deobfuscation if needed."""
+def convert_to_openai_format(
+    gemini_response, model: str, prefill_echo: str = ""
+) -> Dict[str, Any]:
+    """Converts Gemini response to OpenAI format, applying deobfuscation if needed.
+
+    `prefill_echo` 非空时，对每个候选的普通文本内容做 prefill 回显
+    剥离（一次性 final=True 过滤：完整回显剥为空串 / 部分匹配原样
+    保留）；reasoning_content 不受影响。
+    """
     is_encrypt_full = model.endswith("-encrypt-full")
+    echo_filter = PrefillEchoStreamFilter(prefill_echo) if prefill_echo else None
     choices = []
 
     if hasattr(gemini_response, "candidates") and gemini_response.candidates:
@@ -523,6 +532,11 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
                     final_reasoning_content_str
                 )
                 final_normal_content_str = deobfuscate_text(final_normal_content_str)
+
+            if echo_filter is not None:
+                final_normal_content_str = echo_filter.filter_text(
+                    final_normal_content_str, final=True, index=i
+                )
 
             message_payload = {"role": "assistant", "content": final_normal_content_str}
             if final_reasoning_content_str:
@@ -588,7 +602,12 @@ def convert_to_openai_format(gemini_response, model: str) -> Dict[str, Any]:
 
 
 def convert_chunk_to_openai(
-    chunk, model: str, response_id: str, candidate_index: int = 0, created_ts: int | None = None
+    chunk,
+    model: str,
+    response_id: str,
+    candidate_index: int = 0,
+    created_ts: int | None = None,
+    echo_filter=None,
 ) -> str:
     """Converts Gemini stream chunk to OpenAI format, applying deobfuscation if needed.
 
@@ -596,6 +615,11 @@ def convert_chunk_to_openai(
     all chunks of the same response share the same `created` value
     (matching real OpenAI streaming behaviour).  Falls back to
     `int(time.time())` for backwards compatibility.
+
+    `echo_filter`（PrefillEchoStreamFilter）非空时对普通文本增量做
+    prefill 回显剥离（final=False，流结束时的未决释放由调用方在
+    循环外以 finalize_text 处理）；被暂存的 chunk 退化为合法的空
+    增量（无 content 字段）心跳形态。
     """
     is_encrypt_full = model.endswith("-encrypt-full")
     delta_payload = {}
@@ -612,6 +636,9 @@ def convert_chunk_to_openai(
         if is_encrypt_full:
             reasoning_text = deobfuscate_text(reasoning_text)
             normal_text = deobfuscate_text(normal_text)
+
+        if echo_filter is not None and normal_text:
+            normal_text = echo_filter.filter_text(normal_text, final=False, index=0)
 
         if reasoning_text:
             delta_payload["reasoning_content"] = reasoning_text

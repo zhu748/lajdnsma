@@ -116,25 +116,43 @@ RANDOM_STRING_LENGTH = int(os.environ.get("RANDOM_STRING_LENGTH", "5"))
 #   "Requests ending with a model turn are not supported."
 # prefill 是通用技巧，覆盖但不限于：回答截断后继续输出、酒馆
 # 填表/续写、结构化输出前缀强制（如预填 "{"）、抑制前言等场景。
-# 开启本补丁后，命中受限模型名单（>= 3.5 世代 / 4+ / *-latest）且
-# contents 以 model turn 结尾时，自动在末尾追加一条非空文本的
-# user turn（官方迁移指南要求的兼容形态），语义为通用的
-# "从停下的地方继续，不要重复"。旧模型（2.5 / 3.0 /
-# 3.1 等）不受影响，保持原生 prefill 行为。判断实现见
-# app/utils/model_mapping.py::needs_model_turn_fix。
+# 开启本补丁后，命中受限模型名单（3.5-flash-lite 与 3.6+ / 4+ /
+# *-latest）且 contents 以纯文本 model turn 结尾时：前一轮是
+# user/function → 末尾追加一条非空文本 user turn（官方迁移指南
+# 要求的兼容形态）；model-only / 连续 model 等畸形历史 → 兑底
+# 改写为 JSON 数据内嵌的 user 指令。旧模型（2.5 / 3.0 / 3.1 /
+# gemini-3.5-flash 等规则前发布的模型）不受影响，保持原生 prefill
+# 行为。判断实现见 app/utils/model_mapping.py::needs_model_turn_fix。
 PREFILL_FIX = os.environ.get("PREFILL_FIX", "true").lower() in ["true", "1", "yes"]
 # 追加的 user turn 文本（官方要求 nonempty text）。默认英文明确版
-# 指令，覆盖截断续写 / 填表 / 结构化前缀等全部 prefill 场景：
-# 从停下的地方继续、不重复已有内容（避免模型重写 prefill 部分）。
-# 可按需改成中文，如 "从你停下的地方继续，不要重复任何内容。"
+# 指令，锚定"紧邻的上一条 assistant 回复"（避免被误解为续写用户
+# 消息）：只输出其延续、不重复/不解释/不重启。
+# 注：与 model_mapping.DEFAULT_PREFILL_FIX_PROMPT 保持一致
+# （测试强制校验，避免两处默认值漂移）。
+# 可按需改成中文，如 "接着上一条助手回复继续，不要重复任何内容。"
 _prefill_prompt_raw = os.environ.get(
-    "PREFILL_FIX_PROMPT", "Continue from where you left off, without repeating any content."
+    "PREFILL_FIX_PROMPT",
+    "Continue the immediately preceding assistant response. "
+    "Output only its continuation; do not repeat, explain, or restart it.",
 ).strip().strip('"')
 PREFILL_FIX_PROMPT = (
     _prefill_prompt_raw
     if _prefill_prompt_raw
-    else "Continue from where you left off, without repeating any content."
+    else (
+        "Continue the immediately preceding assistant response. "
+        "Output only its continuation; do not repeat, explain, or restart it."
+    )
 )
+# 响应侧 prefill 回显剥离：追加 user turn 后，模型有相当概率先把
+# prefill 原文复述一遍再续写，客户端拼接后内容重复。开启后在
+# Gemini API / Vertex 的全部流式与非流式路径上，用跨 chunk 状态机
+# 精确剥离回显前缀——仅在输出仍与前缀逐字匹配期间暂存，失配立即
+# 放行（正常输出首 chunk 即释放，零额外延迟）；thought/工具/媒体
+# part 不受影响；流中途断开时未决暂存按真实内容原样释放，绝不吞
+# 掉合法输出。行为异常时可关闭本开关回退。
+PREFILL_FIX_STRIP_ECHO = os.environ.get(
+    "PREFILL_FIX_STRIP_ECHO", "true"
+).lower() in ["true", "1", "yes"]
 # 额外白名单：逗号分隔的模型名/前缀/通配符，强制对这些模型启用补丁
 # （用于点名 antigravity / omni 等未纳入世代启发式的专用模型）。
 PREFILL_FIX_MODELS = [

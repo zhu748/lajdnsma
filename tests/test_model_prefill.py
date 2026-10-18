@@ -12,7 +12,8 @@
 拒绝以 model turn 结尾的请求（prefill / 前缀续写），返回 400
 "Requests ending with a model turn are not supported."。
 prefill 是全场景通用技巧（截断续写 / 填表 / 结构化前缀 /
-抑制前言），补丁对所有这些场景统一生效。
+抑制前言），补丁对所有这些场景统一生效；更早发布的
+gemini-3.5-flash 原生支持 prefill，不受影响。
 官方迁移指南：ai.google.dev/gemini-api/docs/generate-content/latest-model
 """
 
@@ -25,9 +26,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# 与 settings.py 默认值保持一致的通用续写指令（全场景 prefill）。
+# 与 model_mapping.DEFAULT_PREFILL_FIX_PROMPT / settings.PREFILL_FIX_PROMPT
+# 默认值保持一致的通用续写指令（另有专门测试强制三处不漂移）。
 DEFAULT_PROMPT = (
-    "Continue from where you left off, without repeating any content."
+    "Continue the immediately preceding assistant response. "
+    "Output only its continuation; do not repeat, explain, or restart it."
 )
 
 
@@ -54,6 +57,18 @@ def load_real_thinking_module():
     """
     spec = importlib.util.spec_from_file_location(
         "prefill_thinking", ROOT / "app/utils/thinking.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_real_prefill_echo_module():
+    """直接从文件加载真实的 prefill_echo（gemini.py 的新依赖，仅依赖
+    标准库 contextvars/typing，无 app.* 依赖链问题）。"""
+    spec = importlib.util.spec_from_file_location(
+        "prefill_prefill_echo", ROOT / "app/utils/prefill_echo.py"
     )
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -99,6 +114,8 @@ def load_gemini_module(fake_settings_attrs=None):
         "PREFILL_FIX_PROMPT": DEFAULT_PROMPT,
         "PREFILL_FIX_MODELS": [],
         "PREFILL_FIX_EXCLUDE_MODELS": [],
+        "PREFILL_FIX_STRIP_ECHO": True,
+        "ENABLE_THINKING": False,
     }
     defaults.update(fake_settings_attrs)
     fake_settings = types.ModuleType("app.config.settings")
@@ -136,6 +153,11 @@ def load_gemini_module(fake_settings_attrs=None):
     sys.modules["app.utils.thinking"] = real_thinking
     fake_utils.thinking = real_thinking
 
+    # 真实的 prefill_echo（gemini.py 的回显剥离依赖）注册进包链。
+    real_prefill_echo = load_real_prefill_echo_module()
+    sys.modules["app.utils.prefill_echo"] = real_prefill_echo
+    fake_utils.prefill_echo = real_prefill_echo
+
     spec = importlib.util.spec_from_file_location(
         "prefill_gemini_service", ROOT / "app/services/gemini.py"
     )
@@ -149,13 +171,13 @@ def load_gemini_module(fake_settings_attrs=None):
 # 上游真实模型名单（用户实际可用列表，按受限与否分组）
 # ---------------------------------------------------------------------------
 
-# 规则生效世代（2026-07-21 发布的 gemini-3.5-flash-lite / 3.6-flash
+# 规则生效世代（2026-07-21 与 3.6 同期发布的 gemini-3.5-flash-lite
 # 及此后所有模型；latest 指针指向当前最新世代；gemma-4 沿袭 Gemma
-# "必须以 user turn 结尾"的既有约束）。
+# "必须以 user turn 结尾"的既有约束）。注：同为 (3,5) 世代的
+# gemini-3.5-flash / 3.5-transcribe / lyria-3.5 发布于规则生效前，
+# 归入下方不受限名单。
 RESTRICTED_MODELS = [
-    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-3.5-transcribe",
     "gemini-3.6-flash",
     "gemini-3.7-flash",
     "gemini-3.8-flash",
@@ -165,14 +187,16 @@ RESTRICTED_MODELS = [
     "gemini-pro-latest",
     "gemma-4-26b-a4b-it",
     "gemma-4-31b-it",
-    "lyria-3.5",
     "gemini-3.8-flash-tts",
     "gemini-3.8-flash-lite-tts",
     "antigravity-preview-latest",
 ]
 
 # 规则生效前的旧世代：2.5 系列 / 3.0-preview / 3.1 系列 / embedding /
-# 图像 / 专用模型，保持原生 prefill 行为（宁漏勿错）。
+# 图像 / 专用模型，以及发布于规则生效前的 (3,5) 世代非 flash-lite
+# 变体（gemini-3.5-flash 原生支持 prefill；3.5-transcribe / lyria-3.5
+# 是转写 / 音乐专用模型，不参与 chat prefill），保持原生 prefill 行为
+# （宁漏勿错）。
 UNRESTRICTED_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-pro",
@@ -194,6 +218,9 @@ UNRESTRICTED_MODELS = [
     "gemini-3-pro-image",
     "gemini-nano-banana-2.1",
     "nano-banana-pro-preview",
+    "gemini-3.5-flash",
+    "gemini-3.5-transcribe",
+    "lyria-3.5",
     "gemini-omni-flash-preview",
     "gemini-omni-1.1-flash",
     "lyria-3-clip-preview",
@@ -232,10 +259,13 @@ class NeedsModelTurnFixTests(unittest.TestCase):
 
     def test_decorations_are_stripped(self):
         # models/ 前缀（Gemini 原生命名）与 -search 联网后缀（HAJIMI 注入）。
-        self.assertTrue(self.mm.needs_model_turn_fix("models/gemini-3.5-flash"))
-        self.assertTrue(self.mm.needs_model_turn_fix("gemini-3.5-flash-search"))
+        self.assertTrue(self.mm.needs_model_turn_fix("models/gemini-3.6-flash"))
+        self.assertTrue(self.mm.needs_model_turn_fix("gemini-3.6-flash-search"))
         self.assertFalse(self.mm.needs_model_turn_fix("models/gemini-3.1-flash-lite"))
         self.assertFalse(self.mm.needs_model_turn_fix("gemini-2.5-pro-search"))
+        # 3.5 世代分水岭：同世代的 3.5-flash 不受限（规则前发布）。
+        self.assertFalse(self.mm.needs_model_turn_fix("models/gemini-3.5-flash"))
+        self.assertFalse(self.mm.needs_model_turn_fix("gemini-3.5-flash-search"))
 
     def test_case_and_whitespace_insensitive(self):
         self.assertTrue(self.mm.needs_model_turn_fix("  Gemini-3.5-Flash-Lite "))
@@ -452,7 +482,7 @@ class ConvertMessagesPrefillFixTests(unittest.TestCase):
             {"role": "assistant", "content": "prefill"},
         ]
         contents, _ = self._convert(
-            self.module, messages, "gemini-3.5-flash-search"
+            self.module, messages, "gemini-3.6-flash-search"
         )
         self.assertEqual(contents[-1]["role"], "user")
 
@@ -477,8 +507,10 @@ class ConvertMessagesPrefillFixTests(unittest.TestCase):
         contents, _ = self._convert(self.module, [], "gemini-3.5-flash-lite")
         self.assertEqual(contents, [])
 
-    def test_trailing_assistant_tool_calls_also_fixed(self):
-        # functionCall parts 的 model turn 结尾同样命中补丁。
+    def test_trailing_assistant_tool_calls_left_as_is(self):
+        # functionCall part 的 model turn 结尾是真实历史（待回复的
+        # 工具调用），不是文本 prefill：保持原样让上游按官方语义
+        # 校验，而非猜测改写（升级后的语义，对齐 vertex-master）。
         messages = [
             {"role": "user", "content": "查天气"},
             {
@@ -495,8 +527,11 @@ class ConvertMessagesPrefillFixTests(unittest.TestCase):
             },
         ]
         contents, _ = self._convert(self.module, messages, "gemini-3.7-flash")
-        self.assertEqual(contents[-1]["role"], "user")
-        self.assertEqual(contents[-1]["parts"], [{"text": DEFAULT_PROMPT}])
+        self.assertEqual(len(contents), 2)
+        self.assertEqual(contents[-1]["role"], "model")
+        self.assertIn("functionCall", contents[-1]["parts"][0])
+        # 未命中 prefill 补丁 → ContextVar 应显式置空。
+        self.assertIsNone(self.module.get_current_prefill_echo())
 
     def test_no_system_prompt_mode_still_fixed(self):
         module, _ = load_gemini_module()
@@ -675,9 +710,10 @@ class NativeGeminiPrefillFixTests(unittest.TestCase):
         _, _, data = self._convert(self.module, request)
         self.assertEqual(len(data["contents"]), 2)
 
-    def test_native_model_behind_empty_user_tail_still_fixed(self):
-        # 末尾空 user turn + 倒数第二 model turn：Google 看到的最后
-        # 非空 turn 是 model（会 400），应追加。
+    def test_native_model_behind_empty_user_tail_uses_fallback(self):
+        # 末尾空 user turn + 倒数第二 model turn：Google 看到的最后非空
+        # turn 是 model（会 400）。prefill turn 之前没有 turn → 兑底：
+        # 移除 model 轮，指令并入既有（空）user 轮，结尾合法。
         request = _FakeNativeRequest(
             "gemini-3.8-flash",
             [
@@ -687,8 +723,14 @@ class NativeGeminiPrefillFixTests(unittest.TestCase):
         )
         _, _, data = self._convert(self.module, request)
         contents = data["contents"]
-        self.assertEqual(contents[-1]["role"], "user")
-        self.assertEqual(contents[-1]["parts"], [{"text": DEFAULT_PROMPT}])
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0]["role"], "user")
+        self.assertEqual(contents[0]["parts"][0]["text"], "   ")
+        self.assertTrue(
+            contents[0]["parts"][1]["text"].startswith(
+                self.mm.PREFILL_FALLBACK_INSTRUCTION_PREFIX
+            )
+        )
 
     def test_native_disabled_switch_and_custom_prompt(self):
         request = _FakeNativeRequest(
@@ -734,6 +776,552 @@ class NativeGeminiPrefillFixTests(unittest.TestCase):
         _, _, data = self._convert(self.module, request)
         self.assertEqual(data["contents"][-1]["role"], "user")
         self.assertEqual(data["contents"][-1]["parts"], [{"text": DEFAULT_PROMPT}])
+
+
+class ExtractTrailingModelPrefillTests(unittest.TestCase):
+    """extract_trailing_model_prefill：末尾纯文本 model turn 识别。"""
+
+    def setUp(self):
+        self.mm = load_real_model_mapping()
+
+    def test_plain_text_prefill_after_user(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "prefill"}]},
+        ]
+        self.assertEqual(
+            self.mm.extract_trailing_model_prefill(contents),
+            ("prefill", "user", 1),
+        )
+
+    def test_multi_text_parts_concatenated(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "A"}, {"text": "B"}]},
+        ]
+        self.assertEqual(
+            self.mm.extract_trailing_model_prefill(contents),
+            ("AB", "user", 1),
+        )
+
+    def test_model_only_history(self):
+        contents = [{"role": "model", "parts": [{"text": "prefill"}]}]
+        self.assertEqual(
+            self.mm.extract_trailing_model_prefill(contents),
+            ("prefill", "", 0),
+        )
+
+    def test_consecutive_model_turns(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "resp"}]},
+            {"role": "model", "parts": [{"text": "prefill"}]},
+        ]
+        self.assertEqual(
+            self.mm.extract_trailing_model_prefill(contents),
+            ("prefill", "model", 2),
+        )
+
+    def test_trailing_empty_turn_is_skipped_for_role_detection(self):
+        # 末尾空 user turn 之后藏着 model turn：最后一个非空 turn 是 model
+        # （命中补丁）；prefill turn 之前没有 turn → 兑底路径（结构上
+        # 必然合法：移除 model 轮后把指令并入既有 user 轮）。
+        contents = [
+            {"role": "model", "parts": [{"text": "prefill"}]},
+            {"role": "user", "parts": [{"text": "   "}]},
+        ]
+        self.assertEqual(
+            self.mm.extract_trailing_model_prefill(contents),
+            ("prefill", "", 0),
+        )
+
+    def test_explicit_thought_false_is_tolerated(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "p", "thought": False}]},
+        ]
+        self.assertEqual(
+            self.mm.extract_trailing_model_prefill(contents),
+            ("p", "user", 1),
+        )
+
+    def test_function_call_part_is_not_prefill(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "f", "args": {}}}]},
+        ]
+        self.assertIsNone(self.mm.extract_trailing_model_prefill(contents))
+
+    def test_thought_part_is_not_prefill(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {"role": "model", "parts": [{"text": "t", "thought": True}]},
+        ]
+        self.assertIsNone(self.mm.extract_trailing_model_prefill(contents))
+
+    def test_media_part_is_not_prefill(self):
+        contents = [
+            {"role": "user", "parts": [{"text": "hi"}]},
+            {
+                "role": "model",
+                "parts": [{"inlineData": {"mimeType": "image/png", "data": "x"}}],
+            },
+        ]
+        self.assertIsNone(self.mm.extract_trailing_model_prefill(contents))
+
+    def test_user_tail_is_not_prefill(self):
+        contents = [
+            {"role": "model", "parts": [{"text": "resp"}]},
+            {"role": "user", "parts": [{"text": "next"}]},
+        ]
+        self.assertIsNone(self.mm.extract_trailing_model_prefill(contents))
+
+    def test_empty_text_parts_is_none(self):
+        contents = [{"role": "model", "parts": [{"text": ""}]}]
+        self.assertIsNone(self.mm.extract_trailing_model_prefill(contents))
+
+    def test_invalid_inputs(self):
+        self.assertIsNone(self.mm.extract_trailing_model_prefill(None))
+        self.assertIsNone(self.mm.extract_trailing_model_prefill([]))
+        self.assertIsNone(self.mm.extract_trailing_model_prefill("no"))
+
+
+class DegenerateHistoryFallbackTests(unittest.TestCase):
+    """畸形历史（model-only / 连续 model）的 JSON 兜底改写。"""
+
+    def setUp(self):
+        self.module, self.mm = load_gemini_module()
+
+    def _convert(self, module, messages, model):
+        return module.GeminiClient.convert_messages(
+            module.GeminiClient,
+            messages,
+            use_system_prompt=True,
+            model=model,
+        )
+
+    def test_assistant_only_history_uses_json_fallback(self):
+        # 只有 assistant 一条消息（model-only）：移除 model turn，prefill
+        # 原文以 JSON 数据形式内嵌进新 user 指令。
+        contents, _ = self._convert(
+            self.module,
+            [{"role": "assistant", "content": "黑洞是一种"}],
+            "gemini-3.7-flash",
+        )
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0]["role"], "user")
+        text = contents[0]["parts"][0]["text"]
+        self.assertTrue(text.startswith(self.mm.PREFILL_FALLBACK_INSTRUCTION_PREFIX))
+        self.assertIn('"黑洞是一种"', text)  # json.dumps(ensure_ascii=False)
+        # 兜底命中同样记录 prefill 原文（供响应侧回显剥离）。
+        self.assertEqual(self.module.get_current_prefill_echo(), "黑洞是一种")
+
+    def test_native_model_only_uses_json_fallback(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [{"role": "model", "parts": [{"text": "prefill"}]}],
+        )
+        _, _, data = self.module.GeminiClient("k")._convert_request_data(
+            request, [], [], None
+        )
+        contents = data["contents"]
+        self.assertEqual(len(contents), 1)
+        self.assertEqual(contents[0]["role"], "user")
+        self.assertTrue(
+            contents[0]["parts"][0]["text"].startswith(
+                self.mm.PREFILL_FALLBACK_INSTRUCTION_PREFIX
+            )
+        )
+
+    def test_native_consecutive_model_appends_new_user_turn(self):
+        # [user, model, model]：移除末尾 prefill 后结尾仍是 model →
+        # 新建 user 指令轮（不能并入 model 轮）。
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "resp"}]},
+                {"role": "model", "parts": [{"text": "prefill"}]},
+            ],
+        )
+        _, _, data = self.module.GeminiClient("k")._convert_request_data(
+            request, [], [], None
+        )
+        contents = data["contents"]
+        self.assertEqual([c["role"] for c in contents], ["user", "model", "user"])
+        self.assertTrue(
+            contents[-1]["parts"][0]["text"].startswith(
+                self.mm.PREFILL_FALLBACK_INSTRUCTION_PREFIX
+            )
+        )
+
+    def test_native_tool_call_tail_is_left_as_is(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {
+                    "role": "model",
+                    "parts": [{"functionCall": {"name": "f", "args": {}}}],
+                },
+            ],
+        )
+        _, _, data = self.module.GeminiClient("k")._convert_request_data(
+            request, [], [], None
+        )
+        self.assertEqual(len(data["contents"]), 2)
+        self.assertEqual(data["contents"][-1]["role"], "model")
+        self.assertIsNone(self.module.get_current_prefill_echo())
+
+    def test_native_thought_part_tail_is_left_as_is(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "t", "thought": True}]},
+            ],
+        )
+        _, _, data = self.module.GeminiClient("k")._convert_request_data(
+            request, [], [], None
+        )
+        self.assertEqual(len(data["contents"]), 2)
+        self.assertEqual(data["contents"][-1]["role"], "model")
+
+    def test_native_explicit_thought_false_still_fixed(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "p", "thought": False}]},
+            ],
+        )
+        _, _, data = self.module.GeminiClient("k")._convert_request_data(
+            request, [], [], None
+        )
+        self.assertEqual(data["contents"][-1]["role"], "user")
+        self.assertEqual(data["contents"][-1]["parts"], [{"text": DEFAULT_PROMPT}])
+        self.assertEqual(self.module.get_current_prefill_echo(), "p")
+
+
+class PrefillEchoContextVarTests(unittest.TestCase):
+    """请求侧 prefill 原文经 ContextVar 透传给响应侧。"""
+
+    def setUp(self):
+        self.module, self.mm = load_gemini_module()
+
+    def test_fixed_request_records_prefill_text(self):
+        self.module.GeminiClient.convert_messages(
+            self.module.GeminiClient,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "prefill"},
+            ],
+            use_system_prompt=True,
+            model="gemini-3.6-flash",
+        )
+        self.assertEqual(self.module.get_current_prefill_echo(), "prefill")
+
+    def test_unfixed_request_resets_to_none(self):
+        # 未命中（旧模型）→ 显式置空；先命中再未命中也不残留。
+        self.module.GeminiClient.convert_messages(
+            self.module.GeminiClient,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "prefill"},
+            ],
+            use_system_prompt=True,
+            model="gemini-3.6-flash",
+        )
+        self.assertEqual(self.module.get_current_prefill_echo(), "prefill")
+        self.module.GeminiClient.convert_messages(
+            self.module.GeminiClient,
+            [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "prefill"},
+            ],
+            use_system_prompt=True,
+            model="gemini-2.5-flash",
+        )
+        self.assertIsNone(self.module.get_current_prefill_echo())
+
+    def test_native_path_records_and_resets(self):
+        request = _FakeNativeRequest(
+            "gemini-3.8-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "p"}]},
+            ],
+        )
+        self.module.GeminiClient("k")._convert_request_data(request, [], [], None)
+        self.assertEqual(self.module.get_current_prefill_echo(), "p")
+
+        plain = _FakeNativeRequest(
+            "gemini-2.5-flash",
+            [
+                {"role": "user", "parts": [{"text": "hi"}]},
+                {"role": "model", "parts": [{"text": "p"}]},
+            ],
+        )
+        self.module.GeminiClient("k")._convert_request_data(plain, [], [], None)
+        self.assertIsNone(self.module.get_current_prefill_echo())
+
+
+class DefaultPromptConsistencyTests(unittest.TestCase):
+    """三处默认续写指令不漂移（model_mapping / settings / 测试常量）。"""
+
+    def test_defaults_are_consistent(self):
+        mm = load_real_model_mapping()
+        self.assertEqual(mm.DEFAULT_PREFILL_FIX_PROMPT, DEFAULT_PROMPT)
+        settings_source = (ROOT / "app/config/settings.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Continue the immediately preceding assistant response", settings_source)
+        self.assertIn("do not repeat, explain, or restart it", settings_source)
+
+
+class _FakeStreamResponse:
+    status_code = 200
+    is_closed = True
+
+    async def aread(self):
+        return b""
+
+
+class _FakeStreamContext:
+    async def __aenter__(self):
+        return _FakeStreamResponse()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakeStreamingHttpClient:
+    def stream(self, *args, **kwargs):
+        return _FakeStreamContext()
+
+
+class _FakePostResponse:
+    status_code = 200
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
+
+
+class _FakePostingHttpClient:
+    def __init__(self, payload):
+        response = _FakePostResponse()
+        response.payload = payload
+        self._response = response
+
+    async def post(self, *args, **kwargs):
+        return self._response
+
+
+class GeminiClientEchoStripTests(unittest.TestCase):
+    """stream_chat / complete_chat 的响应侧回显剥离（端到端桩测试）。"""
+
+    def setUp(self):
+        self.module, self.mm = load_gemini_module()
+
+    @staticmethod
+    def _request(model="gemini-3.7-flash"):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            model=model,
+            format_type=None,
+            temperature=None,
+            max_tokens=None,
+            top_p=None,
+            top_k=None,
+            stop=None,
+            n=None,
+            thinking_budget=None,
+            reasoning_effort=None,
+            tools=None,
+            tool_choice=None,
+        )
+
+    def _run_stream(self, chunks, prefill, **settings_overrides):
+        module = self.module
+        if settings_overrides:
+            module, _ = load_gemini_module(fake_settings_attrs=settings_overrides)
+
+        async def _client_factory():
+            return _FakeStreamingHttpClient()
+
+        def _iter_sse(response):
+            async def _gen():
+                for chunk in chunks:
+                    yield chunk
+
+            return _gen()
+
+        module.get_async_client = _client_factory
+        module.iter_sse_json = _iter_sse
+        module.set_current_prefill_echo(prefill)
+
+        client = module.GeminiClient("fake-key")
+
+        async def _collect():
+            return [w async for w in client.stream_chat(
+                self._request(), [], [], None
+            )]
+
+        import asyncio
+
+        return asyncio.run(_collect())
+
+    def test_stream_full_echo_stripped(self):
+        # 回显跨多个 chunk 完整出现后续写：剥离全部回显，仅留新内容。
+        chunks = [
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "AB"}]}, "index": 0}]},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "CDEF"}]}, "index": 0}]},
+            {"candidates": [{"content": {"role": "model", "parts": [{"text": "XYZ"}]}, "index": 0, "finishReason": "STOP"}]},
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF")
+        text = "".join(w.text for w in wrappers)
+        self.assertEqual(text, "XYZ")
+
+    def test_stream_no_echo_passes_through(self):
+        chunks = [
+            {"candidates": [{"content": {"parts": [{"text": "Q"}]}, "index": 0}]},
+            {"candidates": [{"content": {"parts": [{"text": "R"}]}, "index": 0, "finishReason": "STOP"}]},
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF")
+        self.assertEqual("".join(w.text for w in wrappers), "QR")
+
+    def test_stream_partial_echo_released_on_finish_frame(self):
+        # 输出只匹配到前缀一半就结束（maxTokens 截断等）：按真实内容
+        # 原样释放，绝不吞输出。
+        chunks = [
+            {"candidates": [{"content": {"parts": [{"text": "AB"}]}, "index": 0}]},
+            {"candidates": [{"index": 0, "finishReason": "MAX_TOKENS"}]},
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF")
+        self.assertEqual("".join(w.text for w in wrappers), "AB")
+
+    def test_stream_cut_without_finish_frame_releases_tail_chunk(self):
+        # 流异常关闭（无 finishReason）：finalize 合成补发 chunk。
+        chunks = [
+            {"candidates": [{"content": {"parts": [{"text": "AB"}]}, "index": 0}]},
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF")
+        self.assertEqual("".join(w.text for w in wrappers), "AB")
+        # 补发 chunk 是普通文本增量形态（无 finishReason）。
+        self.assertEqual(wrappers[-1].data["candidates"][0].get("finishReason"), None)
+
+    def test_stream_thought_parts_untouched(self):
+        chunks = [
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [
+                                {"text": "AB", "thought": True},
+                                {"text": "AB"},
+                            ],
+                        },
+                        "index": 0,
+                    }
+                ]
+            },
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF")
+        parts = wrappers[0].data["candidates"][0]["content"]["parts"]
+        self.assertEqual(parts[0]["text"], "AB")  # thought 原样保留
+        self.assertEqual(parts[1]["text"], "")  # 普通文本被暂存
+        self.assertEqual(wrappers[0].thoughts, "AB")
+
+    def test_stream_strip_echo_disabled(self):
+        chunks = [
+            {"candidates": [{"content": {"parts": [{"text": "ABCDEF"}]}, "index": 0, "finishReason": "STOP"}]},
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF", PREFILL_FIX_STRIP_ECHO=False)
+        self.assertEqual("".join(w.text for w in wrappers), "ABCDEF")
+
+    def test_stream_multi_candidate_independent(self):
+        # 双候选各自独立剥离（candidateCount>1），回显切分方式不同。
+        chunks = [
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "AB"}]}, "index": 0},
+                    {"content": {"parts": [{"text": "ABCD"}]}, "index": 1},
+                ]
+            },
+            {
+                "candidates": [
+                    {"content": {"parts": [{"text": "CDEF!"}]}, "index": 0, "finishReason": "STOP"},
+                    {"content": {"parts": [{"text": "EF!"}]}, "index": 1, "finishReason": "STOP"},
+                ]
+            },
+        ]
+        wrappers = self._run_stream(chunks, "ABCDEF")
+
+        def _text(data, index):
+            parts = data["candidates"][index]["content"]["parts"]
+            return "".join(p.get("text", "") for p in parts)
+
+        # 两候选的回显在不同 chunk 边界完成，均被完整剥离。
+        self.assertEqual(_text(wrappers[0].data, 0), "")
+        self.assertEqual(_text(wrappers[0].data, 1), "")
+        self.assertEqual(_text(wrappers[1].data, 0), "!")
+        self.assertEqual(_text(wrappers[1].data, 1), "!")
+
+    def test_complete_chat_strips_echo(self):
+        import asyncio
+
+        payload = {
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": "ABCDEF tail"}]},
+                    "index": 0,
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+
+        async def _client_factory():
+            return _FakePostingHttpClient(payload)
+
+        self.module.get_async_client = _client_factory
+        self.module.set_current_prefill_echo("ABCDEF")
+        wrapper = asyncio.run(
+            self.module.GeminiClient("k").complete_chat(
+                self._request(), [], [], None
+            )
+        )
+        self.assertEqual(wrapper.text, " tail")
+
+    def test_complete_chat_partial_echo_kept(self):
+        import asyncio
+
+        payload = {
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"text": "AB"}]},
+                    "index": 0,
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+
+        async def _client_factory():
+            return _FakePostingHttpClient(payload)
+
+        self.module.get_async_client = _client_factory
+        self.module.set_current_prefill_echo("ABCDEF")
+        wrapper = asyncio.run(
+            self.module.GeminiClient("k").complete_chat(
+                self._request(), [], [], None
+            )
+        )
+        # 只匹配一半的输出是真实内容：原样释放（追加为普通 part）。
+        self.assertEqual(wrapper.text, "AB")
 
 
 if __name__ == "__main__":

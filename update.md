@@ -1,4 +1,12 @@
 # 更新日志
+* v1.0.17（第十一轮优化：prefill 补丁深度融合 vertex-master——响应侧回显剥离 + 畸形历史兑底 + 阈值纠偏）
+   * **新增响应侧 prefill 回显剥离（PREFILL_FIX_STRIP_ECHO，默认开启）**——追加续写指令后模型有相当概率先把 prefill 原文复述一遍再续写，客户端拼接后内容重复；新增 `app/utils/prefill_echo.py` 跨 chunk 状态机（与 vertex-master 逐分支等价的移植）：仅在输出仍与前缀逐字匹配期间暂存、失配立即放行（正常输出首 chunk 即释放，零额外延迟），完整回显剥除、未完成匹配在结束帧/流关闭时按真实内容原样释放（绝不吞输出）；thought/工具/媒体 part 不受影响，多候选（candidateCount>1）按 index 独立剥离；接入 Gemini API 真流式（stream_chat，含无 finish 帧时的补发 chunk）与非流式（complete_chat），以及 Vertex 真流式（convert_chunk_to_openai + 流尾补发）、伪流式（gemini_fake_stream_generator）与非流式（convert_to_openai_format）全部路径
+   * **畸形历史兑底改写（对齐 vertex-master 双层策略）**——model-only（单 assistant 消息）与连续 model turn 等追 nudge 修不好的结构：移除末尾 model turn，prefill 原文以 JSON 数据形式内嵌进 user 指令（并入既有 user 轮或新建，结构上必然合法）；指令明确告知是已输出的 assistant 文本、不是待补全的指令/JSON，防提示注入
+   * **纯文本 prefill 识别收紧**——末尾 model turn 含 functionCall（待回复的工具调用）/ thought 思考回放 / 媒体 part 的是真实历史：保持原样让上游按官方语义校验而非猜测改写（旧实现一律追 nudge，会掩蔽这类结构错误）；显式 thought:False 视同普通文本
+   * **阈值纠偏：gemini-3.5-flash 不再误判为受限**——规则自 2026-07-21 与 3.6 同期发布的 gemini-3.5-flash-lite 起生效，更早发布的 gemini-3.5-flash 原生支持 prefill；旧实现把整个 (3,5) 世代判为受限，导致其 prefill 请求被错误追加 nudge、续写语义被破坏；同世代的 3.5-transcribe / lyria-3.5 一并归还不受限
+   * **默认续写指令升级**——从 "Continue from where you left off..." 换为锚定"紧邻的上一条 assistant 回复"的明确版（避免被误解为续写用户的上一条消息）；model_mapping.DEFAULT_PREFILL_FIX_PROMPT 为唯一权威常量，测试强制三处（settings / model_mapping / 测试常量）不漂移；用户已持久化的自定义值不受影响
+   * **请求/响应桥接**——请求侧补丁命中时 prefill 原文经 ContextVar（同任务隔离、重试安全、不命中显式置空防泄漏）透传给响应侧；Vertex 路径以局部变量直传三个响应分支
+   * 测试：新增 59 项回归（提取谓词 12 / 畸形历史兑底 6 / ContextVar 3 / 默认值一致性 1 / GeminiClient 流式与非流式端到端回显剥离 10 / 状态机与 chunk 过滤 15 / Vertex 转换层 5 / Vertex 兑底与工具调用保持 2 等），全套 449 项测试通过
 * v1.0.16（第十轮优化：prefill 补丁全路径覆盖——原生 Gemini 协议 + Vertex 模式）
    * **修复：prefill（model-turn 结尾）兼容补丁只覆盖 OpenAI/Claude/Responses 协议转换路径**——该补丁原挂在 convert_messages（协议转换层），而原生 Gemini 协议（payload 直接透传不经转换）与 Vertex 模式（create_gemini_prompt 独立构造）完全没有补丁，这两条路径上的 prefill 请求打新世代模型（3.5+/4-argon/-latest）照样 400（"Requests ending with a model turn are not supported."）
    * **原生 Gemini 协议路径补齐**——在 _convert_request_data 的 sanitize（assistant→model 角色归一）之后接入同一补丁语义；判断用「最后一个非空 turn」口径（与 Google 校验一致）：末尾空 turn 被跳过、藏在空 user turn 之后的 model turn 也能正确识别
