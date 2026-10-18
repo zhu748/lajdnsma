@@ -3,10 +3,18 @@ import os
 from app.models.schemas import ChatCompletionRequest
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Union
-from urllib.parse import urlparse
 import secrets
 import string
 import app.config.settings as settings
+
+# 纯函数工具（零 app 依赖，从本文件拆出；历史符号名保持不变以便引用方兼容）
+from app.services.gemini_payload import (
+    GEMINI_MAX_THINKING_BUDGET,
+    _clamp_thinking_budget,
+    _guess_mime_type_from_url,
+    sanitize_gemini_payload,
+    sanitize_gemini_schema,
+)
 
 from app.utils.http_client import get_async_client, UPSTREAM_TIMEOUT
 from app.utils.logging import log
@@ -35,20 +43,15 @@ from app.utils.stealth import (
 )
 
 
-# Previously this was the literal string `"skip_thought_signature_validator"`,
-# which was injected into the Gemini request whenever an assistant tool_call
-# was missing a thoughtSignature.  The literal is a highly-recognisable
-# proxy fingerprint (real Gemini thoughtSignatures are opaque ~200-char
-# base64-like strings).  We now generate a strong-random signature of
-# the same shape on demand; the function call preserves the legacy
-# name as a single import surface so callers don't break.
 def _generate_thought_signature() -> str:
+    # Previously this was the literal string `"skip_thought_signature_validator"`,
+    # which was injected into the Gemini request whenever an assistant tool_call
+    # was missing a thoughtSignature.  The literal is a highly-recognisable
+    # proxy fingerprint (real Gemini thoughtSignatures are opaque ~200-char
+    # base64-like strings).  We now generate a strong-random signature of
+    # the same shape on demand; the function call preserves the legacy
+    # name as a single import surface so callers don't break.
     return gen_anthropic_thinking_signature()
-
-
-# Kept for backwards-compatible imports elsewhere in the project.
-GEMINI_DUMMY_THOUGHT_SIGNATURE = "<generated-per-call>"
-GEMINI_MAX_THINKING_BUDGET = 24576
 
 
 def generate_secure_random_string(length):
@@ -59,95 +62,88 @@ def generate_secure_random_string(length):
     return secure_random_string
 
 
-GEMINI_SCHEMA_ALLOWED_KEYS = {
-    "anyOf",
-    "description",
-    "enum",
-    "format",
-    "items",
-    "maximum",
-    "maxItems",
-    "minimum",
-    "minItems",
-    "nullable",
-    "properties",
-    "propertyOrdering",
-    "required",
-    "type",
-}
+def _apply_prefill_fix(contents: Optional[List[Dict[str, Any]]], model: str) -> Optional[str]:
+    """对以 model turn 结尾的 contents 应用 prefill 兼容补丁，返回 prefill 原文。
+
+    原生 Gemini 协议路径（_convert_request_data）与 OpenAI 协议路径
+    （convert_messages）共享的补丁本体 —— 历史版本两处各维护一份逐分支
+    复制的 ~70 行实现。语义（对齐 vertex-master）：
+      1. 只把「末尾纯文本 model turn」识别为 prefill（functionCall /
+         thought / 媒体结尾是真实历史，保持原样）；
+      2. 前一非空轮是 user/function → 追加续写指令 user turn；
+         model-only / 连续 model 等畸形历史 → 兑底改写为 JSON 数据
+         内嵌的 user 指令（结构上必然合法）；
+      3. 返回 prefill 原文，由调用方经 ContextVar 透传给响应侧回显剥离。
+
+    前置条件（由调用方保证）：contents 已过 sanitize（assistant→model
+    角色归一）、模型命中 needs_model_turn_fix、配置开关已检查。
+    """
+    _prefill_ctx = extract_trailing_model_prefill(contents)
+    if _prefill_ctx is None:
+        return None
+    _prefill_text, _preceding_role, _prefill_index = _prefill_ctx
+    _fix_prompt = (
+        getattr(settings, "PREFILL_FIX_PROMPT", None) or DEFAULT_PREFILL_FIX_PROMPT
+    )
+    if _preceding_role in ("user", "function"):
+        # 常规 prefill：保留 model turn 原文，末尾追加续写指令
+        # （官方迁移指南要求的兼容形态）。
+        contents.append(build_prefill_user_turn(_fix_prompt))
+        log("INFO", f"已追加 user turn 修复 prefill 兼容（{model}）")
+    else:
+        # 畸形历史兑底：移除末尾 model turn，prefill 原文以 JSON 数据
+        # 形式内嵌进 user 指令（并入既有 user 轮，或新建 user 轮 ——
+        # 两种都保证结尾合法）。
+        del contents[_prefill_index]
+        _instruction = build_prefill_fallback_instruction(_prefill_text)
+        _merged = False
+        if (
+            contents
+            and isinstance(contents[-1], dict)
+            and contents[-1].get("role") == "user"
+        ):
+            contents[-1].setdefault("parts", []).append({"text": _instruction})
+            _merged = True
+        if not _merged:
+            contents.append({"role": "user", "parts": [{"text": _instruction}]})
+        log(
+            "INFO",
+            f"检测到畸形历史（model-only/连续 model），已按 JSON 兑底改写 prefill（{model}）",
+        )
+    return _prefill_text
 
 
-def sanitize_gemini_schema(schema):
-    """Keep only Schema fields accepted by Gemini function declarations."""
-    def sanitize(value, *, in_properties=False):
-        if isinstance(value, dict):
-            if in_properties:
-                return {key: sanitize(item) for key, item in value.items()}
-            sanitized = {}
-            for key, item in value.items():
-                if key not in GEMINI_SCHEMA_ALLOWED_KEYS:
-                    continue
-                sanitized[key] = sanitize(
-                    item, in_properties=(key == "properties")
-                )
-            return sanitized
-        if isinstance(value, list):
-            return [sanitize(item) for item in value]
-        return value
+def _log_upstream_error_summary(response, key_id: str, request_type: str, model: str):
+    """非 200 响应时记录脱敏后的上游错误摘要（stream / non-stream 共享）。
 
-    return sanitize(schema)
-
-
-
-def sanitize_gemini_payload(data):
-    """Normalize pass-through Gemini payloads produced from OpenAI-compatible clients."""
-    if not isinstance(data, dict):
-        return data
-
-    for content in data.get("contents") or []:
-        if not isinstance(content, dict):
-            continue
-        role = content.get("role")
-        if role in {"developer", "system"}:
-            content["role"] = "user"
-        elif role == "assistant":
-            content["role"] = "model"
-
-    system_instruction = data.get("system_instruction") or data.get("systemInstruction")
-    if isinstance(system_instruction, dict):
-        system_instruction.pop("role", None)
-
-    for tool in data.get("tools") or []:
-        if not isinstance(tool, dict):
-            continue
-        for declaration in tool.get("function_declarations") or tool.get("functionDeclarations") or []:
-            if isinstance(declaration, dict) and "parameters" in declaration:
-                declaration["parameters"] = sanitize_gemini_schema(
-                    declaration["parameters"]
-                )
-
-    return data
-
-
-def _guess_mime_type_from_url(url: str) -> Optional[str]:
-    path = urlparse(url).path.lower()
-    if path.endswith((".jpg", ".jpeg")):
-        return "image/jpeg"
-    if path.endswith(".png"):
-        return "image/png"
-    if path.endswith(".webp"):
-        return "image/webp"
-    if path.endswith(".gif"):
-        return "image/gif"
-    return None
-
-
-def _clamp_thinking_budget(value) -> int:
+    Round 6（详细日志）：把 message/status/quota 维度的摘要记入面板
+    日志 —— 此前 body 被消费后直接丢弃，排障只剩状态码。摘要失败
+    静默降级（不影响原有的 raise_for_status 流程）。
+    """
     try:
-        budget = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return max(0, min(budget, GEMINI_MAX_THINKING_BUDGET))
+        from app.utils.error_handling import summarize_upstream_error
+
+        summary = summarize_upstream_error(response)
+        if summary:
+            log(
+                "warning",
+                f"上游错误 ({request_type}, HTTP {response.status_code}): {summary}",
+                extra={
+                    "key": key_id,
+                    "request_type": request_type,
+                    "model": model,
+                    "status_code": response.status_code,
+                },
+            )
+    except Exception:
+        pass
+
+
+def _key_log_id(api_key: str) -> str:
+    # Don't log raw key prefix (AIzaSy12 is a recognisable Gemini
+    # key prefix).  Use a stable hash so the same key still shows
+    # up as the same identifier in the dashboard.
+    return "key#" + str(hash(api_key) & 0xFFFFFF)
 
 
 @dataclass
@@ -352,16 +348,7 @@ class GeminiClient:
         # （"Requests ending with a model turn are not supported."）。
         # 必须放在 sanitize_gemini_payload（assistant→model 角色归一）
         # 之后，否则识别不到被归一化的 assistant 结尾。
-        #
-        # 升级（对齐 vertex-master 成熟语义）：
-        #   1. 只把「末尾纯文本 model turn」识别为 prefill（functionCall/
-        #      thought/媒体结尾是真实历史，保持原样让上游按官方语义
-        #      校验，而非猜测改写）；
-        #   2. 前一非空轮是 user/function → 追加 nudge；model-only /
-        #      连续 model 等畸形历史 → 兑底改写为 JSON 数据内嵌的 user
-        #      指令（结构上必然合法）；
-        #   3. prefill 原文经 ContextVar 透传给响应侧回显剥离
-        #      （PREFILL_FIX_STRIP_ECHO 可关）。
+        # 补丁本体见 _apply_prefill_fix（两条路径共享）。
         _prefill_echo = None
         if (
             format_type == "gemini"
@@ -373,44 +360,7 @@ class GeminiClient:
                 exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
             )
         ):
-            _prefill_ctx = extract_trailing_model_prefill(data.get("contents"))
-            if _prefill_ctx is not None:
-                _prefill_text, _preceding_role, _prefill_index = _prefill_ctx
-                _fix_prompt = (
-                    getattr(settings, "PREFILL_FIX_PROMPT", None)
-                    or DEFAULT_PREFILL_FIX_PROMPT
-                )
-                if _preceding_role in ("user", "function"):
-                    data.setdefault("contents", []).append(
-                        build_prefill_user_turn(_fix_prompt)
-                    )
-                    log(
-                        "INFO",
-                        f"已追加 user turn 修复原生 Gemini prefill 兼容（{model}）",
-                    )
-                else:
-                    # 畸形历史兑底：移除末尾 model turn，prefill 原文以
-                    # JSON 数据形式内嵌进 user 指令（并入既有 user 轮，
-                    # 或新建 user 轮 —— 两种部保证结尾合法）。
-                    _contents = data.get("contents") or []
-                    del _contents[_prefill_index]
-                    _instruction = build_prefill_fallback_instruction(_prefill_text)
-                    _merged = False
-                    if _contents and isinstance(_contents[-1], dict) and _contents[-1].get("role") == "user":
-                        _contents[-1].setdefault("parts", []).append(
-                            {"text": _instruction}
-                        )
-                        _merged = True
-                    if not _merged:
-                        _contents.append(
-                            {"role": "user", "parts": [{"text": _instruction}]}
-                        )
-                    log(
-                        "INFO",
-                        f"检测到畸形历史（model-only/连续 model），已按 JSON 兑底"
-                        f"改写原生 Gemini prefill（{model}）",
-                    )
-                _prefill_echo = _prefill_text
+            _prefill_echo = _apply_prefill_fix(data.get("contents"), model)
         # 同一 async 任务内的请求/响应共享上下文：这里必须显式写入
         # （含 None），避免上一请求的值泄漏；OpenAI 协议路径由
         # convert_messages 在请求准备阶段写入，此分支不覆盖。
@@ -580,10 +530,7 @@ class GeminiClient:
     async def stream_chat(self, request, contents, safety_settings, system_instruction):
         # 真流式请求处理逻辑
         extra_log = {
-            # Don't log raw key prefix (AIzaSy12 is a recognisable Gemini
-            # key prefix).  Use a stable hash so the same key still shows
-            # up as the same identifier in the dashboard.
-            "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
+            "key": _key_log_id(self.api_key),
             "request_type": "stream",
             "model": request.model,
         }
@@ -620,23 +567,11 @@ class GeminiClient:
                 # 检查响应状态码，如果不是成功，则先消费响应体再抛出异常
                 if response.status_code != 200:
                     await response.aread()
-                    # Round 6（详细日志）：非 200 时把脱敏后的上游错误
-                    # 摘要（message/status/quota 维度）记入面板日志 ——
-                    # 此前 body 被 aread() 消费后直接丢弃，排障只剩
-                    # 状态码。冷却时长也已按 429 retryDelay 调整（见
-                    # error_handling.schedule_key_cooldown）。
-                    try:
-                        from app.utils.error_handling import summarize_upstream_error
-
-                        summary = summarize_upstream_error(response)
-                        if summary:
-                            log(
-                                "warning",
-                                f"上游错误 (stream, HTTP {response.status_code}): {summary}",
-                                extra={**extra_log, "status_code": response.status_code},
-                            )
-                    except Exception:
-                        pass
+                    # 非 200 时记录脱敏上游错误摘要（冷却时长已按 429
+                    # retryDelay 调整，见 error_handling.schedule_key_cooldown）。
+                    _log_upstream_error_summary(
+                        response, _key_log_id(self.api_key), "stream", request.model
+                    )
                     response.raise_for_status()
 
                 async for data in iter_sse_json(response):
@@ -677,25 +612,10 @@ class GeminiClient:
         client = await get_async_client()
         response = await client.post(url, headers=headers, json=data, timeout=UPSTREAM_TIMEOUT)
         if response.status_code != 200:
-            # Round 6（详细日志）：与 stream 路径对齐，非 200 时记录
-            # 脱敏后的上游错误摘要。
-            try:
-                from app.utils.error_handling import summarize_upstream_error
-
-                summary = summarize_upstream_error(response)
-                if summary:
-                    log(
-                        "warning",
-                        f"上游错误 (non-stream, HTTP {response.status_code}): {summary}",
-                        extra={
-                            "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
-                            "request_type": "non-stream",
-                            "model": request.model,
-                            "status_code": response.status_code,
-                        },
-                    )
-            except Exception:
-                pass
+            # 非 200 时记录脱敏上游错误摘要（与 stream 路径对齐）
+            _log_upstream_error_summary(
+                response, _key_log_id(self.api_key), "non-stream", request.model
+            )
         response.raise_for_status()  # 检查 HTTP 错误状态
 
         # Prefill 回显剥离（非流式）：一次性过滤完整响应（含最终释放），
@@ -974,22 +894,13 @@ class GeminiClient:
         # 消息结尾让模型续写）是通用技巧，覆盖：回答截断后继续输出、
         # 酒馆填表/续写、结构化输出前缀强制、抑制前言等全部场景。
         #
-        # 升级（对齐 vertex-master 成熟语义）：
-        #   1. 只把「末尾纯文本 model turn」识别为 prefill ——
-        #      assistant 携带 tool_calls（functionCall part）、thought
-        #      思考回放、媒体结尾是真实历史，保持原样让上游按官方
-        #      语义校验（此前的实现一律追加 nudge，会掩蔽结构错误）；
-        #   2. 前一非空轮是 user/function → 追加 nudge；model-only /
-        #      连续 model 等畸形历史 → 兑底改写为 JSON 数据内嵌的
-        #      user 指令（结构上必然合法）；
-        #   3. prefill 原文经 ContextVar 透传给响应侧回显剥离。
-        #
         # 必须放在 RANDOM_STRING 注入之后执行，保证追加的 user
         # turn 位于 contents 的绝对末尾（Google 校验的是最后一个
         # 非空 turn 的角色）。
         # 配置一律 getattr 防御性读取：settings 属性可能来自旧持久
         # 化快照或测试桩，缺键时按 settings.py 的默认值（启用 +
         # 新默认指令）处理；追加文本保底非空（官方要求 nonempty）。
+        # 补丁本体见 _apply_prefill_fix（两条路径共享）。
         _prefill_echo = None
         if (
             getattr(settings, "PREFILL_FIX", True)
@@ -1001,48 +912,7 @@ class GeminiClient:
                 exclude=getattr(settings, "PREFILL_FIX_EXCLUDE_MODELS", None) or [],
             )
         ):
-            _prefill_ctx = extract_trailing_model_prefill(gemini_history)
-            if _prefill_ctx is not None:
-                _prefill_text, _preceding_role, _prefill_index = _prefill_ctx
-                _fix_prompt = (
-                    getattr(settings, "PREFILL_FIX_PROMPT", None)
-                    or DEFAULT_PREFILL_FIX_PROMPT
-                )
-                if _preceding_role in ("user", "function"):
-                    # 常规 prefill：保留 model turn 原文，末尾追加续写
-                    # 指令（官方迁移指南要求的兼容形态）。
-                    gemini_history.append(build_prefill_user_turn(_fix_prompt))
-                    log(
-                        "INFO",
-                        f"已追加 user turn 修复 prefill 兼容（{model} -> "
-                        f"追加文本: {_fix_prompt!r}）",
-                    )
-                else:
-                    # 畸形历史兑底（model-only / 连续 model turn，本路径
-                    # 因同角色合并只剩 model-only 可达）：移除末尾 model
-                    # turn，prefill 原文以 JSON 数据形式内嵌进 user 指令。
-                    del gemini_history[_prefill_index]
-                    _instruction = build_prefill_fallback_instruction(_prefill_text)
-                    _merged = False
-                    if (
-                        gemini_history
-                        and isinstance(gemini_history[-1], dict)
-                        and gemini_history[-1].get("role") == "user"
-                    ):
-                        gemini_history[-1].setdefault("parts", []).append(
-                            {"text": _instruction}
-                        )
-                        _merged = True
-                    if not _merged:
-                        gemini_history.append(
-                            {"role": "user", "parts": [{"text": _instruction}]}
-                        )
-                    log(
-                        "INFO",
-                        f"检测到畸形历史（model-only/连续 model），已按 JSON "
-                        f"兑底改写 prefill（{model}）",
-                    )
-                _prefill_echo = _prefill_text
+            _prefill_echo = _apply_prefill_fix(gemini_history, model)
         # 显式写入（含 None）：响应侧（stream_chat/complete_chat）经
         # ContextVar 读取本值做回显剥离；同任务多请求场景防泄漏。
         set_current_prefill_echo(_prefill_echo)
@@ -1050,15 +920,22 @@ class GeminiClient:
         return gemini_history, system_instruction
 
     @staticmethod
-    async def list_available_models(api_key) -> list:
-        # Key moved from ?key=... to header to avoid leaking it into access logs.
+    async def _fetch_models_raw(api_key) -> dict:
+        """拉取 Gemini 原生模型列表的原始 JSON（两个静态列表方法共享）。
+
+        Key moved from ?key=... to header to avoid leaking it into access logs.
+        """
         url = "https://generativelanguage.googleapis.com/v1beta/models"
         headers = build_key_probe_headers(api_key)
         headers["x-goog-api-key"] = api_key
         client = await get_async_client()
         response = await client.get(url, headers=headers, timeout=60)
         response.raise_for_status()
-        data = response.json()
+        return response.json()
+
+    @staticmethod
+    async def list_available_models(api_key) -> list:
+        data = await GeminiClient._fetch_models_raw(api_key)
         models = []
         for model in data.get("models", []):
             models.append(model["name"])
@@ -1073,13 +950,5 @@ class GeminiClient:
 
     @staticmethod
     async def list_native_models(api_key):
-        """
-        获取原生Gemini模型列表
-        """
-        url = "https://generativelanguage.googleapis.com/v1beta/models"
-        headers = build_key_probe_headers(api_key)
-        headers["x-goog-api-key"] = api_key
-        client = await get_async_client()
-        response = await client.get(url, headers=headers, timeout=60)
-        response.raise_for_status()
-        return response.json()
+        """获取原生 Gemini 模型列表（原始 JSON 形态）。"""
+        return await GeminiClient._fetch_models_raw(api_key)

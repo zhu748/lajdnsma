@@ -158,6 +158,14 @@ def load_gemini_module(fake_settings_attrs=None):
     sys.modules["app.utils.prefill_echo"] = real_prefill_echo
     fake_utils.prefill_echo = real_prefill_echo
 
+    # 拆分后的 gemini.py 从 app.services.gemini_payload 导入纯函数工具。
+    # 注册带 __path__ 的假 "app.services" 包（跳过真实 __init__，避免
+    # gemini.py 双重加载）；gemini_payload 零 app 依赖，可独立导入。
+    fake_services = types.ModuleType("app.services")
+    fake_services.__path__ = [str(ROOT / "app/services")]
+    sys.modules["app.services"] = fake_services
+    fake_app.services = fake_services
+
     spec = importlib.util.spec_from_file_location(
         "prefill_gemini_service", ROOT / "app/services/gemini.py"
     )
