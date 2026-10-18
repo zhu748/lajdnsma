@@ -263,6 +263,10 @@ async def get_dashboard_data(
         # 添加联网搜索配置
         "search_mode": settings.search["search_mode"],
         "search_prompt": settings.search["search_prompt"],
+        # 思考配置（总闸 / 最高档 / 按模型等级，见 app/utils/thinking.py）
+        "enable_thinking": settings.ENABLE_THINKING,
+        "max_thinking": getattr(settings, "MAX_THINKING", True),
+        "max_thinking_model_levels": getattr(settings, "MAX_THINKING_MODEL_LEVELS", {}),
         # 添加缓存信息
         "cache_entries": total_cache,
         "cache_expiry_time": settings.CACHE_EXPIRY_TIME,
@@ -692,6 +696,60 @@ async def update_config(config_data: dict):
                     log("warning", "刷新模型配置缓存失败，将使用默认模型或现有缓存")
             except Exception as e:
                 log("error", f"重新初始化Vertex AI服务时出错: {str(e)}")
+
+        elif config_key == "enable_thinking":
+            # 思考功能总闸：关闭后代理不注入/不覆盖任何思考参数
+            # （原生 Gemini 请求自带的 thinkingConfig 仍原样透传）。
+            if not isinstance(config_value, bool):
+                raise HTTPException(status_code=422, detail="参数类型错误：应为布尔值")
+            settings.ENABLE_THINKING = config_value
+            log("info", f"思考功能总开关已更新为：{config_value}")
+
+        elif config_key == "max_thinking":
+            # 最高思考强度：开启后忽略请求携带的思考强度，
+            # 对所有支持思考的模型强制使用其家族最高档。
+            if not isinstance(config_value, bool):
+                raise HTTPException(status_code=422, detail="参数类型错误：应为布尔值")
+            settings.MAX_THINKING = config_value
+            log("info", f"最高思考强度已更新为：{config_value}")
+
+        elif config_key == "max_thinking_model_levels":
+            # 按模型指定思考等级（优先级高于全局最高档开关）。
+            # 形如 {"gemini-3.8-flash": "low", "gemini-2.5-flash": 16384}；
+            # 值支持等级字符串 / off / dynamic / 数字，运行时统一由
+            # app/utils/thinking.py 校验与换算，此处先做类型硬校验拒绝
+            # 垃圾数据落盘。
+            if not isinstance(config_value, dict):
+                raise HTTPException(
+                    status_code=422,
+                    detail="参数类型错误：max_thinking_model_levels 应为 JSON 对象（模型名 → 等级）",
+                )
+            cleaned = {}
+            for k, v in config_value.items():
+                key = str(k).strip()
+                if not key:
+                    continue
+                if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=(
+                            f"模型 {key} 的思考等级值无效："
+                            "应为 minimal/low/medium/high、off、dynamic 或数字"
+                        ),
+                    )
+                if isinstance(v, str):
+                    s = v.strip()
+                    if not s:
+                        continue
+                    # 数字字符串统一转 int，避免同值异型比对不一致
+                    if s.lstrip("-").isdigit():
+                        cleaned[key] = int(s)
+                    else:
+                        cleaned[key] = s
+                else:
+                    cleaned[key] = int(v) if isinstance(v, float) and v.is_integer() else v
+            settings.MAX_THINKING_MODEL_LEVELS = cleaned
+            log("info", f"按模型思考等级已更新，共 {len(cleaned)} 项")
 
         elif config_key == "max_retry_num":
             try:

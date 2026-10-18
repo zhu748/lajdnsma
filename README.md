@@ -181,6 +181,14 @@
 - `SEARCH_MODE` - 是否启用联网搜索模式，默认为false
 - `SEARCH_PROMPT` - 联网搜索提示语
 
+### 思考配置
+
+- `ENABLE_THINKING` - 思考功能总开关，默认为true。关闭后代理完全不干预任何思考参数（也不做等级换算）
+- `MAX_THINKING` - 最高思考强度，默认为true。开启后忽略请求携带的思考强度参数，对所有支持思考的模型直接使用其最高档位：2.5 Pro → budget 32768，2.5 Flash 系 → budget 24576，3.x / 4.x → thinkingLevel=high；不支持思考的模型（TTS / Embedding / Lyria 等）自动跳过
+- `MAX_THINKING_MODEL_LEVELS` - 按模型指定思考等级（JSON 映射，优先级高于 `MAX_THINKING`），如 `{"gemini-3.8-flash": "low", "gemini-2.5-pro": 16384}`。值支持 `minimal` / `low` / `medium` / `high` 等级、`off`（关闭，2.5 Pro 退化为最低 128）、`dynamic`（2.5 系动态思考）或数字 budget；模型名支持精确匹配与最长前缀匹配
+
+以上三项均可在网页控制台「功能配置」中直接开关/编辑；等级制模型（3.x/4.x）上出现的 budget 会自动就近换算为等级，避免 4.x 报 400 错误。
+
 ### 安全配置
 
 - `RANDOM_STRING` - 是否启用随机字符串伪装，默认为true

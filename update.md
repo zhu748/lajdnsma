@@ -1,4 +1,13 @@
 # 更新日志
+* v1.0.15（第九轮优化：最高思考强度——全局最高档 + 按模型指定等级 + 4.x 防呆）
+   * **新增「最高思考强度」开关（MAX_THINKING，默认开启，面板可关）**——开启后忽略请求携带的思考强度参数，对所有支持思考的模型直接使用其家族最高档位：2.5 Pro → budget 32768、2.5 Flash/Flash-Lite → budget 24576、3.x/4.x/nano-banana-2·pro/-latest 别名/robotics-er → thinkingLevel=high；TTS/Embedding/Lyria/Transcribe/Gemma/Omni/deep-research/antigravity/computer-use/2.0 及更早等不支持思考的模型自动跳过（不附加任何配置）
+   * **新增按模型指定思考等级（MAX_THINKING_MODEL_LEVELS，JSON 映射）**——优先级高于全局最高档开关；值支持 minimal/low/medium/high 等级、off（关闭；2.5 Pro 不可关闭自动退化为最低 128）、dynamic（2.5 系动态思考 -1）与数字 budget（2.5 系直接生效并钳制到上限；3.x/4.x 按区间就近换算成等级）；模型名先精确匹配、再最长前缀匹配（填 gemini-3.8 即可覆盖全部 3.8 变体）
+   * **新增思考功能总闸（ENABLE_THINKING，面板可关）**——关闭后代理完全不干预任何思考参数（不注入、不覆盖、不换算），保持完全透明代理；覆盖发生时保留请求的 includeThoughts 思考摘要回显偏好
+   * **4.x 防呆净化（sanitize_thinking_for_model）**——4.x（argon）携带 thinkingBudget 会直接 400；无论 budget 来自代理合成（OpenAI reasoning_effort / thinking_budget 换算、Claude 协议 thinking.budget_tokens 换算）还是客户端直发，到达 3.x/4.x 等级制模型时统一就近换算为 thinkingLevel（≤2048→low、≤10240→medium、更高→high），把必然的 400 转化为最接近的合法语义；payload 已显式携带等级时仅丢弃 budget；2.5 系 budget 家族不受影响
+   * **优先级语义**——按模型指定等级 > 全局最高档开关 > 请求自带参数；Vertex 路径的显式 -nothinking / -max 后缀是请求级明确意图，优先级最高不被覆盖；覆盖发生在缓存键计算之后，只可能 miss 不会错误命中
+   * **面板「功能配置」新增思考区块**——「思考功能」「最高思考强度」双开关 + 按模型等级行编辑器（datalist 模型候选、正则校验、数字字符串自动归一化），配置经 update-config 落盘持久化（含 422 硬校验），重启保留
+   * 文档：README 新增「思考配置」章节（ENABLE_THINKING / MAX_THINKING / MAX_THINKING_MODEL_LEVELS）
+   * 测试：新增 49 项第九轮回归测试（全部拉取模型的表驱动家族断言/优先级与换算/REST 与 genai 双接入点/4.x budget 净化/GeminiClient 端到端），全套 366 项测试通过
 * v1.0.14（第八轮优化：PVP 模式——指定 key 持续重试直到出结果）
    * **新增 PVP 模式（面板「功能设置」可开关）**——开启后所有请求钉在指定 key 上持续重试，直到拿到有效输出或达到最大重试次数；冷却（429/401/403）、RPM 阈值、日额度都不构成换 key 理由，与 fill/polling 轮换策略正交（两种策略下均可钉住）
    * **指定 key 支持四种写法**——完整密钥 / `#0`（池内序号，跨重启稳定）/ `key#1a2b3c`（面板密钥状态页的哈希标识，可直接从下拉列表选择）/ 密钥尾片段（≥4 位唯一子串，跨重启稳定）；选择器失配时自动回退正常轮换策略并告警（warn-once 防日志刷屏），绝不因 PVP 配置问题拒绝服务

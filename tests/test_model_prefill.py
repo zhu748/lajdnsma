@@ -42,6 +42,25 @@ def load_real_model_mapping():
     return module
 
 
+def load_real_thinking_module():
+    """直接从文件加载真实的 thinking（gemini.py 的思考覆盖依赖）。
+
+    gemini.py 自最高思考强度功能起 `from app.utils.thinking import
+    apply_thinking_override`，本 fake 链的 app.utils.__path__ 为空，
+    不注册该模块会在加载 gemini.py 时直接 ModuleNotFoundError。
+    真实 thinking 对 settings 的读取全部 getattr 防御：在本链的
+    fake settings（无 MAX_THINKING 等键）下自然退化为「不覆盖」，
+    不影响本文件的 prefill 补丁测试。
+    """
+    spec = importlib.util.spec_from_file_location(
+        "prefill_thinking", ROOT / "app/utils/thinking.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
 def load_gemini_module(fake_settings_attrs=None):
     """加载真实 gemini.py，为其搭建完整 fake 依赖链。
 
@@ -111,6 +130,11 @@ def load_gemini_module(fake_settings_attrs=None):
     real_model_mapping = load_real_model_mapping()
     sys.modules["app.utils.model_mapping"] = real_model_mapping
     fake_utils.model_mapping = real_model_mapping
+
+    # 真实的 thinking（gemini.py 的思考覆盖依赖）注册进包链。
+    real_thinking = load_real_thinking_module()
+    sys.modules["app.utils.thinking"] = real_thinking
+    fake_utils.thinking = real_thinking
 
     spec = importlib.util.spec_from_file_location(
         "prefill_gemini_service", ROOT / "app/services/gemini.py"

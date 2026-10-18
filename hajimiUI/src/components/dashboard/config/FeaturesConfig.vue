@@ -7,6 +7,9 @@ const dashboardStore = useDashboardStore()
 const localConfig = reactive({
   searchMode: false,
   searchPrompt: '',
+  enableThinking: true,
+  maxThinking: true,
+  maxThinkingLevels: [],
   maxRetryNum: 0,
   fakeStreaming: false,
   fakeStreamingInterval: 0,
@@ -31,6 +34,33 @@ function aliasesToRows(aliases) {
   return Object.entries(aliases || {}).map(([alias, model]) => ({ alias, model }))
 }
 
+function thinkingLevelsToRows(levels) {
+  return Object.entries(levels || {}).map(([model, level]) => ({
+    model,
+    level: String(level),
+  }))
+}
+
+// 思考等级合法值：等级 / off / dynamic / 数字 budget
+const THINKING_LEVEL_RE = /^(minimal|low|medium|high|off|none|disable|disabled|dynamic|auto|-?\d+)$/i
+
+function buildThinkingLevelMap() {
+  const result = {}
+  for (const row of localConfig.maxThinkingLevels) {
+    const model = (row.model || '').trim()
+    const level = String(row.level == null ? '' : row.level).trim()
+    if (!model && !level) continue
+    if (!model || !level) {
+      throw new Error(`思考等级表第 ${localConfig.maxThinkingLevels.indexOf(row) + 1} 行未填写完整`)
+    }
+    if (!THINKING_LEVEL_RE.test(level)) {
+      throw new Error(`模型 ${model} 的思考等级值无效：${level}（支持 minimal/low/medium/high、off、dynamic 或数字）`)
+    }
+    result[model] = level
+  }
+  return result
+}
+
 watch(
   () => ({
     ...dashboardStore.config,
@@ -41,6 +71,9 @@ watch(
     Object.assign(localConfig, {
       searchMode: v.searchMode,
       searchPrompt: v.searchPrompt,
+      enableThinking: v.enableThinking,
+      maxThinking: v.maxThinking,
+      maxThinkingLevels: thinkingLevelsToRows(v.maxThinkingModelLevels),
       maxRetryNum: v.maxRetryNum,
       fakeStreaming: v.fakeStreaming,
       fakeStreamingInterval: v.fakeStreamingInterval,
@@ -108,6 +141,12 @@ function addClaudeAlias() {
 function removeClaudeAlias(i) {
   localConfig.claudeModelAliases.splice(i, 1)
 }
+function addThinkingLevel() {
+  localConfig.maxThinkingLevels.push({ model: '', level: '' })
+}
+function removeThinkingLevel(i) {
+  localConfig.maxThinkingLevels.splice(i, 1)
+}
 
 async function saveComponentConfigs(passwordFromParent) {
   if (!passwordFromParent) {
@@ -118,6 +157,8 @@ async function saveComponentConfigs(passwordFromParent) {
   const labelMap = {
     searchMode: '搜索模式',
     searchPrompt: '搜索提示词',
+    enableThinking: '思考功能',
+    maxThinking: '最高思考强度',
     maxRetryNum: '最大重试次数',
     fakeStreaming: '伪流式',
     fakeStreamingInterval: '伪流式间隔',
@@ -136,6 +177,7 @@ async function saveComponentConfigs(passwordFromParent) {
     'responsesModelAliases',
     'claudeDefaultModel',
     'claudeModelAliases',
+    'maxThinkingLevels',
   ]
   for (const key of Object.keys(localConfig).filter((k) => !mappingKeys.includes(k))) {
     if (localConfig[key] !== dashboardStore.config[key]) {
@@ -149,6 +191,28 @@ async function saveComponentConfigs(passwordFromParent) {
       }
     }
   }
+  // 按模型思考等级（对象类型，需 JSON 对比 + 服务端校验）
+  let levelMap = {}
+  try {
+    levelMap = buildThinkingLevelMap()
+  } catch (e) {
+    allSucceeded = false
+    messages.push('思考等级表：' + e.message)
+  }
+  if (
+    allSucceeded &&
+    JSON.stringify(levelMap) !== JSON.stringify(dashboardStore.config.maxThinkingModelLevels || {})
+  ) {
+    try {
+      await dashboardStore.updateConfig('maxThinkingModelLevels', levelMap, passwordFromParent)
+      dashboardStore.config.maxThinkingModelLevels = levelMap
+      messages.push(`按模型思考等级成功（共 ${Object.keys(levelMap).length} 项）`)
+    } catch (e) {
+      allSucceeded = false
+      messages.push('按模型思考等级失败：' + (e.message || '未知错误'))
+    }
+  }
+
   try {
     await saveModelMapping(
       '/api/update-responses-model-mapping',
@@ -211,6 +275,56 @@ defineExpose({ saveComponentConfigs, localConfig })
     <div v-if="localConfig.searchMode" class="field">
       <label class="field__label">搜索提示词</label>
       <textarea v-model="localConfig.searchPrompt" class="textarea" rows="3"></textarea>
+    </div>
+
+    <!-- 思考强度设置 -->
+    <div class="grid grid--2">
+      <div class="field">
+        <label class="field__label">思考功能</label>
+        <div class="row row--between">
+          <span class="text-muted" style="font-size:var(--fs-sm);">总开关：关闭后不注入任何思考参数。</span>
+          <button class="toggle" :class="{ 'toggle--on': localConfig.enableThinking }" @click="localConfig.enableThinking = !localConfig.enableThinking">
+            <span class="toggle__thumb"></span>
+          </button>
+        </div>
+      </div>
+      <div class="field">
+        <label class="field__label">最高思考强度</label>
+        <div class="row row--between">
+          <span class="text-muted" style="font-size:var(--fs-sm);">忽略请求思考参数，强制各模型最高档。</span>
+          <button class="toggle" :class="{ 'toggle--on': localConfig.maxThinking }" @click="localConfig.maxThinking = !localConfig.maxThinking">
+            <span class="toggle__thumb"></span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="localConfig.enableThinking" class="field__hint">
+      最高档取值：2.5 Pro → budget 32768，2.5 Flash 系 → budget 24576，3.x / 4.x → thinkingLevel=high。
+      优先级：按模型指定等级 &gt; 最高思考强度开关 &gt; 请求自带参数。不支持思考的模型（TTS / Embedding / Lyria 等）自动跳过。
+    </div>
+
+    <!-- 按模型指定思考等级 -->
+    <div v-if="localConfig.enableThinking" class="sub-block">
+      <div class="row row--between">
+        <span class="text-muted" style="font-size:var(--fs-sm);font-weight:500;">按模型指定思考等级（优先于最高档开关）</span>
+        <button class="btn btn--secondary btn--sm" @click="addThinkingLevel">+ 添加</button>
+      </div>
+      <div v-for="(row, i) in localConfig.maxThinkingLevels" :key="'t'+i" class="alias-row">
+        <input v-model="row.model" list="thinking-model-options" placeholder="模型名 / 前缀（如 gemini-3.8-flash）" class="input">
+        <span class="text-subtle">→</span>
+        <input v-model="row.level" placeholder="high / medium / low / minimal / off / 数字" class="input">
+        <button class="btn btn--ghost btn--icon btn--sm" @click="removeThinkingLevel(i)">✕</button>
+      </div>
+      <datalist id="thinking-model-options">
+        <option v-for="m in dashboardStore.availableModels" :key="m" :value="m"></option>
+      </datalist>
+      <div class="field__hint">
+        模型名支持精确匹配或最长前缀匹配（填 gemini-3.8 可覆盖全部 3.8 变体）。
+        等级值支持 minimal / low / medium / high、off（关闭）、dynamic（2.5 动态）或数字 budget：
+        2.5 系列直接使用数字（0=关闭，-1=动态，Pro 上限 32768，Flash 系上限 24576）；
+        3.x / 4.x 模型的数字会就近换算成等级（≤2048→low、≤10240→medium、更高→high），避免 4.x 报 budget 400 错误。
+      </div>
     </div>
 
     <div v-if="localConfig.fakeStreaming" class="grid grid--2">

@@ -12,6 +12,10 @@ from app.utils.http_client import get_async_client, UPSTREAM_TIMEOUT
 from app.utils.logging import log
 from app.utils.model_mapping import needs_model_turn_fix
 from app.utils.sse import iter_sse_json
+from app.utils.thinking import (
+    apply_thinking_override,
+    sanitize_thinking_for_model,
+)
 from app.utils.stealth import (
     build_gemini_headers,
     build_key_probe_headers,
@@ -327,6 +331,18 @@ class GeminiClient:
 
             data.setdefault("tools", []).append({"google_search": {}})
             model = request.model.removesuffix("-search")
+
+        # 最高思考强度覆盖（见 app/utils/thinking.py）：
+        # 对两条路径（Gemini 原生 payload / OpenAI 转换产物）的最终 data
+        # 统一应用。此时 model 已完成 -search 后缀剥离，家族判定准确。
+        # 无覆盖时（返回 None）不改动任何内容，保持请求原样透传。
+        apply_thinking_override(model, data)
+
+        # 等级制模型（3.x/4.x）防呆净化：无论 budget 来自代理合成
+        # （reasoning_effort / thinking_budget 换算）还是客户端直发，
+        # 4.x 携带 thinkingBudget 都会 400 —— 就近换算为 thinkingLevel。
+        # 2.5 系 budget 家族不受影响；ENABLE_THINKING 关闭时不生效。
+        sanitize_thinking_for_model(model, data)
 
         return api_version, model, data
 

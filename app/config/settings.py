@@ -157,6 +157,42 @@ ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "true").lower() in [
     "yes",
 ]
 
+# ---------- 最高思考强度（thinking 覆盖策略，见 app/utils/thinking.py） ----------
+# 开启后：忽略请求中携带的思考强度参数，对所有支持思考的模型直接使用
+# 该模型家族的最高档位。默认开启，可经网页设置或 MAX_THINKING=false 关闭。
+# 各家族「最高档」的取值（依据官方文档 ai.google.dev/gemini-api/docs/thinking）：
+#   - Gemini 2.5 系列（仅支持数字 budget）：Pro → thinkingBudget=32768，
+#     Flash / Flash-Lite → thinkingBudget=24576；
+#   - Gemini 3.x / 4.x 及新世代（等级制）：thinkingLevel="high"；
+#     注意 4.x 不接受 thinkingBudget（会 400），因此等级制模型绝不发送 budget；
+#   - 不支持思考的模型（TTS / Embedding / Lyria / Transcribe / Gemma /
+#     Omni / 深度研究等代理类）静默跳过，不附加任何思考配置。
+# 优先级：按模型指定等级（MAX_THINKING_MODEL_LEVELS）> 本开关 > 请求参数。
+MAX_THINKING = os.environ.get("MAX_THINKING", "true").lower() in ["true", "1", "yes"]
+
+# 按模型指定思考等级（优先级高于 MAX_THINKING 全局开关）。
+# JSON 映射表：{"模型名或前缀": 值}，值支持：
+#   - 等级字符串："minimal" / "low" / "medium" / "high"
+#     （对 2.5 系列自动换算为等价 budget：low≈1024 / medium≈8192 /
+#       high=24576，Pro 为 32768；minimal→Flash 关闭 / Pro 128）
+#   - 数字：2.5 系列直接作为 thinkingBudget（0=关闭，-1=动态思考）；
+#     3.x/4.x 等级制模型会按区间就近换算成等级（1-2048→low、
+#     2049-10240→medium、>10240→high），避免 4.x 出现 budget 400 错误
+#   - "off"：不附加思考配置，走模型默认（2.5 Flash 系列为 budget=0）
+# 匹配规则：先精确匹配模型名，未命中再做最长前缀匹配
+# （如 "gemini-3.8-flash" 可覆盖所有 3.8 flash 变体）。
+try:
+    _mt_levels_raw = json.loads(
+        os.environ.get("MAX_THINKING_MODEL_LEVELS", "{}") or "{}"
+    )
+    if not isinstance(_mt_levels_raw, dict):
+        _mt_levels_raw = {}
+    MAX_THINKING_MODEL_LEVELS = {
+        str(k).strip(): v for k, v in _mt_levels_raw.items() if str(k).strip()
+    }
+except json.JSONDecodeError:
+    MAX_THINKING_MODEL_LEVELS = {}
+
 # 空响应重试次数限制
 MAX_EMPTY_RESPONSES = int(
     os.environ.get("MAX_EMPTY_RESPONSES", "5")

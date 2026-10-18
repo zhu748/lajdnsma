@@ -36,6 +36,7 @@ from app.vertex.api_helpers import (
     execute_gemini_call,
 )
 from app.utils.stealth import gen_openai_chunk_id  # full_jitter_backoff 未使用，已删除
+from app.utils.thinking import apply_thinking_override_genai
 
 router = APIRouter()
 
@@ -825,6 +826,13 @@ async def chat_completions(
                     generation_config["thinking_config"] = {"thinking_budget": 32768}
                 else:
                     generation_config["thinking_config"] = {"thinking_budget": 24576}
+
+            # 最高思考强度全局覆盖（与 Gemini API 路径共享策略：
+            # app/utils/thinking.py）。显式 -nothinking / -max 后缀是用户
+            # 请求级的明确意图，优先级更高，不进行覆盖；其余模型统一
+            # 应用「按模型指定等级 > 全局最高档」的覆盖策略。
+            if not (is_nothinking_model or is_max_thinking_model):
+                apply_thinking_override_genai(base_model_name, generation_config)
 
             # For non-auto models, the 'base_model_name' might have suffix stripped.
             # We should use the original 'request.model' for API call if it's a suffixed one,
