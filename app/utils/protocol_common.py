@@ -1,7 +1,7 @@
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from app.utils.sse import sse_data
 from app.utils.stealth import (
