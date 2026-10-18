@@ -1,3 +1,4 @@
+"""全局 / 异步异常钩子与 APScheduler 定时清理。"""
 import sys
 import asyncio
 import traceback
@@ -141,7 +142,6 @@ async def shutdown_scheduler():
     HTTP server stopped accepting connections, which raises
     `RuntimeError: Event loop is closed` on the next tick.
     """
-    global _scheduler
     if _scheduler is not None and _scheduler.running:
         _scheduler.shutdown(wait=False)
     # Also signal the stats manager's worker thread to stop.

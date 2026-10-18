@@ -1,3 +1,4 @@
+"""单 key 伪流式任务：一次非流式上游调用 + 写缓存。"""
 from app.services import GeminiClient
 from app.utils import handle_gemini_error, log
 from app.utils.gemini_response_processing import (

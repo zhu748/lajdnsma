@@ -1,3 +1,4 @@
+"""API 密钥池：解析、冷却状态机、fill / polling 轮换管理。"""
 import random
 import re
 import os

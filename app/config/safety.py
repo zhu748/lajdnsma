@@ -1,3 +1,4 @@
+"""SAFETY_MODE 三模式的安全设置选择（默认不发送 safetySettings）。"""
 # 安全设置配置
 #
 # 风控硬化说明：

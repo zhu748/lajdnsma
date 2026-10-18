@@ -1,3 +1,4 @@
+"""embedding / vector 查询写入端点（含限流与 503 保护）。"""
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 import app.config.settings as settings

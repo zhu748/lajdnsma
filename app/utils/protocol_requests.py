@@ -1,3 +1,4 @@
+"""入站请求转换：Responses / Claude 请求 → ChatCompletionRequest。"""
 import json
 from typing import Any, Dict, List, Optional
 

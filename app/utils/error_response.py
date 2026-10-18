@@ -1,3 +1,4 @@
+"""Gemini / OpenAI 双形态错误响应构建。"""
 from app.utils.response import gemini_from_text, openAI_from_text
 
 

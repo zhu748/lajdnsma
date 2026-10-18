@@ -1,3 +1,4 @@
+"""非流式单任务结果状态机（success / empty / error 三分支）。"""
 import app.config.settings as settings
 from app.utils.error_handling import handle_gemini_error
 from app.utils.logging import log

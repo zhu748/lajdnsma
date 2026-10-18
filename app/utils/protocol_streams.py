@@ -1,3 +1,4 @@
+"""流式协议转换：chat SSE → Responses / Claude SSE。"""
 from typing import Any, AsyncIterator, Dict, List
 
 from app.utils.protocol_common import (

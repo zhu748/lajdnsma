@@ -1,3 +1,4 @@
+"""OpenAI 风格 /v1/chat/completions 的 HTTP 入口（aistudio / vertex 分派）。"""
 from typing import Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request

@@ -1,3 +1,4 @@
+"""Responses / Claude / Gemini 原生协议的 HTTP 入口。"""
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request

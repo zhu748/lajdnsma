@@ -1,3 +1,4 @@
+"""非流式批次执行器（asyncio.wait 轮询直至成功/耗尽）。"""
 import asyncio
 
 from app.api.nonstream_status_handlers import handle_nonstream_task_status

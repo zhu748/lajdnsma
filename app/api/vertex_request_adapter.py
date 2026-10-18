@@ -1,3 +1,4 @@
+"""ChatCompletionRequest → Vertex OpenAIRequest 的请求映射。"""
 from app.vertex.models import OpenAIMessage, OpenAIRequest
 
 

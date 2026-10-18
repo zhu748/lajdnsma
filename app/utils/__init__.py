@@ -1,3 +1,4 @@
+"""工具层门面（供 app/main.py 装配的历史导入面）。"""
 # Utils package initialization
 
 from app.utils.logging import logger, log_manager, format_log_message, log

@@ -1,3 +1,5 @@
+"""Gemini 上游客户端：请求转换（OpenAI→Gemini）、流式 / 非流式调用、
+响应包装（GeminiResponseWrapper）。"""
 import json
 import os
 from app.models.schemas import ChatCompletionRequest

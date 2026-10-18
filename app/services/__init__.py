@@ -1,3 +1,4 @@
+"""服务层门面：GeminiClient / GeminiResponseWrapper。"""
 from app.services.gemini import GeminiClient, GeminiResponseWrapper
 
 # GeneratedText 已随死代码清理移除（全仓无消费者）

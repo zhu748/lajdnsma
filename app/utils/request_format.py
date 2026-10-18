@@ -1,3 +1,4 @@
+"""消息准备：convert_messages 调用与 400 化校验错误。"""
 from fastapi import HTTPException, status
 
 from app.services.gemini import GeminiClient

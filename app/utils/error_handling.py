@@ -1,3 +1,5 @@
+"""上游错误处理：失败分类（quota/dead/transient）、冷却调度、
+错误脱敏与客户端消息翻译。"""
 import json
 import httpx
 import logging

@@ -1,3 +1,4 @@
+"""ActiveRequestsManager：在途请求池（请求合并的底层存储）。"""
 import asyncio
 import time
 from typing import Dict

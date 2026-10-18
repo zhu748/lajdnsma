@@ -1,3 +1,4 @@
+"""远程 vertexModels.json 的拉取 / 解析 / 缓存（full-jitter 退避重试）。"""
 import httpx
 import asyncio
 import json

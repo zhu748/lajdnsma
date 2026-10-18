@@ -1,3 +1,4 @@
+"""API 调用统计：计数器、时间序列桶、per-key RPM 滑动窗口、后台批处理。"""
 from datetime import datetime, timedelta
 from app.utils.logging import log
 import app.config.settings as settings

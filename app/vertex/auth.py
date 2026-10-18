@@ -1,3 +1,4 @@
+"""Vertex 子应用的 Bearer Token 校验（与主 app PASSWORD 一致）。"""
 from fastapi import HTTPException, Header
 from typing import Optional
 from app.config import settings

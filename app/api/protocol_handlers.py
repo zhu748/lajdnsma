@@ -1,3 +1,4 @@
+"""Responses / Claude 协议的业务处理：请求转换与响应适配。"""
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 

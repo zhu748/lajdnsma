@@ -1,3 +1,4 @@
+"""共享 httpx AsyncClient 单例（分层超时 + HTTP/2 探测）。"""
 import asyncio
 
 import httpx

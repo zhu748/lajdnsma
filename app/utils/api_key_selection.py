@@ -1,3 +1,4 @@
+"""批次密钥选择：PVP 钉住 → key 亲和 → 轮换，含三重校验。"""
 from typing import List, Optional
 
 import app.config.settings as settings

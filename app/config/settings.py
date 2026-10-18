@@ -1,3 +1,4 @@
+"""全部环境变量配置（密码 / 密钥 / 轮换 / 缓存 / prefill / PVP 等）。"""
 import os
 import pathlib
 import logging

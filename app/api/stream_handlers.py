@@ -1,3 +1,4 @@
+"""流式处理层：伪流式与真流式两套重试批次循环。"""
 import asyncio
 from fastapi.responses import StreamingResponse
 

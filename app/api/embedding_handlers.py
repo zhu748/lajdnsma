@@ -1,3 +1,4 @@
+"""embedding 与 vector 的业务逻辑实现。"""
 from fastapi import HTTPException
 
 

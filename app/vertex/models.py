@@ -1,3 +1,4 @@
+"""Vertex 请求模型（OpenAI 兼容 + 图片 part）。"""
 from pydantic import BaseModel, ConfigDict  # Field removed
 from typing import List, Dict, Any, Optional, Union, Literal
 

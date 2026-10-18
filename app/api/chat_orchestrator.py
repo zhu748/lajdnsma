@@ -1,3 +1,4 @@
+"""aistudio chat completions 的编排器：限流 → 缓存 → 请求合并 → 派发。"""
 from fastapi import HTTPException, status
 
 import app.config.settings as settings
@@ -77,7 +78,10 @@ async def handle_aistudio_chat_completion(
 
     pool_key = cache_key if not settings.PUBLIC_MODE else None
     if not settings.PUBLIC_MODE:
-        assert runtime.active_requests_manager is not None
+        # Hardening: 与路由层同模式 —— 裸 assert 在 python -O 下消失，
+        # None 管理器会在下游抛 AttributeError；显式报错语义更清晰。
+        if runtime.active_requests_manager is None:
+            raise RuntimeError("route_runtime not initialized: init_router() 未被调用")
         result = await reuse_or_wait_active_request(
             public_mode=settings.PUBLIC_MODE,
             active_requests_manager=runtime.active_requests_manager,

@@ -1,3 +1,4 @@
+"""Gemini embedding 上游客户端（batchEmbedContents）。"""
 from app.models.schemas import EmbeddingRequest, EmbeddingData, EmbeddingResponse, Usage
 from app.utils.http_client import get_async_client
 from app.utils.logging import log

@@ -1,3 +1,4 @@
+"""LogManager：有界环形缓冲 + JSON 行格式的双通道日志。"""
 import logging
 from datetime import datetime
 from collections import deque

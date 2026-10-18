@@ -1,3 +1,4 @@
+"""编排器的小助手：缓存读取、请求合流、任务结果等待的薄封装。"""
 from fastapi import HTTPException
 
 # Cleanup: sanitize_string 导入未使用，已删除。
@@ -75,7 +76,7 @@ async def await_process_task_result(
             pool_key=pool_key,
         )
         raise
-    except Exception as e:
+    except Exception:
         remove_active_request_if_needed(
             public_mode=public_mode,
             active_requests_manager=active_requests_manager,

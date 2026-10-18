@@ -1,3 +1,5 @@
+"""Vertex 影子配置层：把 settings 属性镜像为模块全局并提供热更新
+（Express key 解析共享助手亦在此）。"""
 import os
 from app.config import settings
 from app.utils.logging import vertex_log

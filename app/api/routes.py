@@ -1,3 +1,4 @@
+"""业务路由聚合器：挂载 chat / protocol / model / embedding 子路由。"""
 from fastapi import APIRouter
 
 from app.api.chat_routes import (

@@ -2,6 +2,35 @@
 
 这是一个基于 FastAPI 构建的 Gemini API 代理，旨在提供一个简单、安全且可配置的方式来访问 Google 的 Gemini 模型。适用于在 Hugging Face Spaces 上部署，并支持openai api格式的工具集成。
 
+## 📁 代码结构
+
+```text
+app/
+├── main.py                 # 应用入口：lifespan 装配、中间件、异常处理
+├── api/                    # HTTP 路由层（路由只做接线，业务在 handlers）
+│   ├── routes.py           #   业务路由聚合器 + init_router 依赖注入
+│   ├── dashboard/          #   管理面板 API（runtime / auth / stats /
+│   │                       #   config_updates 注册表 / model_mapping / api_keys）
+│   ├── chat_routes / protocol_routes / model_routes / embedding_routes
+│   ├── *_handlers.py       #   各协议业务实现（chat / 流式 / 非流式 / 协议适配）
+│   └── route_runtime.py    #   运行时依赖容器（密钥池 / 缓存 / 活跃请求）
+├── services/               # 上游客户端层
+│   ├── gemini.py           #   GeminiClient：请求转换 + 流式/非流式调用
+│   └── gemini_payload.py   #   纯函数 payload 清洗（零 app 依赖）
+├── vertex/                 # Vertex AI 模式（SA 凭证 / Express / OpenAI Direct）
+│   ├── routes/chat_api.py  #   端点编排 + openai_direct.py 全链路
+│   ├── api_helpers.py      #   流式引擎与 execute_gemini_call
+│   ├── message_processing.py / model_names.py / credentials_manager.py ...
+├── utils/                  # 工具层（密钥选择 / 错误处理 / 协议转换 / 统计 / 缓存）
+└── config/                 # 配置层（settings / 持久化 / safety 模式）
+tests/                      # 449 项回归测试（含源码文本契约，重构前必读
+                            #   tests/test_round4/round5 的注释说明）
+```
+
+分层约定：`api` 层不直接发起上游请求，`services`/`vertex` 层不感知 HTTP，
+`utils` 层为纯函数或独立状态机；面板与业务共用 `route_runtime`/`dashboard.runtime`
+注入的运行时对象。
+
 ## 项目采用动态更新，随时会有一些小更新同步到主仓库且会自动构建镜像，如果反馈的bug开发者说修了但是版本号没变是正常现象，~~记得勤更新镜像哦~~
 
 ## 错误自查

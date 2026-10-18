@@ -1,3 +1,4 @@
+"""单 key 非流式完成（shield / 取消保护 / RPM 发射计数）。"""
 import asyncio
 
 import app.config.settings as settings

@@ -1,3 +1,4 @@
+"""响应缓存：多值键 deque、精确 LRU 驱逐、xxhash 缓存键。"""
 import time
 import json
 import xxhash

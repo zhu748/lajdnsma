@@ -1,3 +1,4 @@
+"""运行时依赖容器：init_router 注入的全局对象与派生助手。"""
 from fnmatch import fnmatchcase
 
 from fastapi import HTTPException, Request, status
@@ -69,7 +70,10 @@ async def _one_shot(payload: str):
 
 
 async def get_cache(cache_key, is_stream: bool, is_gemini=False):
-    assert response_cache_manager is not None
+    # Hardening: 与路由层同模式 —— 裸 assert 在 python -O 下消失，
+    # None 缓存管理器会在下游抛 AttributeError；显式报错语义更清晰。
+    if response_cache_manager is None:
+        raise RuntimeError("route_runtime not initialized: init_router() 未被调用")
     cached_response, cache_hit = await response_cache_manager.get_and_remove(cache_key)
 
     if cache_hit and cached_response:

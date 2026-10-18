@@ -1,3 +1,4 @@
+"""Pydantic 模型全集（请求 / 响应 / 流式 chunk / 错误体）。"""
 from typing import List, Dict, Optional, Union, Literal, Any
 from pydantic import BaseModel, ConfigDict, Field
 

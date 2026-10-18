@@ -1,3 +1,4 @@
+"""各协议模型列表入口（aistudio / vertex / claude / gemini）与协议嗅探。"""
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 import app.config.settings as settings
@@ -89,7 +90,13 @@ async def gemini_list_models(
     _=Depends(custom_verify_password),
     _2=Depends(route_runtime.verify_user_agent),
 ):
-    assert route_runtime.key_manager is not None
+    # Hardening: 与 vertex_list_models 同模式 —— 裸 assert 在 python -O 下
+    # 消失、None 下流；无 -O 时裸 AssertionError 只给客户端一个含堆栈的 500。
+    if route_runtime.key_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Service is still initializing (key manager not ready), please retry shortly",
+        )
     api_key = await route_runtime.key_manager.get_available_key()
     if not api_key:
         raise HTTPException(

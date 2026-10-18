@@ -1,3 +1,4 @@
+"""Vertex 模型列表端点（含后缀变体展开）。"""
 import time
 from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials

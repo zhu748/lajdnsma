@@ -1,3 +1,4 @@
+"""伪流式批次执行器：keepalive 抖动、缓存回放与取消清理。"""
 import asyncio
 import random
 

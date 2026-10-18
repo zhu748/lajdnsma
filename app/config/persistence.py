@@ -1,3 +1,4 @@
+"""settings.json 的原子持久化（保存 / 加载 / 凭据排除表）。"""
 import json
 import os
 import inspect

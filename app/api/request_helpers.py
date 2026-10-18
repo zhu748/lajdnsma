@@ -1,3 +1,4 @@
+"""请求级工具：Gemini 请求判定、缓存键构建、请求合流任务。"""
 import asyncio
 
 from fastapi import HTTPException, status

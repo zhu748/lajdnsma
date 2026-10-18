@@ -1,3 +1,4 @@
+"""SSE 基元：data / done 帧构造与 SSE JSON 流解析。"""
 import json
 from typing import Any, AsyncIterator, Dict
 

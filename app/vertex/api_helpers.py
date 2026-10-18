@@ -1,3 +1,5 @@
+"""Vertex 执行层：generation config 构建、真假流式引擎、
+prefill 修复与 execute_gemini_call 汇聚点。"""
 import json
 import time
 import asyncio

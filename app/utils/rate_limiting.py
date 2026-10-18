@@ -1,3 +1,4 @@
+"""入站防滥用限流（分钟 / 天双桶，按 IP 键控）。"""
 import time
 import asyncio
 from fastapi import HTTPException, Request

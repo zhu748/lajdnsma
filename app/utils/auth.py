@@ -1,3 +1,4 @@
+"""面板 / WEB 密码校验。"""
 import hmac
 from typing import Optional
 from fastapi import HTTPException, Header, Query

@@ -1,3 +1,4 @@
+"""模型列表构建纯函数（OpenAI / Anthropic 两种响应形态）。"""
 from app.models.schemas import ModelList
 
 

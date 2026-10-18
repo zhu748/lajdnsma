@@ -1,3 +1,4 @@
+"""Vertex 启动初始化与 genai.Client 池（按 project_id 键控，TTL 50min）。"""
 import json
 import time
 from google import genai

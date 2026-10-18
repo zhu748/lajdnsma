@@ -1,3 +1,5 @@
+"""纯转换层：OpenAI 消息 → Gemini prompt（普通 / 加密 / 混淆三形态），
+Gemini 响应 → OpenAI 格式。"""
 import base64
 import re
 import json

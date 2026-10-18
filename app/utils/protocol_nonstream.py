@@ -1,3 +1,4 @@
+"""非流式协议转换：chat 响应 → Responses / Claude 响应。"""
 import json
 from typing import Any, Dict, List
 

@@ -1,3 +1,4 @@
+"""应用入口：lifespan 装配、中间件、全局异常处理与根路由。"""
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, HTMLResponse

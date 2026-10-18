@@ -1,3 +1,4 @@
+"""多凭证管理：文件凭证 + JSON 字符串凭证 + token 缓存（50min TTL）。"""
 import os
 import glob
 import random

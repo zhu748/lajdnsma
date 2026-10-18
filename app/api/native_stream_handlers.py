@@ -1,3 +1,4 @@
+"""单 key 真流式生成器（chunk/summary 二元组协议）。"""
 import time
 
 from app.services import GeminiClient

@@ -1,3 +1,4 @@
+"""protocol 系列共享底座：时间戳、usage 归一化、SSE 解析。"""
 import json
 import time
 from datetime import datetime, timezone

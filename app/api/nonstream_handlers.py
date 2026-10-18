@@ -1,3 +1,4 @@
+"""非流式处理层：重试批次循环与 keepalive 流式包装两条路径。"""
 import asyncio
 
 from fastapi.responses import StreamingResponse

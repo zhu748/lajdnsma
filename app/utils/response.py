@@ -1,3 +1,4 @@
+"""响应格式工厂：OpenAI / Gemini 文本与结构化响应构建。"""
 import json
 import time
 from datetime import datetime, timezone

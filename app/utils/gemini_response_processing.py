@@ -1,3 +1,4 @@
+"""Gemini 响应收尾：安全设置选择、空响应判定、缓存与统计。"""
 import app.config.settings as settings
 from app.utils import update_api_call_stats
 from app.utils.empty_response import is_empty_gemini_response

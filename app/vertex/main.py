@@ -1,3 +1,4 @@
+"""独立 Vertex 子应用入口（可选的单独部署形态；主 app 不经此挂载）。"""
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
