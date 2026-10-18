@@ -20,6 +20,23 @@ _TOKEN_CACHE: dict[str, tuple] = {}  # {project_id: (token, expiry_epoch)}
 _TOKEN_TTL_SECONDS = 50 * 60  # 50 minutes
 
 
+def get_credential_manager(fastapi_request) -> "CredentialManager":
+    """优先取 app.state 中由启动流程注入的凭证管理器，缺失时兜底新建。
+
+    chat_api 与 models_api 的共享逻辑（此前两处各自内联实现）。
+    """
+    try:
+        credential_manager_instance = fastapi_request.app.state.credential_manager
+        vertex_log("info", "Using existing credential manager from app state")
+    except AttributeError:
+        vertex_log(
+            "warning",
+            "No credential_manager found in app.state, creating a new one",
+        )
+        credential_manager_instance = CredentialManager()
+    return credential_manager_instance
+
+
 # Helper function to parse multiple JSONs from a string
 def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
     """

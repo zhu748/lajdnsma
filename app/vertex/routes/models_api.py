@@ -3,6 +3,11 @@ from fastapi import APIRouter, Depends, Request, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import List, Dict, Any
 from app.vertex.auth import get_api_key, validate_api_key
+from app.vertex.model_names import (
+    EXPERIMENTAL_MARKER,
+    OPENAI_DIRECT_SUFFIX,
+    PAY_PREFIX,
+)
 from app.vertex.model_loader import (
     get_vertex_models,
     get_vertex_express_models,
@@ -10,9 +15,8 @@ from app.vertex.model_loader import (
     refresh_models_config_cache,
 )
 import app.vertex.config as app_config
-from app.vertex.credentials_manager import CredentialManager
+from app.vertex.credentials_manager import get_credential_manager
 from app.utils.logging import vertex_log
-from app.config import settings
 
 router = APIRouter(prefix="/models")
 
@@ -21,15 +25,19 @@ security = HTTPBearer()
 
 
 @router.get("/list")
-async def list_models(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def list_models_basic(credentials: HTTPAuthorizationCredentials = Depends(security)):
     """
     List available models for Vertex generation.
 
-    Returns a list of models in OpenAI-compatible format.
+    （历史遗留：本函数原名 list_models，与下方 /v1/models 端点的同名函数
+    在模块命名空间相互遮蔽——路由注册不受影响，但 models_api.list_models
+    符号意外指向后一个定义。现显式改名消除遮蔽。）
     """
     # Validate API key
-    api_key = validate_api_key(credentials)
-    if not api_key:
+    # Bug fix: 此前传入的是 HTTPAuthorizationCredentials 对象而非其中的
+    # token 字符串——validate_api_key 的 isinstance(str) 检查恒 False，
+    # 导致 /models/list 恒 401。对齐 auth.get_api_key 的正确用法。
+    if not validate_api_key(credentials.credentials):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     # Get available models
@@ -107,9 +115,8 @@ async def refresh_models(credentials: HTTPAuthorizationCredentials = Depends(sec
 
     Forces a refresh of the models available from the configuration source.
     """
-    # Validate API key
-    api_key = validate_api_key(credentials)
-    if not api_key:
+    # Validate API key（bug fix 同 /list：此前传入 credentials 对象恒 401）
+    if not validate_api_key(credentials.credentials):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     vertex_log("info", "Attempting to refresh models configuration")
@@ -155,32 +162,13 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
     # refreshes, and startup pre-warms the cache once.
     await get_models_config()
 
-    OPENAI_DIRECT_SUFFIX = "-openai"
-    EXPERIMENTAL_MARKER = "-exp-"
-    PAY_PREFIX = "[PAY]"
+    # 获取credential_manager（共享助手，缺失时兜底新建）
+    credential_manager_instance = get_credential_manager(fastapi_request)
 
-    # 获取credential_manager，如果不存在则创建一个新的
-    try:
-        credential_manager_instance = fastapi_request.app.state.credential_manager
-        vertex_log("info", "Using existing credential manager from app state")
-    except AttributeError:
-        # 如果app.state中没有credential_manager，则创建一个新的
-        vertex_log(
-            "warning", "No credential_manager found in app.state, creating a new one"
-        )
-        credential_manager_instance = CredentialManager()
-
-    # 检查是否有SA凭证和Express Key
+    # 检查是否有SA凭证和Express Key（共享解析助手）
     has_sa_creds = credential_manager_instance.get_total_credentials() > 0
-
-    # 优先从settings中获取EXPRESS API KEY
-    has_express_key = False
-    if hasattr(settings, "VERTEX_EXPRESS_API_KEY") and settings.VERTEX_EXPRESS_API_KEY:
-        vertex_log("info", "使用settings中的VERTEX_EXPRESS_API_KEY")
-        has_express_key = True
-    elif app_config.VERTEX_EXPRESS_API_KEY_VAL:
-        vertex_log("info", "使用app_config中的VERTEX_EXPRESS_API_KEY_VAL")
-        has_express_key = True
+    express_keys = app_config.resolve_express_api_keys()
+    has_express_key = bool(express_keys)
 
     raw_vertex_models = await get_vertex_models()
     raw_express_models = await get_vertex_express_models()
@@ -213,6 +201,47 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
 
     dynamic_models_data: List[Dict[str, Any]] = []
     current_time = int(time.time())
+
+    def add_suffix_variants(
+        suffixes: List[str],
+        log_label: str,
+        base_model_without_prefix: str,
+        current_display_prefix: str,
+        is_express_model: bool,
+    ):
+        """为当前基础模型追加上后缀变体（保留 EXPRESS/PAY 显示前缀）。
+
+        历史版本中标准后缀 / flash 特殊后缀 / pro 特殊后缀三段近同构代码
+        复制三遍，现收敛为单一实现。"""
+        for suffix in suffixes:
+            suffixed_model_part = f"{base_model_without_prefix}{suffix}"
+            # Retain EXPRESS prefix if original model had it
+            if is_express_model:
+                final_suffixed_display_id = f"[EXPRESS] {suffixed_model_part}"
+            else:
+                # 非EXPRESS模型的后缀版本也需要正确显示PAY前缀
+                final_suffixed_display_id = (
+                    f"{current_display_prefix}{suffixed_model_part}"
+                )
+
+            # Check if this suffixed ID is already in all_model_ids (unlikely with prefix) or already added
+            if final_suffixed_display_id not in all_model_ids and not any(
+                m["id"] == final_suffixed_display_id for m in dynamic_models_data
+            ):
+                vertex_log(
+                    "info", f"添加{log_label}模型到列表: {final_suffixed_display_id}"
+                )
+                dynamic_models_data.append(
+                    {
+                        "id": final_suffixed_display_id,
+                        "object": "model",
+                        "created": current_time,
+                        "owned_by": "google",
+                        "permission": [],
+                        "root": base_model_without_prefix,
+                        "parent": None,
+                    }
+                )
 
     # Add base models and their variations
     for original_model_id in sorted(list(all_model_ids)):
@@ -267,112 +296,33 @@ async def list_models(fastapi_request: Request, api_key: str = Depends(get_api_k
         if not base_model_without_prefix.startswith(
             "gemini-2.0"
         ):  # Suffix rules based on original_model_id
-            standard_suffixes = ["-search", "-encrypt", "-encrypt-full", "-auto"]
-            for suffix in standard_suffixes:
-                # Suffix is applied to the original model ID part (without EXPRESS prefix)
-                suffixed_model_part = f"{base_model_without_prefix}{suffix}"
-                # Then the whole thing is prefixed - retain EXPRESS prefix if it was there
-                final_suffixed_display_id = ""
-                if is_express_model:
-                    final_suffixed_display_id = f"[EXPRESS] {suffixed_model_part}"
-                else:
-                    # 非EXPRESS模型的后缀版本也需要正确显示PAY前缀
-                    final_suffixed_display_id = (
-                        f"{current_display_prefix}{suffixed_model_part}"
-                    )
-
-                # Check if this suffixed ID is already in all_model_ids (unlikely with prefix) or already added
-                if final_suffixed_display_id not in all_model_ids and not any(
-                    m["id"] == final_suffixed_display_id for m in dynamic_models_data
-                ):
-                    vertex_log(
-                        "info", f"添加后缀模型到列表: {final_suffixed_display_id}"
-                    )
-                    dynamic_models_data.append(
-                        {
-                            "id": final_suffixed_display_id,
-                            "object": "model",
-                            "created": current_time,
-                            "owned_by": "google",
-                            "permission": [],
-                            "root": base_model_without_prefix,
-                            "parent": None,
-                        }
-                    )
+            add_suffix_variants(
+                ["-search", "-encrypt", "-encrypt-full", "-auto"],
+                "后缀",
+                base_model_without_prefix,
+                current_display_prefix,
+                is_express_model,
+            )
 
         # Apply special suffixes for models starting with "gemini-2.5-flash"
-        if base_model_without_prefix.startswith(
-            "gemini-2.5-flash"
-        ):  # Suffix rules based on original_model_id
-            special_flash_suffixes = ["-nothinking", "-max"]
-            for special_suffix in special_flash_suffixes:
-                suffixed_model_part = f"{base_model_without_prefix}{special_suffix}"
-                # Retain EXPRESS prefix if original model had it
-                if is_express_model:
-                    final_special_suffixed_display_id = (
-                        f"[EXPRESS] {suffixed_model_part}"
-                    )
-                else:
-                    # 非EXPRESS模型的特殊后缀版本也需要正确显示PAY前缀
-                    final_special_suffixed_display_id = (
-                        f"{current_display_prefix}{suffixed_model_part}"
-                    )
-
-                if final_special_suffixed_display_id not in all_model_ids and not any(
-                    m["id"] == final_special_suffixed_display_id
-                    for m in dynamic_models_data
-                ):
-                    vertex_log(
-                        "info",
-                        f"添加特殊后缀模型到列表: {final_special_suffixed_display_id}",
-                    )
-                    dynamic_models_data.append(
-                        {
-                            "id": final_special_suffixed_display_id,
-                            "object": "model",
-                            "created": current_time,
-                            "owned_by": "google",
-                            "permission": [],
-                            "root": base_model_without_prefix,
-                            "parent": None,
-                        }
-                    )
+        if base_model_without_prefix.startswith("gemini-2.5-flash"):
+            add_suffix_variants(
+                ["-nothinking", "-max"],
+                "特殊后缀",
+                base_model_without_prefix,
+                current_display_prefix,
+                is_express_model,
+            )
 
         # Apply special suffixes for gemini-2.5-pro-preview-06-05
         if base_model_without_prefix == "gemini-2.5-pro-preview-06-05":
-            special_pro_suffixes = ["-nothinking", "-max"]
-            for special_suffix in special_pro_suffixes:
-                suffixed_model_part = f"{base_model_without_prefix}{special_suffix}"
-                # Retain EXPRESS prefix if original model had it
-                if is_express_model:
-                    final_special_suffixed_display_id = (
-                        f"[EXPRESS] {suffixed_model_part}"
-                    )
-                else:
-                    # 非EXPRESS模型的特殊后缀版本也需要正确显示PAY前缀
-                    final_special_suffixed_display_id = (
-                        f"{current_display_prefix}{suffixed_model_part}"
-                    )
-
-                if final_special_suffixed_display_id not in all_model_ids and not any(
-                    m["id"] == final_special_suffixed_display_id
-                    for m in dynamic_models_data
-                ):
-                    vertex_log(
-                        "info",
-                        f"添加gemini-2.5-pro-preview-06-05特殊后缀模型到列表: {final_special_suffixed_display_id}",
-                    )
-                    dynamic_models_data.append(
-                        {
-                            "id": final_special_suffixed_display_id,
-                            "object": "model",
-                            "created": current_time,
-                            "owned_by": "google",
-                            "permission": [],
-                            "root": base_model_without_prefix,
-                            "parent": None,
-                        }
-                    )
+            add_suffix_variants(
+                ["-nothinking", "-max"],
+                "gemini-2.5-pro-preview-06-05特殊后缀",
+                base_model_without_prefix,
+                current_display_prefix,
+                is_express_model,
+            )
 
         # Ensure uniqueness again after adding suffixes
         # Add OpenAI direct variations if SA creds are available

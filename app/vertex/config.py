@@ -87,6 +87,30 @@ vertex_log(
 )
 
 
+def resolve_express_api_keys():
+    """解析可用的 Vertex Express API Key 列表（settings 优先，其次影子全局）。
+
+    chat_api（Express 客户端选择）与 models_api（模型列表可见性）共享此
+    解析——历史版本两处各自实现，存在漂移风险。
+    """
+    if hasattr(settings, "VERTEX_EXPRESS_API_KEY") and settings.VERTEX_EXPRESS_API_KEY:
+        keys = [
+            key.strip()
+            for key in settings.VERTEX_EXPRESS_API_KEY.split(",")
+            if key.strip()
+        ]
+        if keys:
+            vertex_log("info", f"Using {len(keys)} Express API keys from settings")
+            return keys
+    if VERTEX_EXPRESS_API_KEY_VAL:
+        vertex_log(
+            "info",
+            f"Using {len(VERTEX_EXPRESS_API_KEY_VAL)} Express API keys from app_config",
+        )
+        return VERTEX_EXPRESS_API_KEY_VAL
+    return []
+
+
 def update_env_var(name, value):
     """Update environment variable in memory."""
     # 确保环境变量值为字符串类型
