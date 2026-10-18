@@ -55,6 +55,17 @@ import app.vertex.config as app_config
 
 router = APIRouter()
 
+# 外部契约符号（测试与调用方锁定，防止未来重构时被误删）：
+# - close_cached_openai_clients: app/main.py lifespan 关闭阶段导入
+# - _get_client_from_pool: tests/test_round3_regressions 的导入契约
+__all__ = [
+    "router",
+    "chat_completions",
+    "close_cached_openai_clients",
+    "_get_client_from_pool",
+    "get_credential_manager",
+]
+
 # 加密协议的 system_instruction 占位符（实际指令在 message_processing 中）
 ENCRYPTION_INSTRUCTIONS_PLACEHOLDER = ["// Protocol Instructions Placeholder //"]
 

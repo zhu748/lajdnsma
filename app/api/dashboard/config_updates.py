@@ -202,8 +202,12 @@ async def _update_search_mode(config_value):
     settings.search["search_mode"] = config_value
     log("info", f"联网搜索模式已更新为：{config_value}")
 
-    # 切换 search_mode 时重取一次可用模型列表（重置密钥栈以保证随机性）
-    runtime.key_manager._reset_key_stack()
+    # 切换 search_mode 时重取一次可用模型列表（重置密钥栈以保证随机性；
+    # 与历史版本一致：重置异常降级 warning，不阻断配置更新）
+    try:
+        runtime.key_manager._reset_key_stack()
+    except Exception as e:
+        log("warning", f"刷新可用模型列表时发生错误: {str(e)}")
     await _refresh_available_models(
         runtime.key_manager.api_keys,
         probe_msg="使用API密钥 key#{key_id} 刷新可用模型列表",
@@ -520,7 +524,11 @@ async def _update_key_rotation_strategy(config_value):
 async def _update_pvp_mode(config_value):
     # Round 8（PVP）：开启后所有请求钉在 pvp_key 指定的 key 上
     # 持续重试（见 app/utils/pvp.py）。
-    config_value = _bool_setting(config_value)
+    # 注：保留历史专属校验文案（其余 bool 配置用通用文案）。
+    if not isinstance(config_value, bool):
+        raise HTTPException(
+            status_code=422, detail="参数类型错误：pvp_mode 应为布尔值"
+        )
     settings.PVP_MODE = config_value
     log("info", f"PVP 模式已更新为：{config_value}")
     # 开启时若未指定 Key，明确提示不会生效（避免运维以为已生效
