@@ -207,11 +207,11 @@ class CooldownClearAfterKeyTestTestCase(unittest.IsolatedAsyncioTestCase):
 
     def test_run_api_key_test_calls_clear_all_cooldowns(self):
         """源码契约：run_api_key_test 的 finally 块必须调用 clear_all_cooldowns。"""
-        source = (ROOT / "app" / "api" / "dashboard.py").read_text(
-            encoding="utf-8"
-        )
+        source = (
+            ROOT / "app" / "api" / "dashboard" / "api_keys.py"
+        ).read_text(encoding="utf-8")
         start = source.index("async def run_api_key_test")
-        end = source.index("@dashboard_router", start)
+        end = source.index("@runtime.dashboard_router", start)
         body = source[start:end]
         self.assertIn("finally:", body)
         self.assertIn(
