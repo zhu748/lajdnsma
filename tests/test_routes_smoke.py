@@ -88,6 +88,7 @@ def load_routes_module():
     fake_response = types.ModuleType("app.utils.response")
     fake_response.ensure_gemini_timing_fields = lambda data: data
     fake_response.openAI_from_Gemini = lambda *args, **kwargs: {"ok": True}
+    fake_response.include_reasoning_for_request = lambda request: True
 
     fake_sse = types.ModuleType("app.utils.sse")
     fake_sse.sse_data = lambda payload: f"data: {payload}\n\n"

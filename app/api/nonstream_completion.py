@@ -61,7 +61,7 @@ async def _run_nonstream_completion(
         )
     except Exception as e:
         handle_gemini_error(e, current_api_key)
-        return "error"
+        return "error", None
     except BaseException:
         # Hardening: `asyncio.CancelledError` is a BaseException (not
         # a subclass of Exception), so the `except Exception` block

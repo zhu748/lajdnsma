@@ -78,7 +78,7 @@ class NonstreamStatusHandlersTestCase(unittest.IsolatedAsyncioTestCase):
 
         class Task:
             def result(self):
-                return "success"
+                return "success", types.SimpleNamespace(data={"ok": True})
 
         class Cache:
             async def get_and_remove(self, key):
@@ -103,7 +103,7 @@ class NonstreamStatusHandlersTestCase(unittest.IsolatedAsyncioTestCase):
 
         class Task:
             def result(self):
-                return "success"
+                return "success", types.SimpleNamespace(data={"ok": True})
 
         class Cache:
             async def get_and_remove(self, key):
@@ -127,7 +127,7 @@ class NonstreamStatusHandlersTestCase(unittest.IsolatedAsyncioTestCase):
 
         class EmptyTask:
             def result(self):
-                return "empty"
+                return "empty", None
 
         class ErrorTask:
             def result(self):
@@ -161,12 +161,12 @@ class NonstreamStatusHandlersTestCase(unittest.IsolatedAsyncioTestCase):
 class StolenCacheTestCase(unittest.IsolatedAsyncioTestCase):
     """R2-M3 回归：任务成功但缓存被并发请求消费时不得崩溃。"""
 
-    async def test_success_with_stolen_cache_returns_error_status(self):
+    async def test_success_with_stolen_cache_still_delivers_task_response(self):
         module = load_status_module()
 
         class SuccessTask:
             def result(self):
-                return "success"
+                return "success", types.SimpleNamespace(data={"ok": True})
 
         class StolenCacheManager:
             """模拟缓存条目已被另一并发请求消费（get_and_remove 未命中）。"""
@@ -175,8 +175,7 @@ class StolenCacheTestCase(unittest.IsolatedAsyncioTestCase):
                 return None, False
 
         request = types.SimpleNamespace(model="m")
-        # 旧实现在此处 cached_response.data 抛 AttributeError（被外层
-        # except 记为该 key error）；现在显式返回 "error" 状态。
+        # 任务直接携带响应；缓存被消费也不能使已成功的上游调用重试。
         status, response, empty_count = await module.handle_nonstream_task_status(
             task=SuccessTask(),
             api_key="apikey123",
@@ -186,8 +185,8 @@ class StolenCacheTestCase(unittest.IsolatedAsyncioTestCase):
             is_gemini=True,
             empty_response_count=0,
         )
-        self.assertEqual(status, "error")
-        self.assertIsNone(response)
+        self.assertEqual(status, "success")
+        self.assertEqual(response["ok"], True)
         self.assertEqual(empty_count, 0)
 
 

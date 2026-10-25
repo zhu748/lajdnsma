@@ -1,4 +1,4 @@
-"""伪流式批次执行器：keepalive 抖动、缓存回放与取消清理。"""
+"""伪流式批次执行器：keepalive 抖动、任务响应输出与取消清理。"""
 import asyncio
 import random
 
@@ -98,7 +98,7 @@ async def run_fake_stream_batch_until_success(
                 if task.cancelled():
                     continue
                 try:
-                    status = task.result()
+                    status, completed_response = task.result()
                     if status == "success":
                         log_request_success(
                             api_key,
@@ -106,22 +106,17 @@ async def run_fake_stream_batch_until_success(
                             model=chat_request.model,
                             label="fake stream request success",
                         )
-                        cached_response, cache_hit = (
-                            await response_cache_manager.get_and_remove(cache_key)
-                        )
-                        if cache_hit and cached_response:
+                        if completed_response is not None:
                             if is_gemini:
                                 json_payload = dump_json_response(
-                                    ensure_gemini_timing_fields(cached_response.data)
+                                    ensure_gemini_timing_fields(completed_response.data)
                                 )
                                 yield "chunk", sse_text(json_payload)
                             else:
-                                # Hardening: stream the cached response back in
-                                # variable-size chunks with jittered delay
-                                # instead of one big dump.  This is closer to
-                                # real streaming behaviour.
+                                # Use this task's own result; cache retention is
+                                # optional and cannot determine delivery success.
                                 full_chunk = openAI_from_Gemini(
-                                    cached_response,
+                                    completed_response,
                                     stream=True,
                                     include_reasoning=include_reasoning_for_request(
                                         chat_request

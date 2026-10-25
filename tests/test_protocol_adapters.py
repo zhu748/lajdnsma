@@ -67,6 +67,54 @@ def _event_payloads(events):
 
 
 class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_adapters_preserve_fragmented_utf8_and_sse_boundaries(self):
+        text = "你好 世界🙂"
+        event = {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}
+        for converter in (openai_stream_to_responses_stream, openai_stream_to_claude_stream):
+            for newline in ("\n", "\r\n", "\r"):
+                wire = ("data: " + json.dumps(event, ensure_ascii=False) + newline * 2).encode("utf-8")
+                chinese = wire.index("你".encode("utf-8"))
+                fragments = [[wire[:cut], wire[cut:]] for cut in (1, 9, chinese + 1, chinese + 2, len(wire) - 1)]
+                fragments.append([wire[i:i + 1] for i in range(len(wire))])
+                for chunks in fragments:
+                    with self.subTest(converter=converter.__name__, newline=newline, chunks=len(chunks)):
+                        output = [chunk async for chunk in converter(_iter_chunks(chunks), "test-model")]
+                        payloads = _event_payloads(output)
+                        if converter is openai_stream_to_responses_stream:
+                            actual = "".join(p["delta"] for p in payloads if p.get("type") == "response.output_text.delta")
+                            self.assertTrue(any(p.get("type") == "response.completed" for p in payloads))
+                        else:
+                            actual = "".join(p["delta"]["text"] for p in payloads if p.get("delta", {}).get("type") == "text_delta")
+                            self.assertTrue(any(p.get("type") == "message_stop" for p in payloads))
+                        self.assertEqual(actual, text)
+
+    async def test_closing_protocol_stream_closes_original_source(self):
+        for converter in (openai_stream_to_responses_stream, openai_stream_to_claude_stream):
+            closed = []
+            async def source():
+                try:
+                    yield 'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+                    yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+                finally:
+                    closed.append(True)
+
+            stream = converter(source(), "test-model")
+            async for chunk in stream:
+                if "response.output_text.delta" in chunk or '"type": "text_delta"' in chunk:
+                    break
+            await stream.aclose()
+            self.assertEqual(closed, [True])
+
+    async def test_stream_parser_stops_at_done_and_ignores_incomplete_events(self):
+        from app.utils.protocol_common import _iter_sse_json_events
+        for wire, expected in (
+            ('data: {"a":1}\n\ndata: [DONE]\n\ndata: {"a":2}\n\n', [{"a": 1}]),
+            ('data: {"a":1}\n\ndata: {"a":2}', [{"a": 1}]),
+            ('\ufeff: comment\r\nevent: message\r\ndata: {"a":\r\ndata: 1}\r\n\r\n', [{"a": 1}]),
+        ):
+            actual = [event async for event in _iter_sse_json_events(_iter_chunks([wire]))]
+            self.assertEqual(actual, expected)
+
     def test_response_request_to_chat_request(self):
         request = response_request_to_chat_request(
             {

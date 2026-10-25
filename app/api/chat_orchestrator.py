@@ -1,4 +1,5 @@
 """aistudio chat completions 的编排器：限流 → 缓存 → 请求合并 → 派发。"""
+from functools import partial
 from fastapi import HTTPException, status
 
 import app.config.settings as settings
@@ -16,6 +17,7 @@ from app.api.request_helpers import (
     wait_for_existing_task,
 )
 from app.utils import log, protect_from_abuse
+from app.utils.response import include_reasoning_for_request
 
 
 async def handle_aistudio_chat_completion(
@@ -67,8 +69,11 @@ async def handle_aistudio_chat_completion(
         extra={"request_type": "non-stream", "model": request.model},
     )
 
+    get_cache_for_request = partial(
+        runtime.get_cache, include_reasoning=include_reasoning_for_request(request)
+    )
     cached_response = await get_cached_response_or_none(
-        runtime.get_cache,
+        get_cache_for_request,
         cache_key,
         is_stream=request.stream,
         is_gemini=is_gemini,
@@ -122,7 +127,7 @@ async def handle_aistudio_chat_completion(
         public_mode=settings.PUBLIC_MODE,
         active_requests_manager=runtime.active_requests_manager,
         pool_key=pool_key,
-        get_cache_func=runtime.get_cache,
+        get_cache_func=get_cache_for_request,
         cache_key=cache_key,
         is_stream=request.stream,
         is_gemini=is_gemini,

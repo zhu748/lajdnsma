@@ -1,8 +1,10 @@
 """protocol 系列共享底座：时间戳、usage 归一化、SSE 解析。"""
+import codecs
+import io
 import json
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List
+from typing import Any, AsyncIterator, Dict, List
 
 from app.utils.sse import sse_data
 from app.utils.stealth import (
@@ -119,6 +121,42 @@ def _ensure_list(value: Any) -> List[Any]:
 
 def _sse_data(payload: Dict[str, Any]) -> str:
     return sse_data(payload)
+
+
+async def _iter_sse_json_events(body_iterator) -> AsyncIterator[Dict[str, Any]]:
+    """Decode UTF-8 and frame SSE events independently of transport chunks."""
+    decoder = io.IncrementalNewlineDecoder(
+        codecs.getincrementaldecoder("utf-8-sig")(), translate=True
+    )
+    buffer = ""
+    finished = False
+
+    def feed(text):
+        nonlocal buffer, finished
+        buffer += text
+        while "\n\n" in buffer:
+            event, buffer = buffer.split("\n\n", 1)
+            if any(line.startswith("data:") and line[5:].strip() == "[DONE]" for line in event.splitlines()):
+                finished = True
+                return
+            for parsed in _parse_sse_json_events(event):
+                if isinstance(parsed, dict):
+                    yield parsed
+
+    try:
+        async for chunk in body_iterator:
+            encoded = chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk)
+            for event in feed(decoder.decode(encoded)):
+                yield event
+            if finished:
+                return
+        for event in feed(decoder.decode(b"", final=True)):
+            yield event
+        # An unfinished event at EOF is discarded, as required by SSE framing.
+    finally:
+        close = getattr(body_iterator, "aclose", None)
+        if close is not None:
+            await close()
 
 
 def _parse_sse_json_events(chunk: str) -> List[Dict[str, Any]]:

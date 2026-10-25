@@ -1,4 +1,5 @@
 """流式协议转换：chat SSE → Responses / Claude SSE。"""
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Dict, List
 
 from app.utils.protocol_common import (
@@ -7,7 +8,7 @@ from app.utils.protocol_common import (
     _now_ts,
     _now_iso_rfc3339,
     _openai_finish_reason_to_claude_stop_reason,
-    _parse_sse_json_events,
+    _iter_sse_json_events,
     _sse_data,
     _gen_response_id,
     _gen_message_id,
@@ -95,9 +96,8 @@ async def openai_stream_to_responses_stream(
             "usage": latest_usage,
         }
 
-    async for raw_chunk in body_iterator:
-        chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
-        for parsed in _parse_sse_json_events(chunk):
+    async with aclosing(_iter_sse_json_events(body_iterator)) as events:
+        async for parsed in events:
             choice = (parsed.get("choices") or [{}])[0]
             delta = choice.get("delta", {})
             text = delta.get("content")
@@ -416,9 +416,8 @@ async def openai_stream_to_claude_stream(
             },
         )
 
-    async for raw_chunk in body_iterator:
-        chunk = raw_chunk.decode("utf-8") if isinstance(raw_chunk, bytes) else raw_chunk
-        for parsed in _parse_sse_json_events(chunk):
+    async with aclosing(_iter_sse_json_events(body_iterator)) as events:
+        async for parsed in events:
             # Emit Anthropic keepalive `ping` event periodically.
             ping = maybe_ping()
             if ping:

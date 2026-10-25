@@ -53,4 +53,4 @@ async def handle_fake_streaming(
         )
     except Exception as e:
         handle_gemini_error(e, api_key)
-        return "error"
+        return "error", None

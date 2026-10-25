@@ -69,7 +69,7 @@ async def _one_shot(payload: str):
     yield payload
 
 
-async def get_cache(cache_key, is_stream: bool, is_gemini=False):
+async def get_cache(cache_key, is_stream: bool, is_gemini=False, *, include_reasoning=True):
     # Hardening: 与路由层同模式 —— 裸 assert 在 python -O 下消失，
     # None 缓存管理器会在下游抛 AttributeError；显式报错语义更清晰。
     if response_cache_manager is None:
@@ -80,7 +80,7 @@ async def get_cache(cache_key, is_stream: bool, is_gemini=False):
         log(
             "info",
             f"缓存命中: {cache_key[:8]}...",
-            extra={"request_type": "non-stream", "model": cached_response.model},
+            extra={"request_type": "stream" if is_stream else "non-stream", "model": cached_response.model},
         )
 
         if is_gemini:
@@ -90,8 +90,8 @@ async def get_cache(cache_key, is_stream: bool, is_gemini=False):
             return ensure_gemini_timing_fields(cached_response.data)
 
         if is_stream:
-            chunk = openAI_from_Gemini(cached_response, stream=True)
+            chunk = openAI_from_Gemini(cached_response, stream=True, include_reasoning=include_reasoning)
             return _single_chunk_response(f"{chunk}{sse_done()}")
-        return openAI_from_Gemini(cached_response, stream=False)
+        return openAI_from_Gemini(cached_response, stream=False, include_reasoning=include_reasoning)
 
     return None

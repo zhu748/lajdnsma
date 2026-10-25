@@ -44,7 +44,7 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
         fake_response = types.ModuleType("app.utils.response")
         fake_response.ensure_gemini_timing_fields = lambda data: data
         fake_response.openAI_from_Gemini = (
-            lambda cached_response, stream=True: "data: openai\n\n"
+            lambda cached_response, stream=True, include_reasoning=True: "data: openai\n\n"
         )
 
         fake_sse = types.ModuleType("app.utils.sse")
@@ -303,7 +303,7 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
             response_cache_manager=cache,
             cache_key="abc",
         )
-        self.assertEqual(result, "success")
+        self.assertEqual(result, ("success", response))
         self.assertEqual(response.model, "gemini-2.5-pro")
         self.assertEqual(len(cache.items), 1)
         self.assertEqual(len(update_calls), 1)
@@ -317,7 +317,7 @@ class RuntimeHelpersTestCase(unittest.IsolatedAsyncioTestCase):
             cache_key="empty",
             update_stats=False,
         )
-        self.assertEqual(empty_result, "empty")
+        self.assertEqual(empty_result, ("empty", None))
         self.assertTrue(log_calls)
 
 

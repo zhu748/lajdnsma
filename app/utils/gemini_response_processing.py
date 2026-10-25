@@ -40,6 +40,7 @@ async def finalize_gemini_response(
     cache_key: str,
     update_stats: bool = True,
 ):
+    """Return (status, response); cache retention never owns delivery of a result."""
     response_content.set_model(model)
     key_id = "key#" + str(hash(api_key) & 0xFFFFFF)
 
@@ -49,9 +50,13 @@ async def finalize_gemini_response(
             f"{key_id} 返回空响应",
             extra={"key": key_id, "request_type": request_type, "model": model},
         )
-        return "empty"
+        return "empty", None
 
-    await response_cache_manager.store(cache_key, response_content)
+    try:
+        await response_cache_manager.store(cache_key, response_content)
+    except Exception:
+        # 缓存是可选加速层，写入失败不能丢弃已完成响应并重复调用上游。
+        log("warning", "响应缓存写入失败，继续返回已完成的响应", extra={"model": model})
 
     if update_stats:
         await update_api_call_stats(
@@ -61,4 +66,4 @@ async def finalize_gemini_response(
             token=response_content.total_token_count,
         )
 
-    return "success"
+    return "success", response_content

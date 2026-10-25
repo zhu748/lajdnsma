@@ -71,7 +71,7 @@ def load_fake_batch_runner():
 class FakeStreamBatchRunnerTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_success_yields_cached_response_and_summary(self):
         module = load_fake_batch_runner()
-        task = done_future("success")
+        task = done_future(("success", types.SimpleNamespace(data={"ok": True})))
 
         class Cache:
             async def get_and_remove(self, key):
@@ -99,7 +99,7 @@ class FakeStreamBatchRunnerTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_success_cancels_pending_attempts(self):
         module = load_fake_batch_runner()
-        success_task = done_future("success")
+        success_task = done_future(("success", types.SimpleNamespace(data={"ok": True})))
         pending_task = asyncio.create_task(asyncio.sleep(60))
 
         class Cache:
@@ -125,7 +125,7 @@ class FakeStreamBatchRunnerTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_empty_exhausts_with_updated_count(self):
         module = load_fake_batch_runner()
-        task = done_future("empty")
+        task = done_future(("empty", None))
         settings = types.SimpleNamespace(FAKE_STREAMING_INTERVAL=0.01, MAX_EMPTY_RESPONSES=3)
         request = types.SimpleNamespace(model="m")
         items = []
@@ -147,7 +147,7 @@ class FakeStreamBatchRunnerTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def test_timeout_yields_keepalive_then_can_finish(self):
         module = load_fake_batch_runner()
-        task = asyncio.create_task(asyncio.sleep(0.02, result="empty"))
+        task = asyncio.create_task(asyncio.sleep(0.02, result=("empty", None)))
         settings = types.SimpleNamespace(FAKE_STREAMING_INTERVAL=0.001, MAX_EMPTY_RESPONSES=3)
         request = types.SimpleNamespace(model="m")
         items = []

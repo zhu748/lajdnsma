@@ -46,6 +46,8 @@ def load_chat_orchestrator():
     fake_utils.protect_from_abuse = protect_from_abuse
     fake_utils.log = lambda *args, **kwargs: log_calls.append((args, kwargs))
     fake_utils.generate_cache_key = lambda *args, **kwargs: "cache-key"
+    fake_response = types.ModuleType("app.utils.response")
+    fake_response.include_reasoning_for_request = lambda request: True
 
     fake_error_handling = types.ModuleType("app.utils.error_handling")
     fake_error_handling.sanitize_string = lambda text: text
@@ -57,6 +59,7 @@ def load_chat_orchestrator():
         "app.config.settings": fake_settings,
         "app.config": fake_config_pkg,
         "app.utils": fake_utils,
+        "app.utils.response": fake_response,
         "app.utils.error_handling": fake_error_handling,
     }
 
@@ -133,7 +136,7 @@ class ChatOrchestratorTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_returns_cached_response_before_creating_task(self):
         module = load_chat_orchestrator()
 
-        async def get_cache(cache_key, *, is_stream, is_gemini):
+        async def get_cache(cache_key, *, is_stream, is_gemini, include_reasoning=True):
             return {"cached": cache_key, "stream": is_stream, "gemini": is_gemini}
 
         runtime = types.SimpleNamespace(get_cache=get_cache)
@@ -162,7 +165,7 @@ class ChatOrchestratorTestCase(unittest.IsolatedAsyncioTestCase):
     async def test_creates_process_task_and_registers_active_request(self):
         module = load_chat_orchestrator()
 
-        async def get_cache(cache_key, *, is_stream, is_gemini):
+        async def get_cache(cache_key, *, is_stream, is_gemini, include_reasoning=True):
             return None
 
         async def process_request(**kwargs):
