@@ -31,11 +31,11 @@ async def fetch_and_parse_models_config() -> Optional[Dict[str, List[str]]]:
         vertex_log("info", "使用app_config中的MODELS_CONFIG_URL")
 
     if not models_config_url:
-        vertex_log("error", "MODELS_CONFIG_URL is not set in the environment/config.")
-        vertex_log("info", "Using default model configuration with empty lists.")
+        vertex_log("error", f"未配置模型配置地址 MODELS_CONFIG_URL")
+        vertex_log("info", f"使用默认的空模型配置")
         return {"vertex_models": [], "vertex_express_models": []}
 
-    vertex_log("info", f"Fetching model configuration from: {models_config_url}")
+    vertex_log("info", f"正在获取模型配置：{models_config_url}")
 
     # 添加重试机制
     # Hardening: previously used classic exponential backoff
@@ -169,14 +169,14 @@ async def get_models_config() -> Dict[str, List[str]]:
     global _model_cache
     async with _cache_lock:
         if _model_cache is None:
-            vertex_log("info", "Model cache is empty. Fetching configuration...")
+            vertex_log("info", f"模型缓存为空，正在获取配置")
             _model_cache = await fetch_and_parse_models_config()
             if (
                 _model_cache is None
             ):  # If fetching failed, use a default empty structure
                 vertex_log(
                     "warning",
-                    "Using default empty model configuration due to fetch/parse failure.",
+                    f"模型配置获取或解析失败，使用默认空配置",
                 )
                 _model_cache = {"vertex_models": [], "vertex_express_models": []}
     return _model_cache
@@ -198,15 +198,15 @@ async def refresh_models_config_cache() -> bool:
     Returns True if successful, False otherwise.
     """
     global _model_cache
-    vertex_log("info", "Attempting to refresh model configuration cache...")
+    vertex_log("info", f"正在刷新模型配置缓存")
     async with _cache_lock:
         new_config = await fetch_and_parse_models_config()
         if new_config is not None:
             _model_cache = new_config
-            vertex_log("info", "Model configuration cache refreshed successfully.")
+            vertex_log("info", f"模型配置缓存刷新成功")
             return True
         else:
-            vertex_log("error", "Failed to refresh model configuration cache.")
+            vertex_log("error", f"模型配置缓存刷新失败")
             # Optionally, decide if we want to clear the old cache or keep it
             # _model_cache = {"vertex_models": [], "vertex_express_models": []} # To clear
             return False

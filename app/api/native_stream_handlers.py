@@ -90,7 +90,7 @@ async def generate_native_stream_chunks(
                     model=chat_request.model,
                     empty_response_count=0,
                     max_empty_responses=settings.MAX_EMPTY_RESPONSES,
-                    label="stream returned empty response count",
+                    label="流式空响应次数",
                 )
                 empty = True
                 await update_api_call_stats(
@@ -107,7 +107,7 @@ async def generate_native_stream_chunks(
             request_type="stream",
             model=chat_request.model,
             error_detail=error_detail,
-            label="stream response request failed",
+            label="流式响应请求失败",
         )
     finally:
         # Resource-safety: 客户端断开时本生成器被关闭（GeneratorExit 在

@@ -16,6 +16,7 @@ from app.services.gemini import GeminiResponseWrapper
 from app.utils.auth import custom_verify_password
 from app.utils.cache import ResponseCacheManager
 from app.utils.request import ActiveRequestsManager
+from app.utils.logging import log_manager
 import app.config.settings as settings
 
 calls = 0
@@ -26,7 +27,7 @@ async def complete(*args, **kwargs):
         "candidates": [{"content": {"role": "model", "parts": [
             {"text": "secret-thought", "thought": True}, {"text": "答案"},
         ]}, "finishReason": "STOP"}],
-        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "totalTokenCount": 2},
+        "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1, "thoughtsTokenCount": 3, "totalTokenCount": 5},
     })
 
 async def select(**kwargs):
@@ -58,10 +59,20 @@ route_runtime.safety_settings = []
 route_runtime.safety_settings_g2 = []
 
 def request(client, stream, expose=False):
-    return client.post("/v1/chat/completions", json={
+    before = {entry.get("request_id") for entry in log_manager.get_recent_logs(500) if entry.get("event") == "request_completed"}
+    response = client.post("/v1/chat/completions", json={
         "model": "gemini-2.5-pro", "messages": [{"role": "user", "content": "hi"}],
         "stream": stream, "expose_reasoning": expose,
     })
+    summaries = [entry for entry in log_manager.get_recent_logs(500) if entry.get("event") == "request_completed" and entry["request_id"] not in before]
+    assert len(summaries) == 1, summaries
+    report = summaries[0]
+    assert report["outcome"] == "成功", report
+    assert report["usage"]["reasoning_tokens"] == 3, report
+    assert report["usage"]["total_tokens"] == 5, report
+    assert report["response_preview"] == "答案", report
+    assert bool(report["reasoning_preview"]) == expose, report
+    return response
 
 with (
     patch.object(GeminiClient, "complete_chat", complete),
@@ -95,6 +106,21 @@ with (
                 assert "答案" in second.text
                 assert ("secret-thought" in second.text) == expose, second.text
                 assert calls == before + 1, "the second request should hit cache"
+                assert log_manager.get_recent_logs()[-1]["source"] == "缓存"
+
+        # 协议适配可能不向客户端暴露 reasoning_tokens，日志仍须保留上游明确提供的思考用量。
+        settings.NONSTREAM_KEEPALIVE_ENABLED = True
+        for route, extra in (("/v1/responses", {"input": "hi"}), ("/v1/messages", {"messages": [{"role": "user", "content": "hi"}]})):
+            for stream in (False, True):
+                route_runtime.response_cache_manager = ResponseCacheManager(600, 20)
+                ids = {e.get("request_id") for e in log_manager.get_recent_logs(500) if e.get("event") == "request_completed"}
+                response = client.post(route, json={"model": "gemini-2.5-pro", "stream": stream, **extra})
+                assert response.status_code == 200, response.text
+                reports = [e for e in log_manager.get_recent_logs(500) if e.get("event") == "request_completed" and e["request_id"] not in ids]
+                assert len(reports) == 1, reports
+                assert reports[0]["usage"]["reasoning_tokens"] == 3, reports
+                assert reports[0]["usage"]["total_tokens"] == 5, reports
+                assert reports[0]["response_preview"] == "答案", reports
     finally:
         client.close()
 '''

@@ -262,7 +262,7 @@ def schedule_key_cooldown(error, api_key: str) -> None:
 
             await mark_key_failure(api_key, status_code, cooldown_seconds=retry_delay)
         except Exception:  # pragma: no cover - defensive
-            logger.debug("schedule_key_cooldown: mark_key_failure failed", exc_info=True)
+            logger.debug(f"记录密钥失败状态时发生错误", exc_info=True)
 
     try:
         task = loop.create_task(_mark())
@@ -353,7 +353,7 @@ def handle_gemini_error(error, current_api_key) -> str:
                 error_data = error.response.json()
                 if "error" in error_data:
                     if error_data["error"].get("code") == "invalid_argument":
-                        error_message = "Invalid request argument"
+                        error_message = "请求参数无效"
                         log(
                             "ERROR",
                             f"{key_for_log} → 无效参数",
@@ -365,20 +365,20 @@ def handle_gemini_error(error, current_api_key) -> str:
                     detail_message = sanitize_string(
                         error_data["error"].get("message", "Bad Request")
                     )
-                    error_message = f"400 Bad Request: {detail_message}"
+                    error_message = f"400 请求参数错误：{detail_message}"
                     log("WARNING", error_message, extra=log_extra)
                     return error_message
                 # 如果 'error' 键不存在，提供一个通用的400错误信息
-                error_message = "400 Bad Request: unexpected response shape"
+                error_message = "400 请求参数错误：上游响应结构异常"
                 log("WARNING", error_message, extra=log_extra)
                 return error_message
             except (ValueError, json.JSONDecodeError):
-                error_message = "400 Bad Request: response was not valid JSON"
+                error_message = "400 请求参数错误：上游未返回有效 JSON"
                 log("WARNING", error_message, extra=log_extra)
                 return error_message
 
         elif status_code == 403:
-            error_message = "Permission denied"
+            error_message = "访问被拒绝，请检查密钥权限和服务开通状态"
             # Round 6（详细日志）：403 的上游 message 能区分
             # "key 无效" / "API 未开启" / "地区限制"等不同原因。
             summary = summarize_upstream_error(error.response)
@@ -390,14 +390,14 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
         elif status_code == 429:
-            error_message = "Rate limited or quota exhausted"
+            error_message = "请求受限或配额已耗尽"
             # Round 6（详细日志 + 冷却精度）：429 摘要包含配额维度
             # （PerMinute/PerDay）与 retryDelay，运维能直接看出是哪种
             # 配额耗尽；冷却时长已由 schedule_key_cooldown 按
             # retryDelay 调整。
             summary = summarize_upstream_error(error.response)
             retry_delay = extract_retry_delay(error.response)
-            delay_hint = f" retryDelay={retry_delay:.0f}s" if retry_delay else ""
+            delay_hint = f"，建议等待 {retry_delay:.0f} 秒后重试" if retry_delay else ""
             log(
                 "WARNING",
                 f"{error_message}{delay_hint}: {summary}" if summary else f"{error_message}{delay_hint}",
@@ -407,7 +407,7 @@ def handle_gemini_error(error, current_api_key) -> str:
 
         elif status_code == 500:
             # 不再在返回给客户端的消息里写 "Gemini API 内部错误"
-            error_message = "Upstream internal error"
+            error_message = "上游服务内部错误"
             summary = summarize_upstream_error(error.response)
             log(
                 "WARNING",
@@ -417,7 +417,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
         elif status_code == 503:
-            error_message = "Upstream service unavailable"
+            error_message = "上游服务暂时不可用"
             summary = summarize_upstream_error(error.response)
             log(
                 "WARNING",
@@ -427,7 +427,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
         else:
-            error_message = f"Upstream HTTP error: {status_code}"
+            error_message = f"上游 HTTP 请求失败：状态码 {status_code}"
             summary = summarize_upstream_error(error.response)
             log(
                 "WARNING",
@@ -437,7 +437,7 @@ def handle_gemini_error(error, current_api_key) -> str:
             return error_message
 
     elif isinstance(error, httpx.TimeoutException):
-        error_message = "Request timed out"
+        error_message = "上游请求超时"
         log(
             "WARNING",
             f"{error_message}: {sanitized_full_error_str}",
@@ -446,7 +446,7 @@ def handle_gemini_error(error, current_api_key) -> str:
         return error_message
 
     elif isinstance(error, httpx.ConnectError):
-        error_message = "Connection error"
+        error_message = "连接上游服务失败"
         log(
             "WARNING",
             f"{error_message}: {sanitized_full_error_str}",
@@ -456,7 +456,7 @@ def handle_gemini_error(error, current_api_key) -> str:
 
     else:
         # 处理所有其他未知异常
-        error_message = f"Unexpected error: {sanitized_full_error_str}"
+        error_message = f"未预期错误：{sanitized_full_error_str}"
         log("ERROR", error_message, extra={"key": key_for_log})
         return error_message
 
@@ -469,11 +469,11 @@ def translate_error(message: str) -> str:
     """
     lower = message.lower()
     if "quota exceeded" in lower:
-        return "Rate limited or quota exhausted"
+        return "请求受限或配额已耗尽"
     if "invalid argument" in lower:
-        return "Invalid request argument"
+        return "请求参数无效"
     if "internal server error" in lower:
-        return "Upstream internal error"
+        return "上游服务内部错误"
     if "service unavailable" in lower:
-        return "Upstream service unavailable"
+        return "上游服务暂时不可用"
     return message

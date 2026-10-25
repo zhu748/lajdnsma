@@ -26,6 +26,7 @@ from app.vertex.vertex_ai_init import init_vertex_ai
 from app.vertex.credentials_manager import CredentialManager
 from app.utils.http_client import close_async_client
 from app.utils.maintenance import install_async_exception_handler
+from app.utils.request_reporting import RequestReportingMiddleware
 import app.config.settings as settings
 from app.config.safety import SAFETY_SETTINGS, SAFETY_SETTINGS_G2
 import asyncio
@@ -140,6 +141,8 @@ if settings.ALLOWED_ORIGINS:
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Accept"],
     )
+
+app.add_middleware(RequestReportingMiddleware)
 
 # --------------- 全局实例 ---------------
 load_settings()
@@ -371,14 +374,14 @@ async def _shutdown():
     try:
         await shutdown_scheduler()
     except Exception as e:
-        log("error", f"shutdown_scheduler error: {str(e)}")
+        log("error", f"关闭后台调度器失败：{str(e)}")
     # 释放 Vertex OpenAI Direct 路径缓存的客户端连接池
     try:
         from app.vertex.routes.chat_api import close_cached_openai_clients
 
         await close_cached_openai_clients()
     except Exception as e:
-        log("error", f"close_cached_openai_clients error: {str(e)}")
+        log("error", f"关闭 OpenAI 客户端缓存失败：{str(e)}")
     await close_async_client()
 
 
@@ -401,7 +404,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     extra_log_unhandled_exception = {"status_code": 500, "error_message": error_message}
     log(
         "error",
-        f"Unhandled exception: {error_message}",
+        f"未处理异常：{error_message}",
         extra=extra_log_unhandled_exception,
     )
     # Return a generic message to the client — no internal details.

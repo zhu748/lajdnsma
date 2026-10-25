@@ -115,7 +115,7 @@ def _resolve_responses_model_alias(request):
         request,
         "RESPONSES_MODEL_ALIASES",
         "RESPONSES_DEFAULT_MODEL",
-        "Responses model mapped to Gemini model",
+        "Responses 模型已映射到 Gemini 模型",
     )
 
 

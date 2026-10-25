@@ -35,11 +35,11 @@ async def get_dashboard_data(_: None = Depends(require_dashboard_token)):
     time_series_data, tokens_time_series = api_stats_manager.get_time_series_data(30, now)
     api_key_stats = api_stats_manager.get_api_key_stats(runtime.key_manager.api_keys)
 
-    # 根据 ENABLE_VERTEX 设置决定返回哪种日志
-    if settings.ENABLE_VERTEX:
-        recent_logs = vertex_log_manager.get_recent_logs(500)  # 最近500条Vertex日志
-    else:
-        recent_logs = log_manager.get_recent_logs(500)  # 最近500条普通日志
+    # 网关校验/请求摘要与 Vertex 运行日志同时可见，切换模式不能隐藏错误。
+    recent_logs = sorted(
+        log_manager.get_recent_logs(500) + vertex_log_manager.get_recent_logs(500),
+        key=lambda entry: (entry.get("timestamp", ""), entry.get("created_ns", 0)),
+    )[-500:]
 
     # 缓存与活跃请求统计
     total_cache = runtime.response_cache_manager.cur_cache_num

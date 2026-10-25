@@ -45,7 +45,7 @@ async def create_embedding(
     except Exception as e:
         # Hardening: the raw exception text can embed upstream URLs or key
         # fragments — log it internally, return a neutral message.
-        log("ERROR", f"An unexpected error occurred: {e}")
+        log("ERROR", f"处理请求时发生未预期错误：{e}")
         raise HTTPException(
             status_code=500, detail="An unexpected error occurred"
         )
@@ -81,7 +81,7 @@ async def vector_query(
     except HTTPException:
         raise
     except Exception as e:
-        log("ERROR", f"An unexpected error occurred during vector query: {e}")
+        log("ERROR", f"向量查询发生未预期错误：{e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred during vector query")
 
 
@@ -113,5 +113,5 @@ async def vector_insert(
     except HTTPException:
         raise
     except Exception as e:
-        log("ERROR", f"An unexpected error occurred during vector insert: {e}")
+        log("ERROR", f"向量写入发生未预期错误：{e}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred during vector insert")

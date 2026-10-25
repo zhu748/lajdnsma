@@ -67,6 +67,19 @@ def _event_payloads(events):
 
 
 class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_responses_preserves_truncated_outputs_in_json_and_streams(self):
+        response = {"choices": [{"message": {"content": "partial"}, "finish_reason": "length"}], "usage": {}}
+        converted = openai_chat_to_response_api(response)
+        self.assertEqual(converted["status"], "incomplete")
+        self.assertEqual(converted["incomplete_details"], {"reason": "max_output_tokens"})
+        event = {"choices": [{"delta": {"content": "partial"}, "finish_reason": "length"}]}
+        chunks = [chunk async for chunk in openai_stream_to_responses_stream(_iter_chunks(["data: " + json.dumps(event) + "\n\n"]), "test-model")]
+        payloads = _event_payloads(chunks)
+        self.assertFalse(any(p["type"] == "response.completed" for p in payloads))
+        last = next(p for p in payloads if p["type"] == "response.incomplete")
+        self.assertEqual(last["response"]["status"], "incomplete")
+        self.assertEqual(last["response"]["incomplete_details"]["reason"], "max_output_tokens")
+
     async def test_stream_adapters_preserve_fragmented_utf8_and_sse_boundaries(self):
         text = "你好 世界🙂"
         event = {"choices": [{"delta": {"content": text}, "finish_reason": "stop"}]}

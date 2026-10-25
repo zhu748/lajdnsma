@@ -257,6 +257,10 @@ class GeminiResponseWrapper:
         return self._total_token_count
 
     @property
+    def thoughts_token_count(self) -> Optional[int]:
+        return (self._data.get("usageMetadata") or {}).get("thoughtsTokenCount")
+
+    @property
     def thoughts(self) -> Optional[str]:
         return self._thoughts
 

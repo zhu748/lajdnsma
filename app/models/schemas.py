@@ -68,6 +68,7 @@ class Usage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    completion_tokens_details: Optional[Dict[str, int]] = None
 
 
 class ResponseMessage(BaseModel):

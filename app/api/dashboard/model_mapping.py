@@ -87,7 +87,7 @@ async def _update_model_mapping(
     save_settings()
     log(
         "info",
-        f"{log_label} model mapping updated: default={default_model or 'auto'}, aliases={len(aliases)}",
+        f"{log_label} 模型映射已更新：默认模型={default_model or '自动选择'}，别名={len(aliases)} 条",
     )
     return {
         "status": "success",

@@ -36,7 +36,7 @@ async def handle_fake_streaming(
         )
         log(
             "info",
-            "fake stream response received; caching result",
+            f"伪流式上游响应已收到，正在保存缓存",
             extra={
                 "key": "key#" + str(hash(api_key) & 0xFFFFFF),
                 "request_type": "fake-stream",

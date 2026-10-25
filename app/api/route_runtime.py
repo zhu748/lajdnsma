@@ -80,7 +80,7 @@ async def get_cache(cache_key, is_stream: bool, is_gemini=False, *, include_reas
         log(
             "info",
             f"缓存命中: {cache_key[:8]}...",
-            extra={"request_type": "stream" if is_stream else "non-stream", "model": cached_response.model},
+            extra={"request_type": "stream" if is_stream else "non-stream", "model": cached_response.model, "cache_hit": True},
         )
 
         if is_gemini:

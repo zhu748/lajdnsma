@@ -79,10 +79,9 @@ def _resolve_express_client(request_model: str, base_model_name: str):
     express_api_keys_list = app_config.resolve_express_api_keys()
     if not express_api_keys_list:
         error_msg = (
-            f"Model '{request_model}' is an Express model and requires an "
-            f"Express API key, but none are configured."
+            f"模型 {request_model} 需要 Express 密钥，但当前未配置"
         )
-        vertex_log("error", error_msg)
+        vertex_log("error", f"请求处理失败：{error_msg}")
         return None, JSONResponse(
             status_code=401,
             content=create_openai_error_response(401, error_msg, "authentication_error"),
@@ -90,7 +89,7 @@ def _resolve_express_client(request_model: str, base_model_name: str):
 
     vertex_log(
         "info",
-        f"INFO: Attempting Vertex Express Mode for model request: {request_model} (base: {base_model_name})",
+        f"尝试 Vertex Express 模式：请求模型={request_model}，基础模型={base_model_name}",
     )
     indexed_keys = list(enumerate(express_api_keys_list))
     random.shuffle(indexed_keys)
@@ -101,23 +100,21 @@ def _resolve_express_client(request_model: str, base_model_name: str):
             client_to_use = genai.Client(vertexai=True, api_key=key_val)
             vertex_log(
                 "info",
-                f"INFO: Using Vertex Express Mode for model {request_model} (base: {base_model_name}) "
-                f"with API key (original index: {original_idx}).",
+                f"模型 {request_model} 使用 Vertex Express 模式，基础模型={base_model_name}，密钥序号={original_idx}",
             )
             break  # Successfully initialized client
         except Exception as e:
             vertex_log(
                 "warning",
-                f"WARNING: Vertex Express Mode client init failed for API key (original index: {original_idx}) "
-                f"for model {request_model}: {e}. Trying next key.",
+                f"Vertex Express 客户端初始化失败，密钥序号={original_idx}，模型={request_model}，错误={e}；尝试下一个密钥",
             )
             client_to_use = None  # Ensure client_to_use is None for this attempt
 
     if client_to_use is None:  # All configured Express keys failed
         error_msg = (
-            f"All configured Express API keys failed to initialize for model '{request_model}'."
+            f"模型 {request_model} 的全部 Express 密钥均初始化失败"
         )
-        vertex_log("error", error_msg)
+        vertex_log("error", f"请求处理失败：{error_msg}")
         return None, JSONResponse(
             status_code=500,
             content=create_openai_error_response(500, error_msg, "server_error"),
@@ -133,8 +130,7 @@ def _resolve_sa_client(credential_manager_instance, request_model: str):
     """
     vertex_log(
         "info",
-        f"INFO: Model '{request_model}' is an SA credential request for Gemini. "
-        f"Attempting SA credentials.",
+        f"模型 {request_model} 使用服务账号凭证，正在尝试认证",
     )
     rotated_credentials, rotated_project_id = (
         credential_manager_instance.get_random_credentials()
@@ -150,25 +146,24 @@ def _resolve_sa_client(credential_manager_instance, request_model: str):
         )
         if client_to_use is None:
             error_msg = (
-                f"SA credential client initialization failed for Gemini model '{request_model}'."
+                f"Gemini 模型 {request_model} 的服务账号客户端初始化失败"
             )
-            vertex_log("error", error_msg)
+            vertex_log("error", f"请求处理失败：{error_msg}")
             return None, JSONResponse(
                 status_code=500,
                 content=create_openai_error_response(500, error_msg, "server_error"),
             )
         vertex_log(
             "info",
-            f"INFO: Using SA credential for Gemini model {request_model} (project: {rotated_project_id})",
+            f"Gemini 模型 {request_model} 使用服务账号凭证，项目={rotated_project_id}",
         )
         return client_to_use, None
 
     # No SA credentials available for an SA model request
     error_msg = (
-        f"Model '{request_model}' requires SA credentials for Gemini, "
-        f"but none are available or loaded."
+        f"Gemini 模型 {request_model} 需要服务账号凭证，但当前没有已加载的可用凭证"
     )
-    vertex_log("error", error_msg)
+    vertex_log("error", f"请求处理失败：{error_msg}")
     return None, JSONResponse(
         status_code=401,
         content=create_openai_error_response(401, error_msg, "authentication_error"),
@@ -182,7 +177,7 @@ async def _handle_auto_model(
     request: OpenAIRequest,
 ):
     """auto 模式：base → encrypt → old_format 三连尝试，每次随机退避。"""
-    vertex_log("info", f"Processing auto model: {request.model}")
+    vertex_log("info", f"正在处理自动路由模型：{request.model}")
     attempts = [
         {
             "name": "base",
@@ -210,7 +205,7 @@ async def _handle_auto_model(
     for attempt in attempts:
         vertex_log(
             "info",
-            f"Auto-mode attempting: '{attempt['name']}' for model {attempt['model']}",
+            f"自动路由尝试：{attempt['name']}，模型={attempt['model']}",
         )
         current_gen_config = attempt["config_modifier"](generation_config.copy())
         try:
@@ -227,11 +222,11 @@ async def _handle_auto_model(
             last_err = e_auto
             vertex_log(
                 "info",
-                f"Auto-attempt '{attempt['name']}' for model {attempt['model']} failed: {e_auto}",
+                f"自动路由尝试 {attempt['name']} 失败，模型={attempt['model']}，错误={e_auto}",
             )
             await asyncio.sleep(random.uniform(0.5, 2.0))
 
-    vertex_log("info", "All auto attempts failed.")
+    vertex_log("info", f"自动路由的所有尝试均失败")
     # Hardening: previously returned `str(last_err)` directly to
     # the client.  Upstream error messages often contain
     # "Gemini API", "Vertex", "generativelanguage.googleapis.com",
@@ -242,7 +237,7 @@ async def _handle_auto_model(
     if last_err is not None:
         vertex_log(
             "warning",
-            f"Last auto-attempt error (internal only): {type(last_err).__name__}: {last_err}",
+            f"自动路由最后一次尝试失败：{type(last_err).__name__}: {last_err}",
         )
     if not request.stream and last_err:
         return JSONResponse(
@@ -257,7 +252,7 @@ async def _handle_auto_model(
             # Log the final error being sent to client after all auto-retries failed
             vertex_log(
                 "debug",
-                f"DEBUG: Auto-mode all attempts failed. Yielding final error JSON: {json_payload_final_auto_error}",
+                f"自动路由全部失败，正在返回最终错误响应",
             )
             yield f"data: {json_payload_final_auto_error}\n\n"
             yield "data: [DONE]\n\n"
@@ -383,8 +378,8 @@ async def chat_completions(
         )
 
     except Exception as e:
-        error_msg = f"Unexpected error in chat_completions endpoint: {str(e)}"
-        vertex_log("error", error_msg)
+        error_msg = f"聊天接口发生未预期错误：{str(e)}"
+        vertex_log("error", f"请求处理失败：{error_msg}")
         return JSONResponse(
             status_code=500,
             content=create_openai_error_response(500, error_msg, "server_error"),

@@ -51,12 +51,13 @@ const levelCounts = computed(() => {
 function logsToText() {
   return filteredLogs.value
     .map((l) => {
-      const ctx = [l.key, l.request_type, l.model, l.status_code]
+      if (l.formatted) return l.formatted
+      const ctx = [l.key, l.request_type_label || l.request_type, l.model, l.status_code]
         .filter((x) => x && x !== 'N/A')
         .map((x) => `[${x}]`)
         .join('')
       const err = l.error_message ? ` - ${l.error_message}` : ''
-      return `${l.timestamp} [${l.level}]${ctx} ${l.message}${err}`
+      return `${l.timestamp} [${l.level_label || filterLabels[l.level] || l.level}]${ctx} ${l.message}${err}`
     })
     .join('\n')
 }
@@ -195,14 +196,14 @@ onMounted(() => {
         >
           <span class="log-entry__time mono">{{ log.timestamp }}</span>
           <span class="log-entry__level" :class="'log-entry__level--' + (log.level || 'info').toLowerCase()">
-            {{ log.level || 'INFO' }}
+            {{ log.level_label || filterLabels[log.level] || log.level || '信息' }}
           </span>
           <span class="log-entry__body">
             <template v-if="log.key !== 'N/A' && log.key">
               <span class="mono text-subtle">[{{ log.key }}]</span>
             </template>
             <template v-if="log.request_type !== 'N/A' && log.request_type">
-              <span class="mono text-subtle">{{ log.request_type }}</span>
+              <span class="mono text-subtle">{{ log.request_type_label || log.request_type }}</span>
             </template>
             <template v-if="log.model !== 'N/A' && log.model">
               <span class="mono text-subtle">[{{ log.model }}]</span>
@@ -214,6 +215,20 @@ onMounted(() => {
             <template v-if="log.error_message">
               <span class="log-entry__err"> — {{ log.error_message }}</span>
             </template>
+            <details v-if="log.event === 'request_completed'" class="log-result">
+              <summary>查看返回与思考摘要 · 请求 {{ log.request_id }}</summary>
+              <div class="text-subtle">{{ log.path }} · {{ log.source }} · {{ log.outcome }}</div>
+              <template v-if="log.response_preview">
+                <div>返回预览（共 {{ log.response_chars }} 字）</div>
+                <pre>{{ log.response_preview }}</pre>
+              </template>
+              <template v-if="log.reasoning_preview">
+                <div>思考预览（共 {{ log.reasoning_chars }} 字）</div>
+                <pre>{{ log.reasoning_preview }}</pre>
+              </template>
+              <div v-if="!log.response_preview && !log.reasoning_preview" class="text-subtle">未返回可展示的文本，或已关闭内容预览。</div>
+              <div v-if="log.capture_truncated" class="text-subtle">响应较大，仅记录有限长度的摘要。</div>
+            </details>
           </span>
         </div>
       </div>
@@ -373,6 +388,27 @@ onMounted(() => {
 .log-entry__err {
   color: var(--danger-strong);
   font-weight: var(--fw-regular);
+}
+.log-result {
+  flex-basis: 100%;
+  min-width: 0;
+  margin-top: 4px;
+}
+.log-result summary {
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.log-result pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 160px;
+  overflow-y: auto;
+  margin: 4px 0 8px;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--bg-elevated);
+  font: inherit;
 }
 
 /* Subtle left-side accent on error/warning entries so operators can

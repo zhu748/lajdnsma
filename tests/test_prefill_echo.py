@@ -256,6 +256,26 @@ class VertexConversionEchoTests(unittest.TestCase):
     def setUp(self):
         self.mp = self._fresh_real_modules()
 
+    def test_stream_chunk_preserves_reasoning_usage_from_sdk(self):
+        import json
+        chunk = self._fake_chunk(normal_text="答案")
+        chunk.usage_metadata = SimpleNamespace(
+            prompt_token_count=10, candidates_token_count=2,
+            thoughts_token_count=3, total_token_count=15,
+        )
+        encoded = self.mp.convert_chunk_to_openai(chunk, "model", "id")
+        usage = json.loads(encoded.removeprefix("data: "))["usage"]
+        self.assertEqual(usage["completion_tokens"], 5)
+        self.assertEqual(usage["completion_tokens_details"]["reasoning_tokens"], 3)
+        self.assertEqual(usage["total_tokens"], 15)
+
+    def test_final_chunk_preserves_usage_and_truncation_reason(self):
+        import json
+        result = self.mp.create_final_chunk("model", "id", usage={"total_tokens": 15}, finish_reason="length")
+        payload = json.loads(result.removeprefix("data: "))
+        self.assertEqual(payload["choices"][0]["finish_reason"], "length")
+        self.assertEqual(payload["usage"]["total_tokens"], 15)
+
     @staticmethod
     def _fake_chunk(normal_text=None, reasoning_text=None):
         parts = []

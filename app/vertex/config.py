@@ -11,14 +11,14 @@ if not hasattr(settings, "CREDENTIALS_DIR"):
 
 # 使用settings中的配置，保持原有变量名
 CREDENTIALS_DIR = settings.CREDENTIALS_DIR
-vertex_log("info", f"Using credentials directory: {CREDENTIALS_DIR}")
+vertex_log("info", f"凭证目录：{CREDENTIALS_DIR}")
 
 # API Key 配置
 API_KEY = settings.PASSWORD if hasattr(settings, "PASSWORD") else ""
 if API_KEY:
-    vertex_log("info", "Using API Key authentication")
+    vertex_log("info", f"使用 API 密钥认证")
 else:
-    vertex_log("info", "No API Key found, falling back to credentials file")
+    vertex_log("info", f"未配置 API 密钥，改用凭证文件认证")
 
 # Google Credentials JSON
 GOOGLE_CREDENTIALS_JSON = (
@@ -28,7 +28,7 @@ GOOGLE_CREDENTIALS_JSON = (
 )
 if GOOGLE_CREDENTIALS_JSON:
     vertex_log(
-        "info", "Using GOOGLE_CREDENTIALS_JSON environment variable for authentication"
+        "info", f"使用 GOOGLE_CREDENTIALS_JSON 环境变量中的凭证认证"
     )
 
 # 项目和位置配置
@@ -48,7 +48,7 @@ MODELS_CONFIG_URL = os.environ.get(
 try:
     from urllib.parse import urlparse as _urlparse
     _host = _urlparse(MODELS_CONFIG_URL).netloc or "unknown"
-    vertex_log("info", f"Using models config from host: {_host}")
+    vertex_log("info", f"模型配置来源主机：{_host}")
 except Exception:
     pass
 
@@ -61,7 +61,7 @@ if hasattr(settings, "VERTEX_EXPRESS_API_KEY") and settings.VERTEX_EXPRESS_API_K
     if VERTEX_EXPRESS_API_KEY_VAL:
         vertex_log(
             "info",
-            f"Loaded {len(VERTEX_EXPRESS_API_KEY_VAL)} Vertex Express API keys from settings",
+            f"已从设置加载 {len(VERTEX_EXPRESS_API_KEY_VAL)} 个 Vertex Express 密钥",
         )
 
 # 假流式响应配置（历史 FAKE_STREAMING_CHUNK_SIZE / DELAY_PER_CHUNK 已随
@@ -76,7 +76,7 @@ FAKE_STREAMING_INTERVAL_SECONDS = (
 )
 vertex_log(
     "info",
-    f"Fake streaming is {'enabled' if FAKE_STREAMING_ENABLED else 'disabled'} with interval {FAKE_STREAMING_INTERVAL_SECONDS} seconds",
+    f"伪流式{'已启用' if FAKE_STREAMING_ENABLED else '已关闭'}，保活间隔 {FAKE_STREAMING_INTERVAL_SECONDS} 秒",
 )
 
 
@@ -93,12 +93,12 @@ def resolve_express_api_keys():
             if key.strip()
         ]
         if keys:
-            vertex_log("info", f"Using {len(keys)} Express API keys from settings")
+            vertex_log("info", f"使用设置中的 {len(keys)} 个 Express 密钥")
             return keys
     if VERTEX_EXPRESS_API_KEY_VAL:
         vertex_log(
             "info",
-            f"Using {len(VERTEX_EXPRESS_API_KEY_VAL)} Express API keys from app_config",
+            f"使用运行配置中的 {len(VERTEX_EXPRESS_API_KEY_VAL)} 个 Express 密钥",
         )
         return VERTEX_EXPRESS_API_KEY_VAL
     return []
@@ -111,7 +111,7 @@ def update_env_var(name, value):
         os.environ[name] = str(value).lower()
     else:
         os.environ[name] = str(value)
-    vertex_log("info", f"Updated environment variable: {name}")
+    vertex_log("info", f"环境变量已更新：{name}")
 
 
 def reload_config():
@@ -153,27 +153,27 @@ def update_config(name, value):
         settings.PASSWORD = value  # 更新settings中的值
         global API_KEY
         API_KEY = value  # 更新本地变量
-        vertex_log("info", "Updated API Key")
+        vertex_log("info", f"API 密钥已更新")
     elif name == "GOOGLE_CREDENTIALS_JSON":
         settings.GOOGLE_CREDENTIALS_JSON = value
         global GOOGLE_CREDENTIALS_JSON
         GOOGLE_CREDENTIALS_JSON = value
-        vertex_log("info", "Updated Google Credentials JSON")
+        vertex_log("info", f"Google JSON 凭证已更新")
     elif name == "VERTEX_PROJECT_ID":
         os.environ["VERTEX_PROJECT_ID"] = value  # 这个值只在环境变量中
         global PROJECT_ID
         PROJECT_ID = value
-        vertex_log("info", f"Updated Project ID to {value}")
+        vertex_log("info", f"项目编号已更新为：{value}")
     elif name == "VERTEX_LOCATION":
         os.environ["VERTEX_LOCATION"] = value
         global LOCATION
         LOCATION = value
-        vertex_log("info", f"Updated Location to {value}")
+        vertex_log("info", f"服务区域已更新为：{value}")
     elif name == "VERTEX_MODELS_CONFIG_URL":
         os.environ["VERTEX_MODELS_CONFIG_URL"] = value
         global MODELS_CONFIG_URL
         MODELS_CONFIG_URL = value
-        vertex_log("info", f"Updated Models Config URL to {value}")
+        vertex_log("info", f"模型配置地址已更新为：{value}")
     elif name == "VERTEX_EXPRESS_API_KEY":
         settings.VERTEX_EXPRESS_API_KEY = value
         global VERTEX_EXPRESS_API_KEY_VAL
@@ -182,22 +182,22 @@ def update_config(name, value):
         ]
         vertex_log(
             "info",
-            f"Updated Vertex Express API Key, now have {len(VERTEX_EXPRESS_API_KEY_VAL)} keys",
+            f"Vertex Express 密钥已更新，当前共 {len(VERTEX_EXPRESS_API_KEY_VAL)} 个",
         )
     elif name == "FAKE_STREAMING":
         # 更新FAKE_STREAMING配置
         settings.FAKE_STREAMING = value
         global FAKE_STREAMING_ENABLED
         FAKE_STREAMING_ENABLED = value
-        vertex_log("info", f"Updated FAKE_STREAMING to {value}")
+        vertex_log("info", f"伪流式开关已更新为：{value}")
     elif name == "FAKE_STREAMING_INTERVAL":
         # 更新FAKE_STREAMING_INTERVAL配置
         settings.FAKE_STREAMING_INTERVAL = value
         global FAKE_STREAMING_INTERVAL_SECONDS
         FAKE_STREAMING_INTERVAL_SECONDS = value
-        vertex_log("info", f"Updated FAKE_STREAMING_INTERVAL to {value}")
+        vertex_log("info", f"伪流式保活间隔已更新为：{value} 秒")
     else:
-        vertex_log("warning", f"Unknown config variable: {name}")
+        vertex_log("warning", f"未知配置项：{name}")
         return
 
     # 更新环境变量

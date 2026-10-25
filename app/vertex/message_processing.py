@@ -28,7 +28,7 @@ def create_gemini_prompt(
     Convert OpenAI messages to Gemini format.
     Returns a Content object or list of Content objects as required by the Gemini API.
     """
-    vertex_log("debug", "Converting OpenAI messages to Gemini format...")
+    vertex_log("debug", f"正在将 OpenAI 消息转换为 Gemini 格式")
 
     gemini_messages = []
 
@@ -36,7 +36,7 @@ def create_gemini_prompt(
         if not message.content:
             vertex_log(
                 "warning",
-                f"Skipping message {idx} due to empty content (Role: {message.role})",
+                f"第 {idx} 条消息内容为空，已跳过；角色={message.role}",
             )
             continue
 
@@ -64,7 +64,7 @@ def create_gemini_prompt(
             ) in message.content:  # Renamed part to part_item to avoid conflict
                 if isinstance(part_item, dict):
                     if part_item.get("type") == "text":
-                        vertex_log("warning", "Empty message detected. Auto fill in.")
+                        vertex_log("warning", f"检测到空消息，已自动补全")
                         parts.append(types.Part(text=part_item.get("text", "\n")))
                     elif part_item.get("type") == "image_url":
                         image_url = part_item.get("image_url", {}).get("url", "")
@@ -100,7 +100,7 @@ def create_gemini_prompt(
         content = types.Content(role=role, parts=parts)
         gemini_messages.append(content)
 
-    vertex_log("debug", f"Converted to {len(gemini_messages)} Gemini messages")
+    vertex_log("debug", f"消息转换完成，共 {len(gemini_messages)} 条 Gemini 消息")
     if len(gemini_messages) == 1:
         return gemini_messages[0]
     return gemini_messages
@@ -113,7 +113,7 @@ def create_encrypted_gemini_prompt(
     Convert OpenAI messages to Gemini format with special encoding for the encrypt model.
     This function URL-encodes user messages and adds specific system instructions.
     """
-    vertex_log("debug", "Creating encrypted Gemini prompt...")
+    vertex_log("debug", f"正在创建加密 Gemini 提示词")
 
     has_images = False
     for message in messages:
@@ -196,11 +196,11 @@ Ready for your request.""",
             else:
                 vertex_log(
                     "warning",
-                    f"DEBUG: Passing through non-string/list content for message index {i} without encoding",
+                    f"第 {i} 条消息内容既非字符串也非列表，原样透传",
                 )
                 new_messages.append(message)
 
-    vertex_log("debug", f"Created encrypted prompt with {len(new_messages)} messages")
+    vertex_log("debug", f"加密提示词已创建，共 {len(new_messages)} 条消息")
     return create_gemini_prompt(new_messages)
 
 
@@ -271,7 +271,7 @@ def create_encrypted_full_gemini_prompt(
         close_pos = current_close_pos
         vertex_log(
             "debug",
-            f"DEBUG: Found potential closing tag '{current_close_tag}' in message index {close_index} at pos {close_pos}",
+            f"第 {close_index} 条消息的位置 {close_pos} 检测到候选结束标签 {current_close_tag}",
         )
 
         for j in range(close_index, -1, -1):
@@ -308,7 +308,7 @@ def create_encrypted_full_gemini_prompt(
             open_len = current_open_len
             vertex_log(
                 "debug",
-                f"DEBUG: Found potential opening tag '{current_open_tag}' in message index {open_index} at pos {open_pos} (paired with close at index {close_index})",
+                f"第 {open_index} 条消息的位置 {open_pos} 检测到候选起始标签 {current_open_tag}，对应结束消息={close_index}",
             )
             extracted_content = ""
             start_extract_pos = open_pos + open_len
@@ -333,7 +333,7 @@ def create_encrypted_full_gemini_prompt(
             if cleaned_content.strip():
                 vertex_log(
                     "info",
-                    f"INFO: Substantial content found for pair ({open_index}, {close_index}). Marking as target.",
+                    f"标签对（{open_index}, {close_index}）包含有效正文，已选为处理目标",
                 )
                 target_open_index = open_index
                 target_open_pos = open_pos
@@ -345,7 +345,7 @@ def create_encrypted_full_gemini_prompt(
             else:
                 vertex_log(
                     "info",
-                    f"INFO: No substantial content for pair ({open_index}, {close_index}). Checking earlier opening tags.",
+                    f"标签对（{open_index}, {close_index}）无有效正文，继续检查更早的起始标签",
                 )
         if injection_done:
             break
@@ -353,7 +353,7 @@ def create_encrypted_full_gemini_prompt(
     if injection_done:
         vertex_log(
             "debug",
-            f"DEBUG: Starting obfuscation between index {target_open_index} and {target_close_index}",
+            f"开始混淆第 {target_open_index} 至 {target_close_index} 条消息",
         )
         for k in range(target_open_index, target_close_index + 1):
             msg_to_modify = original_messages_copy[k]
@@ -378,7 +378,7 @@ def create_encrypted_full_gemini_prompt(
             original_messages_copy[k] = OpenAIMessage(
                 role=msg_to_modify.role, content=new_k_content
             )
-            vertex_log("debug", f"DEBUG: Obfuscated message index {k}")
+            vertex_log("debug", f"第 {k} 条消息已完成混淆")
         msg_to_inject_into = original_messages_copy[target_open_index]
         content_after_obfuscation = msg_to_inject_into.content
         part_before_prompt = content_after_obfuscation[
@@ -393,13 +393,13 @@ def create_encrypted_full_gemini_prompt(
         )
         vertex_log(
             "info",
-            f"INFO: Obfuscation prompt injected into message index {target_open_index}.",
+            f"已在第 {target_open_index} 条消息中注入混淆提示词",
         )
         processed_messages = original_messages_copy
     else:
         vertex_log(
             "info",
-            "INFO: No complete pair with substantial content found. Using fallback.",
+            f"未找到包含有效正文的完整标签对，使用备用提示词",
         )
         processed_messages = original_messages_copy
         last_user_or_system_index_overall = -1
@@ -412,7 +412,7 @@ def create_encrypted_full_gemini_prompt(
                 injection_index, OpenAIMessage(role="user", content=OBFUSCATION_PROMPT)
             )
             vertex_log(
-                "info", "INFO: Obfuscation prompt added as a new fallback message."
+                "info", f"已追加一条备用混淆提示词"
             )
         elif not processed_messages:
             processed_messages.append(
@@ -420,7 +420,7 @@ def create_encrypted_full_gemini_prompt(
             )
             vertex_log(
                 "info",
-                "INFO: Obfuscation prompt added as the first message (edge case).",
+                f"消息列表为空，已添加备用混淆提示词",
             )
 
     return create_encrypted_gemini_prompt(processed_messages)
@@ -510,6 +510,34 @@ def parse_gemini_response_for_reasoning_and_content(
     return "".join(reasoning_text_parts), "".join(normal_text_parts)
 
 
+def _openai_usage(usage_meta):
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+    reasoning_tokens = None
+    if usage_meta is not None:
+        prompt_tokens = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
+        completion_tokens = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
+        total_tokens = int(getattr(usage_meta, "total_token_count", 0) or 0)
+        raw_reasoning = getattr(usage_meta, "thoughts_token_count", None)
+        if raw_reasoning is not None:
+            reasoning_tokens = int(raw_reasoning)
+            completion_tokens += reasoning_tokens
+    if not total_tokens:
+        total_tokens = prompt_tokens + completion_tokens
+
+    usage = {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens, "total_tokens": total_tokens}
+    if reasoning_tokens is not None:
+        usage["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+
+    return usage
+
+
+def _openai_finish_reason(reason):
+    value = str(getattr(reason, "value", reason) or "STOP").upper()
+    return {"STOP": "stop", "MAX_TOKENS": "length", "SAFETY": "content_filter", "RECITATION": "content_filter"}.get(value, "stop")
+
+
 def convert_to_openai_format(
     gemini_response, model: str, prefill_echo: str = ""
 ) -> Dict[str, Any]:
@@ -547,7 +575,7 @@ def convert_to_openai_format(
             choice_item = {
                 "index": i,
                 "message": message_payload,
-                "finish_reason": "stop",
+                "finish_reason": _openai_finish_reason(getattr(candidate, "finish_reason", None)),
             }
             if hasattr(candidate, "logprobs"):
                 choice_item["logprobs"] = getattr(candidate, "logprobs", None)
@@ -575,19 +603,7 @@ def convert_to_openai_format(
             }
         )
 
-    # Extract usage metadata from Gemini response.  Previously
-    # hardcoded to all-zero values, which broke downstream clients
-    # that bill by `usage.total_tokens` (they would always see 0).
-    prompt_tokens = 0
-    completion_tokens = 0
-    total_tokens = 0
-    usage_meta = getattr(gemini_response, "usage_metadata", None)
-    if usage_meta is not None:
-        prompt_tokens = int(getattr(usage_meta, "prompt_token_count", 0) or 0)
-        completion_tokens = int(getattr(usage_meta, "candidates_token_count", 0) or 0)
-        total_tokens = int(getattr(usage_meta, "total_token_count", 0) or 0)
-    if not total_tokens:
-        total_tokens = prompt_tokens + completion_tokens
+    usage = _openai_usage(getattr(gemini_response, "usage_metadata", None))
 
     return {
         "id": gen_openai_chunk_id(),
@@ -595,11 +611,7 @@ def convert_to_openai_format(
         "created": int(time.time()),
         "model": model,
         "choices": choices,
-        "usage": {
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "total_tokens": total_tokens,
-        },
+        "usage": usage,
     }
 
 
@@ -666,6 +678,9 @@ def convert_chunk_to_openai(
             }
         ],
     }
+    usage_meta = getattr(chunk, "usage_metadata", None)
+    if usage_meta is not None:
+        chunk_data["usage"] = _openai_usage(usage_meta)
     if (
         hasattr(chunk, "candidates")
         and chunk.candidates
@@ -678,11 +693,12 @@ def convert_chunk_to_openai(
 
 
 def create_final_chunk(
-    model: str, response_id: str, candidate_count: int = 1, created_ts: int | None = None
+    model: str, response_id: str, candidate_count: int = 1, created_ts: int | None = None,
+    *, usage=None, finish_reason="stop",
 ) -> str:
     choices = []
     for i in range(candidate_count):
-        choices.append({"index": i, "delta": {}, "finish_reason": "stop"})
+        choices.append({"index": i, "delta": {}, "finish_reason": finish_reason})
 
     final_chunk = {
         "id": response_id,
@@ -691,5 +707,7 @@ def create_final_chunk(
         "model": model,
         "choices": choices,
     }
+    if usage is not None:
+        final_chunk["usage"] = usage
     return f"data: {json.dumps(final_chunk)}\n\n"
 

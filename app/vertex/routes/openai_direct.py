@@ -55,7 +55,7 @@ async def _close_client_quietly(client: openai.AsyncOpenAI) -> None:
     try:
         await client.close()
     except Exception as e:  # noqa: BLE001 - best-effort cleanup
-        vertex_log("warning", f"Failed to close evicted OpenAI client: {e}")
+        vertex_log("warning", f"关闭已淘汰的 OpenAI 客户端失败：{e}")
 
 
 async def _get_cached_openai_client(
@@ -150,7 +150,10 @@ async def openai_true_stream_generator(
     """OpenAI Direct 真流式：透传上游 SSE chunk 并剥离 extra_content。"""
     try:
         # Ensure stream=True is explicitly passed for real streaming
-        openai_params_for_true_stream = {**openai_params, "stream": True}
+        openai_params_for_true_stream = {
+            **openai_params, "stream": True,
+            "stream_options": {**(openai_params.get("stream_options") or {}), "include_usage": True},
+        }
         stream_response = await openai_client.chat.completions.create(
             **openai_params_for_true_stream, extra_body=openai_extra_body
         )
@@ -168,14 +171,13 @@ async def openai_true_stream_generator(
 
             except Exception as chunk_processing_error:
                 error_msg_chunk = (
-                    f"Error processing/serializing OpenAI chunk for {model_name}: "
-                    f"{str(chunk_processing_error)}. Chunk: {str(chunk)[:200]}"
+                    f"处理模型 {model_name} 的流式响应失败：{str(chunk_processing_error)}"
                 )
-                vertex_log("error", error_msg_chunk)
+                vertex_log("error", f"请求处理失败：{error_msg_chunk}")
                 if len(error_msg_chunk) > 1024:
                     error_msg_chunk = error_msg_chunk[:1024] + "..."
                 error_response_chunk = create_openai_error_response(
-                    500, error_msg_chunk, "server_error"
+                    500, "Upstream service error during streaming.", "server_error"
                 )
                 json_payload_for_chunk_error = json.dumps(error_response_chunk)
                 yield f"data: {json_payload_for_chunk_error}\n\n"
@@ -187,12 +189,11 @@ async def openai_true_stream_generator(
         if len(original_error_message) > 1024:
             original_error_message = original_error_message[:1024] + "..."
         error_msg_stream = (
-            f"Error during OpenAI client true streaming for {model_name}: "
-            f"{original_error_message}"
+            f"模型 {model_name} 的 OpenAI 流式调用失败：{original_error_message}"
         )
-        vertex_log("error", error_msg_stream)
+        vertex_log("error", f"请求处理失败：{error_msg_stream}")
         error_response_content = create_openai_error_response(
-            500, error_msg_stream, "server_error"
+            500, "Upstream service error during streaming.", "server_error"
         )
         json_payload_for_stream_error = json.dumps(error_response_content)
         yield f"data: {json_payload_for_stream_error}\n\n"
@@ -225,9 +226,9 @@ async def _openai_fake_stream_engine(
         # Validate the response
         if not is_valid_response_func(api_response):
             error_msg = (
-                f"Invalid response structure from API for model {sse_model_name}"
+                f"模型 {sse_model_name} 的上游响应结构无效"
             )
-            vertex_log("error", error_msg)
+            vertex_log("error", f"请求处理失败：{error_msg}")
             err_resp = create_openai_error_response(500, error_msg, "server_error")
             yield f"data: {json.dumps(err_resp)}\n\n"
             yield "data: [DONE]\n\n"
@@ -240,6 +241,9 @@ async def _openai_fake_stream_engine(
         # streamed over >1s as "all chunks within one second all share
         # the same `created`" is the official behaviour.
         created_ts = int(time.time())
+        choices = getattr(api_response, "choices", None) or []
+        finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
+        finish_reason = finish_reason or "stop"
 
         # Get the full text from the response
         full_text = ""
@@ -280,9 +284,12 @@ async def _openai_fake_stream_engine(
                 "created": created_ts,
                 "model": sse_model_name,
                 "choices": [
-                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                    {"index": 0, "delta": {}, "finish_reason": finish_reason}
                 ],
             }
+            usage = getattr(api_response, "usage", None)
+            if usage is not None:
+                empty_chunk["usage"] = usage.model_dump(exclude_none=True) if hasattr(usage, "model_dump") else usage
             yield f"data: {json.dumps(empty_chunk)}\n\n"
             yield "data: [DONE]\n\n"
             return
@@ -334,8 +341,11 @@ async def _openai_fake_stream_engine(
             "object": "chat.completion.chunk",
             "created": created_ts,
             "model": sse_model_name,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
         }
+        usage = getattr(api_response, "usage", None)
+        if usage is not None:
+            final_chunk["usage"] = usage.model_dump(exclude_none=True) if hasattr(usage, "model_dump") else usage
         yield f"data: {json.dumps(final_chunk)}\n\n"
         yield "data: [DONE]\n\n"
 
@@ -345,7 +355,7 @@ async def _openai_fake_stream_engine(
         # and emits a neutral message.
         vertex_log(
             "error",
-            f"_openai_fake_stream_engine error (internal only, model: {sse_model_name}): {type(e).__name__}: {e}",
+            f"OpenAI 伪流式引擎出错，模型={sse_model_name}，错误={type(e).__name__}: {e}",
         )
         if not is_auto_attempt:  # Only yield error for non-auto attempts
             err_resp = create_openai_error_response(
@@ -370,7 +380,7 @@ async def openai_fake_stream_generator(
     api_model_name = openai_params.get("model", "unknown-openai-model")
     vertex_log(
         "info",
-        f"FAKE STREAMING (OpenAI): Prep for '{request_obj.model}' (API model: '{api_model_name}')",
+        f"准备 OpenAI 伪流式请求：请求模型={request_obj.model}，上游模型={api_model_name}",
     )
     response_id = gen_openai_chunk_id()
 
@@ -477,7 +487,7 @@ async def openai_fake_stream_generator(
             # message to the client.
             vertex_log(
                 "error",
-                f"openai_fake_stream_generator outer error (internal only): {type(e_outer).__name__}: {e_outer}",
+                f"OpenAI 伪流式响应处理失败：{type(e_outer).__name__}: {e_outer}",
             )
             sse_err_msg_display = "Upstream service error during streaming."
             err_resp_sse = create_openai_error_response(
@@ -530,7 +540,7 @@ async def handle_openai_direct_request(
     base_model_name: str,
 ):
     """OpenAI Direct 路径的编排主入口（由 chat_completions 调用）。"""
-    vertex_log("info", f"INFO: Using OpenAI Direct Path for model: {request.model}")
+    vertex_log("info", f"模型 {request.model} 使用 OpenAI 直连路径")
     # This mode exclusively uses rotated credentials, not express keys.
     rotated_credentials, rotated_project_id = (
         credential_manager_instance.get_random_credentials()
@@ -538,10 +548,9 @@ async def handle_openai_direct_request(
 
     if not rotated_credentials or not rotated_project_id:
         error_msg = (
-            "OpenAI Direct Mode requires GCP credentials, "
-            "but none were available or loaded successfully."
+            f"OpenAI 直连模式需要 GCP 凭证，但当前没有已加载的可用凭证"
         )
-        vertex_log("error", error_msg)
+        vertex_log("error", f"请求处理失败：{error_msg}")
         return JSONResponse(
             status_code=500,
             content=create_openai_error_response(500, error_msg, "server_error"),
@@ -549,16 +558,15 @@ async def handle_openai_direct_request(
 
     vertex_log(
         "info",
-        f"INFO: [OpenAI Direct Path] Using credentials for project: {rotated_project_id}",
+        f"OpenAI 直连使用项目 {rotated_project_id} 的凭证",
     )
     gcp_token = await asyncio.to_thread(_refresh_auth, rotated_credentials)
 
     if not gcp_token:
         error_msg = (
-            f"Failed to obtain valid GCP token for OpenAI client "
-            f"(Source: Credential Manager, Project: {rotated_project_id})."
+            f"无法为 OpenAI 客户端获取有效 GCP 令牌，项目={rotated_project_id}"
         )
-        vertex_log("error", error_msg)
+        vertex_log("error", f"请求处理失败：{error_msg}")
         return JSONResponse(
             status_code=500,
             content=create_openai_error_response(500, error_msg, "server_error"),
@@ -618,13 +626,13 @@ async def handle_openai_direct_request(
 
         vertex_log(
             "info",
-            f"DEBUG: FAKE_STREAMING setting is {fake_streaming_enabled} for OpenAI model {request.model}",
+            f"OpenAI 模型 {request.model} 的伪流式开关：{fake_streaming_enabled}",
         )
 
         if fake_streaming_enabled:
             vertex_log(
                 "info",
-                f"INFO: OpenAI Fake Streaming (SSE Simulation) ENABLED for model '{request.model}'.",
+                f"模型 {request.model} 已启用 OpenAI 伪流式响应",
             )
             # openai_params 已含 stream=True；伪流式生成器内部会用
             # stream=False 的非流式调用。
@@ -646,7 +654,7 @@ async def handle_openai_direct_request(
         else:  # Regular OpenAI streaming
             vertex_log(
                 "info",
-                f"INFO: OpenAI True Streaming ENABLED for model '{request.model}'.",
+                f"模型 {request.model} 已启用 OpenAI 真流式响应",
             )
             return StreamingResponse(
                 openai_true_stream_generator(
@@ -675,13 +683,12 @@ async def handle_openai_direct_request(
                         _extract_reasoning_from_message(message_dict)
                         vertex_log(
                             "debug",
-                            "DEBUG: Processed 'extra_content' from response message.",
+                            f"已处理响应消息中的扩展内容 extra_content",
                         )
         except Exception as e_reasoning_processing:
             vertex_log(
                 "warning",
-                f"WARNING: Error during non-streaming reasoning processing for model "
-                f"{request.model} due to: {e_reasoning_processing}.",
+                f"模型 {request.model} 的非流式思考内容处理失败：{e_reasoning_processing}",
             )
 
         return JSONResponse(content=response_dict)

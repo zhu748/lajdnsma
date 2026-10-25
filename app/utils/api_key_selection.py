@@ -141,8 +141,7 @@ async def select_valid_api_keys(
             if last_minute >= rpm_threshold:
                 log(
                     "info",
-                    f"{_key_hash(api_key)} at {last_minute}/{MAX_OUTBOUND_RPM} RPM, "
-                    "affinity retry yields to RPM limit",
+                    f"密钥 {_key_hash(api_key)} 每分钟已请求 {last_minute}/{MAX_OUTBOUND_RPM} 次，亲和重试让位于限流保护",
                     extra={
                         "key": "key#" + str(hash(api_key) & 0xFFFFFF),
                         "request_type": request_type,
@@ -159,9 +158,7 @@ async def select_valid_api_keys(
         if valid_keys:
             log(
                 "info",
-                "key affinity retry: reusing "
-                + ", ".join(_key_hash(k) for k in valid_keys)
-                + " (transient failure, quota not exhausted)",
+                f"密钥亲和重试：继续使用 {', '.join(_key_hash(k) for k in valid_keys)}（暂时性错误，配额尚未耗尽）",
                 extra={"request_type": request_type, "model": model},
             )
             # 整批都由 preferred 组成：不额外轮换其他 key。
@@ -202,7 +199,7 @@ async def select_valid_api_keys(
         if last_minute >= rpm_threshold:
             log(
                 "info",
-                f"key#{hash(api_key) & 0xFFFFFF:06x} at {last_minute}/{MAX_OUTBOUND_RPM} RPM in last 60s, skipping",
+                f"密钥 key#{hash(api_key) & 0xFFFFFF:06x} 最近 60 秒已请求 {last_minute}/{MAX_OUTBOUND_RPM} 次，暂时跳过",
                 extra={
                     "key": "key#" + str(hash(api_key) & 0xFFFFFF),
                     "request_type": request_type,
@@ -224,7 +221,7 @@ async def select_valid_api_keys(
 
         log(
             "warning",
-            f"key#{hash(api_key) & 0xFFFFFF:06x} exceeded daily limit ({usage}/{settings.API_KEY_DAILY_LIMIT})",
+            f"密钥 key#{hash(api_key) & 0xFFFFFF:06x} 已达每日限额（{usage}/{settings.API_KEY_DAILY_LIMIT}）",
             extra={
                 "key": "key#" + str(hash(api_key) & 0xFFFFFF),
                 "request_type": request_type,
@@ -240,7 +237,7 @@ async def select_valid_api_keys(
     if not valid_keys:
         log(
             "warning",
-            "No API keys available (all on cooldown, RPM-limited, or daily-limited)",
+            f"无可用密钥：均处于冷却中，或已达每分钟/每日限额",
             extra={"request_type": request_type, "model": model},
         )
 

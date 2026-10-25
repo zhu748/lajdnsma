@@ -85,7 +85,7 @@ async def generate_fake_stream_response(
             valid_keys,
             request_type="fake-stream",
             model=chat_request.model,
-            label="fake stream request start",
+            label="伪流式请求开始",
             task_factory=lambda api_key: asyncio.create_task(
                 handle_fake_streaming(
                     api_key,

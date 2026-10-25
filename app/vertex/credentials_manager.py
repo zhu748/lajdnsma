@@ -28,11 +28,11 @@ def get_credential_manager(fastapi_request) -> "CredentialManager":
     """
     try:
         credential_manager_instance = fastapi_request.app.state.credential_manager
-        vertex_log("info", "Using existing credential manager from app state")
+        vertex_log("info", f"使用应用状态中的凭证管理器")
     except AttributeError:
         vertex_log(
             "warning",
-            "No credential_manager found in app.state, creating a new one",
+            f"应用状态中没有凭证管理器，正在新建",
         )
         credential_manager_instance = CredentialManager()
     return credential_manager_instance
@@ -48,7 +48,7 @@ def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
     # 检查输入是否为None或空字符串
     if not json_str or not json_str.strip():
         vertex_log(
-            "debug", "parse_multiple_json_credentials received empty or None input"
+            "debug", f"凭证 JSON 为空，无需解析"
         )
         return []
 
@@ -80,35 +80,35 @@ def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
                         if all(field in credentials_info for field in required_fields):
                             credentials_list.append(credentials_info)
                             vertex_log(
-                                "debug", "Successfully parsed a JSON credential object."
+                                "debug", f"凭证 JSON 对象解析成功"
                             )
                         else:
                             vertex_log(
                                 "warning",
-                                f"Parsed JSON object missing required fields: {json_object_str[:100]}...",
+                                f"凭证 JSON 缺少必填字段，已跳过该对象",
                             )
                     except json.JSONDecodeError as e:
                         vertex_log(
                             "error",
-                            f"Failed to parse JSON object segment: {json_object_str[:100]}... Error: {e}",
+                            f"凭证 JSON 解析失败：{e}",
                         )
                     current_object_start = -1  # Reset for the next object
             else:
                 # Found a closing brace without a matching open brace in scope, might indicate malformed input
                 vertex_log(
                     "warning",
-                    f"Encountered unexpected '}}' at index {i}. Input might be malformed.",
+                    f"位置 {i} 出现多余的右花括号，JSON 格式可能不正确",
                 )
 
     if nesting_level != 0:
         vertex_log(
             "warning",
-            f"JSON string parsing ended with non-zero nesting level ({nesting_level}). Check for unbalanced braces.",
+            f"凭证 JSON 的花括号未配对，剩余嵌套层数 {nesting_level}",
         )
 
     vertex_log(
         "debug",
-        f"Parsed {len(credentials_list)} credential objects from the input string.",
+        f"已解析 {len(credentials_list)} 个凭证对象",
     )
     return credentials_list
 
@@ -122,7 +122,7 @@ def _refresh_auth(credentials):
     fingerprint).
     """
     if not credentials:
-        vertex_log("error", "_refresh_auth called with no credentials.")
+        vertex_log("error", f"无法刷新认证令牌：未提供凭证")
         return None
     project_id_for_log = getattr(credentials, "project_id", "Unknown")
 
@@ -145,14 +145,14 @@ def _refresh_auth(credentials):
         # Cache for 50 minutes (real tokens last 1h)
         _TOKEN_CACHE[project_id_for_log] = (token, time.time() + _TOKEN_TTL_SECONDS)
         vertex_log(
-            "info", f"Token refreshed and cached for project: {project_id_for_log}"
+            "info", f"项目 {project_id_for_log} 的认证令牌已刷新并缓存"
         )
         return token
     except Exception as e:
         # Cleanup: the except block used to re-assign project_id_for_log to
         # the same value it already holds — dead store, removed.
         vertex_log(
-            "error", f"Error refreshing GCP token for project {project_id_for_log}: {e}"
+            "error", f"项目 {project_id_for_log} 的 GCP 认证令牌刷新失败：{e}"
         )
         return None
 
@@ -214,7 +214,7 @@ class CredentialManager:
             if not all(field in credentials_info for field in required_fields):
                 vertex_log(
                     "warning",
-                    "Skipping JSON credential due to missing required fields.",
+                    f"凭证 JSON 缺少必填字段，已跳过",
                 )
                 return False
 
@@ -225,7 +225,7 @@ class CredentialManager:
             project_id = credentials.project_id
             vertex_log(
                 "debug",
-                f"Successfully created credentials object from JSON for project: {project_id}",
+                f"已根据 JSON 创建凭证对象，项目={project_id}",
             )
 
             # Store the credentials object and project ID
@@ -238,12 +238,12 @@ class CredentialManager:
             )
             vertex_log(
                 "info",
-                f"Added credential for project {project_id} from JSON string to Credential Manager.",
+                f"已将项目 {project_id} 的 JSON 凭证加入管理器",
             )
             return True
         except Exception as e:
             vertex_log(
-                "error", f"Failed to create credentials from parsed JSON object: {e}"
+                "error", f"根据 JSON 创建凭证失败：{e}"
             )
             return False
 
@@ -280,13 +280,13 @@ class CredentialManager:
             elif project_id:
                 vertex_log(
                     "debug",
-                    f"Skipping duplicate credential for project {project_id} from JSON list.",
+                    f"项目 {project_id} 的凭证已存在，跳过重复项",
                 )
 
         if success_count > 0:
             vertex_log(
                 "info",
-                f"Loaded {success_count} new credentials from JSON list into memory.",
+                f"已从 JSON 列表新增 {success_count} 个内存凭证",
             )
         return success_count
 
@@ -302,7 +302,7 @@ class CredentialManager:
         else:
             vertex_log(
                 "info",
-                f"Found {len(self.credentials_files)} credential files: {[os.path.basename(f) for f in self.credentials_files]}",
+                f"发现 {len(self.credentials_files)} 个凭证文件：{[os.path.basename(f) for f in self.credentials_files]}",
             )
 
         # Check total credentials
@@ -317,13 +317,13 @@ class CredentialManager:
         if old_file_count != new_file_count:
             vertex_log(
                 "info",
-                f"Credential files updated: {old_file_count} -> {new_file_count}",
+                f"凭证文件数量已更新：{old_file_count} → {new_file_count}",
             )
 
         # Total credentials = files + in-memory
         total_credentials = self.get_total_credentials()
         vertex_log(
-            "debug", f"Refresh check - Total credentials available: {total_credentials}"
+            "debug", f"凭证刷新检查：当前共 {total_credentials} 个可用凭证"
         )
         return total_credentials > 0
 
@@ -351,7 +351,7 @@ class CredentialManager:
         if not all_sources:
             vertex_log(
                 "warning",
-                "No credentials available for random selection (no files or in-memory).",
+                f"无可供选择的凭证：文件和内存凭证均为空",
             )
             return None, None
 
@@ -364,7 +364,7 @@ class CredentialManager:
                 file_path = source_info["value"]
                 vertex_log(
                     "debug",
-                    f"Attempting to load credential from file: {os.path.basename(file_path)}",
+                    f"正在加载凭证文件：{os.path.basename(file_path)}",
                 )
                 try:
                     credentials = service_account.Credentials.from_service_account_file(
@@ -374,7 +374,7 @@ class CredentialManager:
                     project_id = credentials.project_id
                     vertex_log(
                         "info",
-                        f"Successfully loaded credential from file {os.path.basename(file_path)} for project: {project_id}",
+                        f"凭证文件 {os.path.basename(file_path)} 加载成功，项目={project_id}",
                     )
                     self.credentials = credentials  # Cache last successfully loaded
                     self.project_id = project_id
@@ -382,7 +382,7 @@ class CredentialManager:
                 except Exception as e:
                     vertex_log(
                         "error",
-                        f"Failed loading credentials file {os.path.basename(file_path)}: {e}. Trying next available source.",
+                        f"凭证文件 {os.path.basename(file_path)} 加载失败：{e}；尝试下一个来源",
                     )
                     continue  # Try next source
 
@@ -395,7 +395,7 @@ class CredentialManager:
                 if credentials and project_id:
                     vertex_log(
                         "info",
-                        f"Using in-memory credential for project: {project_id} (Source: {mem_cred_detail.get('source', 'unknown')})",
+                        f"使用项目 {project_id} 的内存凭证，来源={mem_cred_detail.get('source', '未知')}",
                     )
                     # Here, we might want to ensure the credential object is still valid if it can expire
                     # For service_account.Credentials from_service_account_info, they typically don't self-refresh
@@ -410,9 +410,9 @@ class CredentialManager:
                 else:
                     vertex_log(
                         "warning",
-                        f"In-memory credential entry missing 'credentials' or 'project_id' at original index {source_info.get('original_index', 'N/A')}. Skipping.",
+                        f"第 {source_info.get('original_index', '未知')} 个内存凭证缺少凭证对象或项目编号，已跳过",
                     )
                     continue  # Try next source
 
-        vertex_log("warning", "All available credential sources failed to load.")
+        vertex_log("warning", f"所有凭证来源均加载失败")
         return None, None

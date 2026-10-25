@@ -25,6 +25,17 @@ def load_response_module():
 
 
 class ResponseTestCase(unittest.TestCase):
+    def test_reasoning_tokens_are_preserved_and_included_in_output_usage(self):
+        module = load_response_module()
+        response = types.SimpleNamespace(
+            model="test", finish_reason="STOP", text="答案", thoughts="思考", function_call=None,
+            prompt_token_count=10, candidates_token_count=2, thoughts_token_count=3, total_token_count=None,
+        )
+        data = module.openAI_from_Gemini(response, stream=False)
+        self.assertEqual(data["usage"]["completion_tokens"], 5)
+        self.assertEqual(data["usage"]["total_tokens"], 15)
+        self.assertEqual(data["usage"]["completion_tokens_details"], {"reasoning_tokens": 3})
+
     def test_gemini_empty_stream_chunk_has_timing_and_empty_text(self):
         module = load_response_module()
 

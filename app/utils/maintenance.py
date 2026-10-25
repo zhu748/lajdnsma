@@ -148,7 +148,7 @@ async def shutdown_scheduler():
     try:
         api_stats_manager.shutdown()
     except Exception as e:
-        log("error", f"Stats manager shutdown error: {str(e)}")
+        log("error", f"关闭统计后台线程失败：{str(e)}")
 
 
 async def api_call_stats_clean():

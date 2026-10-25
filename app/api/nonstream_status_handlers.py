@@ -31,7 +31,7 @@ async def handle_nonstream_task_status(
                 api_key,
                 request_type="non-stream",
                 model=chat_request.model,
-                label="non-stream request success",
+                label="非流式请求成功",
             )
             if is_gemini:
                 response = ensure_gemini_timing_fields(completed_response.data)

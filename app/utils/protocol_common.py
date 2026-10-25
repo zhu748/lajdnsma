@@ -53,11 +53,15 @@ def _extract_openai_usage(usage: Dict[str, Any]) -> Dict[str, int]:
         completion = total
     if not total:
         total = prompt + completion
-    return {
+    result = {
         "input_tokens": prompt,
         "output_tokens": completion,
         "total_tokens": total,
     }
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+        result["output_tokens_details"] = {"reasoning_tokens": details["reasoning_tokens"]}
+    return result
 
 
 def _merge_stream_usage(
@@ -90,6 +94,9 @@ def _merge_stream_usage(
         merged["total_tokens"] = (
             merged.get("input_tokens", 0) + merged.get("output_tokens", 0)
         )
+    details = usage.get("completion_tokens_details")
+    if isinstance(details, dict) and details.get("reasoning_tokens") is not None:
+        merged["output_tokens_details"] = {"reasoning_tokens": details["reasoning_tokens"]}
 
     return merged
 
@@ -109,6 +116,15 @@ def _openai_finish_reason_to_claude_stop_reason(finish_reason: Any) -> str:
         return "refusal"
 
     return "end_turn"
+
+
+def _responses_completion_status(finish_reason):
+    reason = str(finish_reason or "").lower()
+    if reason in {"length", "max_tokens", "max_output_tokens"}:
+        return "incomplete", {"reason": "max_output_tokens"}
+    if reason in {"content_filter", "safety", "recitation"}:
+        return "incomplete", {"reason": "content_filter"}
+    return "completed", None
 
 
 def _ensure_list(value: Any) -> List[Any]:

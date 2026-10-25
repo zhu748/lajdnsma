@@ -36,7 +36,7 @@ class EmbeddingClient:
             "key": "key#" + str(hash(self.api_key) & 0xFFFFFF),
             "model": model_name,
         }
-        log("INFO", "Embedding request started", extra=extra_log)
+        log("INFO", f"向量生成请求开始", extra=extra_log)
 
         client = await get_async_client()
         response = await client.post(url, headers=headers, json=data, timeout=60)
@@ -49,7 +49,7 @@ class EmbeddingClient:
         embeddings = response_json.get("embeddings", [])
         log(
             "INFO",
-            f"Embedding request completed, embeddings: {len(embeddings)}",
+            f"向量生成请求完成，返回 {len(embeddings)} 个向量",
             extra=extra_log,
         )
 

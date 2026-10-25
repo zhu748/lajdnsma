@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from google.genai import types
 from app.vertex.message_processing import (
     parse_gemini_response_for_reasoning_and_content,
+    _openai_usage,
+    _openai_finish_reason,
 )
 
 # Local module imports
@@ -92,7 +94,7 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
 
 def is_response_valid(response):
     if response is None:
-        vertex_log("debug", "Response is None, therefore invalid.")
+        vertex_log("debug", f"上游响应为空，判定为无效响应")
         return False
 
     # Check for direct text attribute
@@ -132,7 +134,7 @@ def is_response_valid(response):
     # It should only be valid if actual text content is found.
     # Block reasons will be checked explicitly by callers if they need to treat it as an error for retries.
     vertex_log(
-        "debug", "Response is invalid, no usable text content found by is_response_valid."
+        "debug", f"响应无效：未检测到可用的文本内容或工具调用"
     )
     return False
 
@@ -248,7 +250,7 @@ async def _base_fake_stream_engine(
         # inter-chunk delay (20-150ms) so the distribution looks like
         # real token-bound streaming.
         chunk_size = (
-            max(20, random.randint(24, 96)) if content_to_chunk else 0
+            max(20, random.randint(24, 96)) if content_to_chunk else 1
         )
 
         # Cleanup: the previous `if not content_to_chunk and
@@ -279,7 +281,14 @@ async def _base_fake_stream_engine(
             if i + chunk_size < len(content_to_chunk):
                 await asyncio.sleep(random.uniform(0.02, 0.15))
 
-        yield create_final_chunk(sse_model_name, response_id, created_ts=created_ts)
+        metadata = getattr(full_api_response, "usage_metadata", None)
+        candidates = getattr(full_api_response, "candidates", None) or []
+        reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+        yield create_final_chunk(
+            sse_model_name, response_id, created_ts=created_ts,
+            usage=_openai_usage(metadata) if metadata is not None else None,
+            finish_reason=_openai_finish_reason(reason),
+        )
         yield "data: [DONE]\n\n"
 
     except Exception as e:
@@ -289,7 +298,7 @@ async def _base_fake_stream_engine(
         # upstream-error message to the client.
         vertex_log(
             "error",
-            f"_base_fake_stream_engine error (internal only, model: {sse_model_name}): {type(e).__name__}: {e}",
+            f"Gemini 伪流式引擎出错，模型={sse_model_name}，错误={type(e).__name__}: {e}",
         )
         err_resp_for_sse = create_openai_error_response(
             500, "Upstream service error during streaming.", "server_error"
@@ -315,7 +324,7 @@ async def gemini_fake_stream_generator(
     )
     vertex_log(
         "info",
-        f"FAKE STREAMING (Gemini): Prep for '{request_obj.model}' (API model string: '{model_for_api_call}', client obj: '{model_name_for_log}') with reasoning separation.",
+        f"准备 Gemini 伪流式请求：模型={request_obj.model}，上游模型={model_for_api_call}，客户端模型={model_name_for_log}，分别处理思考与正文",
     )
     response_id = gen_openai_chunk_id()
 
@@ -405,7 +414,7 @@ async def gemini_fake_stream_generator(
                 and hasattr(response_to_check.prompt_feedback, "block_reason")
                 and response_to_check.prompt_feedback.block_reason
             ):
-                block_message = f"Response blocked by safety filter: {response_to_check.prompt_feedback.block_reason}"
+                block_message = f"响应被安全过滤器拦截：{response_to_check.prompt_feedback.block_reason}"
                 if (
                     hasattr(response_to_check.prompt_feedback, "block_reason_message")
                     and response_to_check.prompt_feedback.block_reason_message
@@ -438,7 +447,7 @@ async def gemini_fake_stream_generator(
         # error message to the client.
         vertex_log(
             "error",
-            f"gemini_fake_stream_generator error (internal only, model: {request_obj.model}): {type(e_outer_gemini).__name__}: {e_outer_gemini}",
+            f"Gemini 伪流式响应处理出错，模型={request_obj.model}，错误={type(e_outer_gemini).__name__}: {e_outer_gemini}",
         )
         err_resp_sse = create_openai_error_response(
             500, "Upstream service error during streaming.", "server_error"
@@ -594,7 +603,7 @@ async def execute_gemini_call(
     )
     vertex_log(
         "info",
-        f"execute_gemini_call for requested API model '{model_to_call}', using client object with internal name '{client_model_name_for_log}'. Original request model: '{request_obj.model}'",
+        f"开始 Gemini 请求：上游模型={model_to_call}，客户端模型={client_model_name_for_log}，请求模型={request_obj.model}",
     )
 
     # 每次调用时直接从settings获取最新的FAKE_STREAMING值
@@ -606,7 +615,7 @@ async def execute_gemini_call(
 
     vertex_log(
         "debug",
-        f"FAKE_STREAMING setting is {fake_streaming_enabled} for model {request_obj.model}",
+        f"模型 {request_obj.model} 的伪流式开关：{fake_streaming_enabled}",
     )
 
     if request_obj.stream:
@@ -637,6 +646,7 @@ async def execute_gemini_call(
                 # Prefill 回显剥离（真流式）：跨 chunk 状态机，只在输出
                 # 仍与前缀逐字匹配期间暂存，失配立即放行。
                 _echo_filter = PrefillEchoStreamFilter(_prefill_echo)
+                final_reason = "stop"
                 async for (
                     chunk_item_call
                 ) in await current_client.aio.models.generate_content_stream(
@@ -644,6 +654,10 @@ async def execute_gemini_call(
                     contents=actual_prompt_for_call,
                     config=gen_config_for_call,
                 ):
+                    if getattr(chunk_item_call, "candidates", None):
+                        reason = getattr(chunk_item_call.candidates[0], "finish_reason", None)
+                        if reason is not None:
+                            final_reason = _openai_finish_reason(reason)
                     yield convert_chunk_to_openai(
                         chunk_item_call, request_obj.model, response_id_for_stream, 0,
                         created_ts=created_ts_for_stream,
@@ -670,6 +684,7 @@ async def execute_gemini_call(
                 yield create_final_chunk(
                     request_obj.model, response_id_for_stream, cand_count_stream,
                     created_ts=created_ts_for_stream,
+                    finish_reason=final_reason,
                 )
                 yield "data: [DONE]\n\n"
             except Exception as e_stream_call:
@@ -679,7 +694,7 @@ async def execute_gemini_call(
                 # neutral upstream-error message.
                 vertex_log(
                     "error",
-                    f"Streaming call error (internal only, model: {model_to_call}): {type(e_stream_call).__name__}: {e_stream_call}",
+                    f"流式上游调用失败，模型={model_to_call}，错误={type(e_stream_call).__name__}: {e_stream_call}",
                 )
                 err_resp = create_openai_error_response(500, "Upstream service error during streaming.", "server_error")
                 j_err = json.dumps(err_resp)

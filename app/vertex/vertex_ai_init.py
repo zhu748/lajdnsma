@@ -50,7 +50,7 @@ def _get_client_from_pool(project_id: str, creds, location: str = "global"):
         _client_pool[project_id] = (client, now)
         return client
     except Exception as e:
-        vertex_log("error", f"Error creating Vertex AI client for {project_id}: {e}")
+        vertex_log("error", f"为项目 {project_id} 创建 Vertex 客户端失败：{e}")
         return None
 
 
@@ -71,10 +71,10 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
     """
     # 如果未传入credential_manager，则创建一个新的实例
     if credential_manager is None:
-        vertex_log("info", "Creating new CredentialManager instance")
+        vertex_log("info", f"正在创建凭证管理器")
         credential_manager = CredentialManager()
     else:
-        vertex_log("info", "Using provided CredentialManager instance")
+        vertex_log("info", f"使用传入的凭证管理器")
 
     try:
         credentials_json_str = app_config.GOOGLE_CREDENTIALS_JSON
@@ -84,7 +84,7 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
         if credentials_json_str and credentials_json_str.strip():
             vertex_log(
                 "info",
-                "Found GOOGLE_CREDENTIALS_JSON environment variable. Attempting to load into CredentialManager.",
+                f"检测到 GOOGLE_CREDENTIALS_JSON，正在加载到凭证管理器",
             )
             try:
                 # Attempt 1: Parse as multiple JSON objects
@@ -92,7 +92,7 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
                 if json_objects:
                     vertex_log(
                         "debug",
-                        f"Parsed {len(json_objects)} potential credential objects from GOOGLE_CREDENTIALS_JSON.",
+                        f"已从 GOOGLE_CREDENTIALS_JSON 解析 {len(json_objects)} 个候选凭证",
                     )
                     success_count = credential_manager.load_credentials_from_json_list(
                         json_objects
@@ -100,7 +100,7 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
                     if success_count > 0:
                         vertex_log(
                             "info",
-                            f"Successfully loaded {success_count} credentials from GOOGLE_CREDENTIALS_JSON into manager.",
+                            f"已从 GOOGLE_CREDENTIALS_JSON 加载 {success_count} 个凭证",
                         )
                         env_creds_loaded_into_manager = True
 
@@ -108,7 +108,7 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
                 if not env_creds_loaded_into_manager:
                     vertex_log(
                         "debug",
-                        "Multi-JSON loading from GOOGLE_CREDENTIALS_JSON did not add to manager or was empty. Attempting single JSON load.",
+                        f"多个 JSON 凭证加载为空或未成功，尝试按单个 JSON 凭证加载",
                     )
                     try:
                         credentials_info = json.loads(credentials_json_str)
@@ -129,52 +129,52 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
                             ):
                                 vertex_log(
                                     "info",
-                                    "Successfully loaded single credential from GOOGLE_CREDENTIALS_JSON into manager.",
+                                    f"已将单个 JSON 凭证加载到管理器",
                                 )
                                 # env_creds_loaded_into_manager = True # Redundant, as this block is conditional on it being False
                             else:
                                 vertex_log(
                                     "warning",
-                                    "Single JSON from GOOGLE_CREDENTIALS_JSON failed to load into manager via add_credential_from_json.",
+                                    f"通过管理器添加单个 JSON 凭证失败",
                                 )
                         else:
                             vertex_log(
                                 "warning",
-                                "Single JSON from GOOGLE_CREDENTIALS_JSON is not a valid dict or missing required fields for basic check.",
+                                f"单个 JSON 凭证不是有效对象，或缺少必填字段",
                             )
                     except json.JSONDecodeError as single_json_err:
                         vertex_log(
                             "warning",
-                            f"GOOGLE_CREDENTIALS_JSON could not be parsed as a single JSON object: {single_json_err}.",
+                            f"GOOGLE_CREDENTIALS_JSON 无法解析为单个 JSON 对象：{single_json_err}",
                         )
                     except Exception as single_load_err:
                         vertex_log(
                             "warning",
-                            f"Error trying to load single JSON from GOOGLE_CREDENTIALS_JSON into manager: {single_load_err}.",
+                            f"向管理器加载单个 JSON 凭证失败：{single_load_err}",
                         )
             except Exception as e_json_env:
                 # This catches errors from parse_multiple_json_credentials or load_credentials_from_json_list
                 vertex_log(
                     "warning",
-                    f"Error processing GOOGLE_CREDENTIALS_JSON env var: {e_json_env}.",
+                    f"处理 GOOGLE_CREDENTIALS_JSON 配置失败：{e_json_env}",
                 )
         else:
             vertex_log(
                 "info",
-                "GOOGLE_CREDENTIALS_JSON environment variable not found, is empty, or contains only whitespace.",
+                f"GOOGLE_CREDENTIALS_JSON 未配置或为空",
             )
 
         # Attempt to pre-warm the model configuration cache
         vertex_log(
-            "info", "Attempting to pre-warm model configuration cache during startup..."
+            "info", f"启动时预热模型配置缓存"
         )
         models_loaded_successfully = await refresh_models_config_cache()
         if models_loaded_successfully:
-            vertex_log("info", "Model configuration cache pre-warmed successfully.")
+            vertex_log("info", f"模型配置缓存预热成功")
         else:
             vertex_log(
                 "warning",
-                "Failed to pre-warm model configuration cache during startup. It will be loaded lazily on first request.",
+                f"启动预热模型配置失败，将在首次请求时延迟加载",
             )
             # We don't necessarily fail the entire init_vertex_ai if model list fetching fails,
             # as credential validation might still be important, and model list can be fetched later.
@@ -186,14 +186,14 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
             total_creds = credential_manager.get_total_credentials()
             vertex_log(
                 "info",
-                f"Credential Manager reports {total_creds} credential(s) available (from files and/or GOOGLE_CREDENTIALS_JSON).",
+                f"凭证管理器当前有 {total_creds} 个可用凭证",
             )
 
             # Optional: Attempt to validate one of the credentials by creating a temporary client.
             # This adds a check that at least one credential is functional.
             vertex_log(
                 "info",
-                "Attempting to validate a random credential by creating a temporary client...",
+                f"正在通过临时客户端验证一个凭证",
             )
             temp_creds_val, temp_project_id_val = (
                 credential_manager.get_random_credentials()
@@ -208,13 +208,13 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
                     )
                     vertex_log(
                         "info",
-                        f"Successfully validated a credential from Credential Manager (Project: {temp_project_id_val}). Initialization check passed.",
+                        f"项目 {temp_project_id_val} 的凭证验证成功，初始化检查通过",
                     )
                     return True
                 except Exception as e_val:
                     vertex_log(
                         "warning",
-                        f"Failed to validate a random credential from manager by creating a temp client: {e_val}. App may rely on non-validated credentials.",
+                        f"通过临时客户端验证凭证失败：{e_val}；请检查凭证有效性",
                     )
                     # Still return True if credentials exist, as the app might still function with other valid credentials.
                     # The per-request client creation will be the ultimate test for a specific credential.
@@ -226,22 +226,22 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
             ):  # Credentials listed but get_random_credentials returned None
                 vertex_log(
                     "warning",
-                    f"{total_creds} credentials reported by manager, but could not retrieve one for validation. Problems might occur.",
+                    f"管理器报告有 {total_creds} 个凭证，但无法取出供验证的凭证，请检查配置",
                 )
                 return True  # Still, credentials are listed.
             else:  # No creds from get_random_credentials and total_creds is 0
                 vertex_log(
                     "error",
-                    "No credentials available after attempting to load from all sources.",
+                    f"已尝试全部凭证来源，仍无可用凭证",
                 )
                 return False  # No credentials reported by manager and get_random_credentials gave none.
         else:
             vertex_log(
                 "error",
-                "Credential Manager reports no available credentials after processing all sources.",
+                f"处理完全部来源后仍无可用凭证",
             )
             return False
 
     except Exception as e:
-        vertex_log("error", f"CRITICAL ERROR during Vertex AI credential setup: {e}")
+        vertex_log("error", f"Vertex 凭证初始化发生严重错误：{e}")
         return False

@@ -1,8 +1,36 @@
 """LogManager：有界环形缓冲 + JSON 行格式的双通道日志。"""
 import logging
+import json
+import os
+import re
+import time
+from contextvars import ContextVar
 from datetime import datetime
 from collections import deque
 from threading import Lock
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+_current_request_report = ContextVar("current_request_report", default=None)
+LEVEL_LABELS = {"DEBUG": "调试", "INFO": "信息", "WARNING": "警告", "ERROR": "错误", "CRITICAL": "严重错误"}
+TYPE_LABELS = {"stream": "流式", "non-stream": "非流式", "fake-stream": "伪流式", "switch_key": "密钥切换", "vertex": "Vertex"}
+REPORT_FIELDS = (
+    "event", "request_id", "path", "outcome", "source", "duration_ms", "usage",
+    "response_chars", "reasoning_chars", "response_preview", "reasoning_preview",
+    "tool_calls", "finish_reason", "capture_truncated",
+)
+try:
+    LOG_TIMEZONE = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
+except (ZoneInfoNotFoundError, ValueError):
+    LOG_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def redact_log_text(value):
+    text = str(value)
+    text = re.sub(r"(?i)((?:Bearer|Basic)\s+)[^\s\"'<>]+", r"\1[已隐藏]", text)
+    text = re.sub(r"(?:AIza[A-Za-z0-9_-]{30,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})", "[密钥已隐藏]", text)
+    text = re.sub(r"(?i)([?&](?:key|api_key|token|password)=)[^&\s]+", r"\1[已隐藏]", text)
+    text = re.sub(r"-----BEGIN (?:RSA )?PRIVATE KEY-----.*?(?:-----END (?:RSA )?PRIVATE KEY-----|$)", "[私钥已隐藏]", text, flags=re.DOTALL)
+    return text
 
 DEBUG = False  # 可以从环境变量中获取
 
@@ -45,7 +73,7 @@ class LogManager:
 
     def get_recent_logs(self, count=50):
         with self.lock:
-            return list(self.logs)[-count:]
+            return list(self.logs)[-count:] if count > 0 else []
 
 
 # 创建日志管理器实例 (输出到前端)
@@ -59,14 +87,19 @@ vertex_log_manager = VertexLogManager()
 
 def format_log_message(level, message, extra=None):
     extra = extra or {}
+    message = redact_log_text(message)
+    extra = dict(extra)
+    for name in ("key", "model", "error_message", "response_preview", "reasoning_preview"):
+        if name in extra and isinstance(extra[name], str):
+            extra[name] = redact_log_text(extra[name])
     # Perf: 时间戳只计算一次（旧实现每条日志调用两次
     # datetime.now().strftime，log() 是每请求多次的热路径）
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(LOG_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     log_values = {
         "asctime": now_str,
-        "levelname": level,
+        "levelname": LEVEL_LABELS.get(level, level),
         "key": extra.get("key", ""),
-        "request_type": extra.get("request_type", ""),
+        "request_type": TYPE_LABELS.get(extra.get("request_type", ""), extra.get("request_type", "")),
         "model": extra.get("model", ""),
         "status_code": extra.get("status_code", ""),
         "error_message": extra.get("error_message", ""),
@@ -74,19 +107,30 @@ def format_log_message(level, message, extra=None):
     }
     log_format = LOG_FORMAT_DEBUG if DEBUG else LOG_FORMAT_NORMAL
     formatted_log = log_format % log_values
+    if extra.get("error_message") and not DEBUG:
+        formatted_log += f"｜错误详情：{extra['error_message']}"
+    if extra.get("request_id"):
+        formatted_log += f"｜请求编号 {extra['request_id']}｜路径 {extra.get('path', '')}"
+    for field, label in (("response_preview", "返回预览"), ("reasoning_preview", "思考预览")):
+        if extra.get(field):
+            formatted_log += f"\n  {label}：{json.dumps(extra[field], ensure_ascii=False)}"
 
     # 将格式化后的日志添加到日志管理器
     log_entry = {
+        "created_ns": time.time_ns(),
         "timestamp": now_str,
         "level": level,
+        "level_label": LEVEL_LABELS.get(level, level),
         "key": extra.get("key", ""),
         "request_type": extra.get("request_type", ""),
+        "request_type_label": TYPE_LABELS.get(extra.get("request_type", ""), extra.get("request_type", "")),
         "model": extra.get("model", ""),
         "status_code": extra.get("status_code", ""),
         "message": message,
         "error_message": extra.get("error_message", ""),
         "formatted": formatted_log,
     }
+    log_entry.update({name: extra[name] for name in REPORT_FIELDS if name in extra})
     log_manager.add_log(log_entry)
 
     return formatted_log
@@ -94,10 +138,14 @@ def format_log_message(level, message, extra=None):
 
 def vertex_format_log_message(level, message, extra=None):
     extra = extra or {}
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    message = redact_log_text(message)
+    extra = dict(extra)
+    if extra.get("error_message"):
+        extra["error_message"] = redact_log_text(extra["error_message"])
+    now_str = datetime.now(LOG_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     log_values = {
         "asctime": now_str,
-        "levelname": level,
+        "levelname": LEVEL_LABELS.get(level, level),
         "vertex_id": extra.get("vertex_id", ""),
         "operation": extra.get("operation", ""),
         "status": extra.get("status", ""),
@@ -106,11 +154,19 @@ def vertex_format_log_message(level, message, extra=None):
     }
     log_format = VERTEX_LOG_FORMAT_DEBUG if DEBUG else VERTEX_LOG_FORMAT_NORMAL
     formatted_log = log_format % log_values
+    if extra.get("error_message") and not DEBUG:
+        formatted_log += f"｜错误详情：{extra['error_message']}"
 
     # 将格式化后的Vertex日志添加到Vertex日志管理器
     log_entry = {
+        "created_ns": time.time_ns(),
         "timestamp": now_str,
         "level": level,
+        "level_label": LEVEL_LABELS.get(level, level),
+        "request_type": "vertex",
+        "request_type_label": "Vertex",
+        "model": extra.get("model", ""),
+        "status_code": extra.get("status", ""),
         "vertex_id": extra.get("vertex_id", ""),
         "operation": extra.get("operation", ""),
         "status": extra.get("status", ""),
@@ -135,8 +191,21 @@ def _merge_extra(extra: dict = None, **kwargs) -> dict:
     return final_extra
 
 
+def record_response_usage(usage_metadata):
+    """只向当前请求补充用量；不额外输出日志，也不记录原始响应正文。"""
+    report = _current_request_report.get()
+    if report is not None and isinstance(usage_metadata, dict):
+        try:
+            report.update_event({"usage_metadata": usage_metadata})
+        except (TypeError, ValueError, AttributeError):
+            pass
+
+
 def log(level: str, message: str, extra: dict = None, **kwargs):
     final_extra = _merge_extra(extra, **kwargs)
+    report = _current_request_report.get()
+    if report is not None:
+        report.update_event(final_extra)
     msg = format_log_message(level.upper(), message, extra=final_extra)
     getattr(logger, level.lower())(msg)
 

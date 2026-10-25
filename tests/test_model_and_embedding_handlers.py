@@ -50,6 +50,36 @@ def load_embedding_handlers():
 
 
 class ModelAndEmbeddingHandlersTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_invalid_vector_parameters_are_400_before_key_selection(self):
+        module, HTTPException = load_embedding_handlers()
+
+        class Keys:
+            async def get_available_key(self):
+                raise AssertionError("无效参数不能先消耗或选择密钥")
+
+        class Request:
+            def __init__(self, body):
+                self.body = body
+
+            @property
+            def headers(self):
+                raise AssertionError("运行日志不能读取完整请求头")
+
+            async def json(self):
+                if self.body is ValueError:
+                    raise ValueError("invalid JSON")
+                return self.body
+
+        for handler, bodies in (
+            (module.handle_vector_query, [ValueError, [], {}, {"model": "m"}, {"model": 3, "searchText": "a"}, {"model": "m", "searchText": []}]),
+            (module.handle_vector_insert, [ValueError, [], {}, {"model": "m", "items": []}, {"model": "m", "items": ["a"]}, {"model": "m", "items": [{"text": None}]}]),
+        ):
+            for body in bodies:
+                with self.subTest(handler=handler.__name__, body=body):
+                    with self.assertRaises(HTTPException) as result:
+                        await handler(Request(body), Keys(), None, None, lambda *args, **kwargs: None)
+                    self.assertEqual(result.exception.status_code, 400)
+
     async def test_build_aistudio_model_list(self):
         module = load_model_handlers()
         result = module.build_aistudio_model_list(

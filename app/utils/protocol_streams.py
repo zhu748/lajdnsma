@@ -16,6 +16,7 @@ from app.utils.protocol_common import (
     _gen_anthropic_message_id,
     _gen_anthropic_tool_use_id,
     _gen_anthropic_thinking_signature,
+    _responses_completion_status,
 )
 from app.utils.sse import sse_event
 
@@ -67,6 +68,7 @@ async def openai_stream_to_responses_stream(
     output_items: List[Dict[str, Any]] = []
     active_tool_calls: Dict[int, Dict[str, Any]] = {}
     latest_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    terminal_status, incomplete_details = "completed", None
 
     def build_message_item(status: str = "in_progress") -> Dict[str, Any]:
         return {
@@ -88,10 +90,10 @@ async def openai_stream_to_responses_stream(
             "id": response_id,
             "model": model,
             "object": "response",
-            "status": "completed",
+            "status": terminal_status,
             "created_at": created_at,
             "error": None,
-            "incomplete_details": None,
+            "incomplete_details": incomplete_details,
             "output": output_items,
             "usage": latest_usage,
         }
@@ -204,6 +206,7 @@ async def openai_stream_to_responses_stream(
 
             if not choice.get("finish_reason"):
                 continue
+            terminal_status, incomplete_details = _responses_completion_status(choice["finish_reason"])
             if text_output_index is None and not output_items:
                 text_output_index = len(output_items)
                 output_items.append(build_message_item())
@@ -257,7 +260,7 @@ async def openai_stream_to_responses_stream(
                         "part": done_part,
                     }
                 )
-                done_item = build_message_item(status="completed")
+                done_item = build_message_item(status=terminal_status)
                 output_items[text_output_index] = done_item
                 yield response_event(
                     {
@@ -293,7 +296,7 @@ async def openai_stream_to_responses_stream(
                         "arguments": item["arguments"],
                     }
                 )
-                item["status"] = "completed"
+                item["status"] = terminal_status
                 output_items[state["output_index"]] = item
                 state["done"] = True
                 yield response_event(
@@ -307,7 +310,7 @@ async def openai_stream_to_responses_stream(
 
             yield response_event(
                 {
-                    "type": "response.completed",
+                    "type": f"response.{terminal_status}",
                     "response": build_completed_response(),
                     "usage": latest_usage,
                 }

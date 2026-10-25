@@ -42,7 +42,7 @@ async def list_models_basic(credentials: HTTPAuthorizationCredentials = Depends(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     # Get available models
-    vertex_log("info", "Retrieving list of available models")
+    vertex_log("info", f"正在读取可用模型列表")
     standard_models = await get_vertex_models()
     express_models = await get_vertex_express_models()
 
@@ -104,7 +104,7 @@ async def list_models_basic(credentials: HTTPAuthorizationCredentials = Depends(
             }
         )
 
-    vertex_log("info", f"Found {len(all_models)} available models")
+    vertex_log("info", f"发现 {len(all_models)} 个可用模型")
 
     return {"object": "list", "data": all_models}
 
@@ -120,7 +120,7 @@ async def refresh_models(credentials: HTTPAuthorizationCredentials = Depends(sec
     if not validate_api_key(credentials.credentials):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    vertex_log("info", "Attempting to refresh models configuration")
+    vertex_log("info", f"正在刷新模型配置")
 
     # Attempt refresh
     success = await refresh_models_config_cache()
@@ -132,7 +132,7 @@ async def refresh_models(credentials: HTTPAuthorizationCredentials = Depends(sec
 
         vertex_log(
             "info",
-            f"Models refresh successful. Standard: {len(standard_models)}, Express: {len(express_models)}",
+            f"模型刷新成功：标准模型 {len(standard_models)} 个，Express 模型 {len(express_models)} 个",
         )
 
         return {
@@ -145,7 +145,7 @@ async def refresh_models(credentials: HTTPAuthorizationCredentials = Depends(sec
             },
         }
     else:
-        vertex_log("error", "Failed to refresh models configuration")
+        vertex_log("error", f"模型配置刷新失败")
 
         raise HTTPException(
             status_code=500, detail="Failed to refresh models configuration"

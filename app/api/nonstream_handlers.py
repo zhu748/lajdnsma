@@ -85,7 +85,7 @@ async def process_request(
             valid_keys,
             request_type="non-stream",
             model=chat_request.model,
-            label="non-stream request start",
+            label="非流式请求开始",
             task_factory=lambda api_key: build_nonstream_task(
                 chat_request,
                 contents,
@@ -218,7 +218,7 @@ async def process_nonstream_with_keepalive_stream(
                     valid_keys,
                     request_type="non-stream",
                     model=chat_request.model,
-                    label="non-stream request start",
+                    label="非流式请求开始",
                     task_factory=lambda api_key: asyncio.create_task(
                         process_nonstream_request(
                             chat_request,
@@ -313,7 +313,7 @@ async def process_nonstream_with_keepalive_stream(
         except Exception as e:
             log(
                 "error",
-                f"keepalive stream processing error: {str(e)}",
+                f"非流式保活响应处理失败：{str(e)}",
                 extra={"request_type": "non-stream", "keepalive": True},
             )
             raise

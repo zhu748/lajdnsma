@@ -9,6 +9,7 @@ from app.utils.protocol_common import (
     _now_ts,
     _openai_finish_reason_to_claude_stop_reason,
     _gen_anthropic_thinking_signature,
+    _responses_completion_status,
 )
 from app.utils.stealth import (
     gen_anthropic_message_id,
@@ -22,6 +23,7 @@ def openai_chat_to_response_api(
 ) -> Dict[str, Any]:
     request_payload = request_payload or {}
     choice = (chat_response.get("choices") or [{}])[0]
+    status, incomplete_details = _responses_completion_status(choice.get("finish_reason"))
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
     output_items: List[Dict[str, Any]] = []
@@ -32,7 +34,7 @@ def openai_chat_to_response_api(
             {
                 "type": "message",
                 "id": gen_openai_message_id(),
-                "status": "completed",
+                "status": status,
                 "role": "assistant",
                 "content": [
                     {"type": "output_text", "text": text_content, "annotations": []}
@@ -51,7 +53,7 @@ def openai_chat_to_response_api(
                 "call_id": tool_call.get("id", f"fc_{_now_ts()}"),
                 "name": function_data.get("name"),
                 "arguments": function_data.get("arguments", "{}"),
-                "status": "completed",
+                "status": status,
             }
         )
 
@@ -68,9 +70,9 @@ def openai_chat_to_response_api(
         "id": gen_openai_response_id(),
         "object": "response",
         "created_at": chat_response.get("created", _now_ts()),
-        "status": "completed",
+        "status": status,
         "error": None,
-        "incomplete_details": None,
+        "incomplete_details": incomplete_details,
         "instructions": request_payload.get("instructions"),
         "metadata": request_payload.get("metadata") or {},
         "model": chat_response.get("model"),

@@ -42,7 +42,7 @@ def build_keyed_tasks(valid_keys, *, request_type: str, model: str, label: str, 
 def log_request_start(api_key: str, *, request_type: str, model: str, label: str):
     log(
         "info",
-        f"{label}, using key: {key_preview(api_key)}...",
+        f"{label}，使用密钥：{key_preview(api_key)}",
         extra={"key": key_preview(api_key), "request_type": request_type, "model": model},
     )
 
@@ -62,7 +62,7 @@ def log_empty_response_count(
     model: str,
     empty_response_count: int,
     max_empty_responses: int,
-    label: str = "empty response count",
+    label: str = "空响应次数",
 ):
     log(
         "warning",
@@ -77,12 +77,12 @@ def log_request_failure(
     request_type: str,
     model: str,
     error_detail: str,
-    label: str = "request failed",
+    label: str = "请求失败",
 ):
     log(
         "error",
         f"{label}: {error_detail}",
-        extra={"key": key_preview(api_key), "request_type": request_type, "model": model},
+        extra={"key": key_preview(api_key), "request_type": request_type, "model": model, "upstream_error": True},
     )
 
 
@@ -91,7 +91,7 @@ def log_concurrency_increase(
     request_type: str,
     model: str,
     current_concurrent: int,
-    label: str = "increased concurrency after failed batch",
+    label: str = "失败后调整并发数",
 ):
     log(
         "info",
@@ -101,10 +101,10 @@ def log_concurrency_increase(
 
 
 def log_all_keys_failed(*, request_type: str, model: str, key: str | None = None):
-    extra = {"request_type": request_type, "model": model}
+    extra = {"request_type": request_type, "model": model, "terminal_failure": True}
     if key is not None:
         extra["key"] = key
-    log("error", "API key rotation failed; all available keys were tried", extra=extra)
+    log("error", f"密钥轮换失败：所有可用密钥均已尝试", extra=extra)
 
 
 def build_all_keys_failed_response(*, is_gemini: bool, model: str, stream: bool):

@@ -517,8 +517,8 @@ async def _update_key_rotation_strategy(config_value):
     runtime.key_manager._reset_key_stack()
     log(
         "info",
-        f"Key rotation strategy updated to: {normalized} "
-        f"({'粘住一个 key 直到额度耗尽' if normalized == 'fill' else '轮询轮换所有 key'})",
+        f"密钥轮换策略已更新为：{normalized} "
+        f"（{'固定使用一个密钥直到额度耗尽' if normalized == 'fill' else '轮询使用全部密钥'}）",
     )
 
 
@@ -590,7 +590,7 @@ async def _update_responses_default_model(config_value):
         config_value, settings.RESPONSES_MODEL_ALIASES
     )
     settings.RESPONSES_DEFAULT_MODEL = value
-    log("info", f"Responses default model updated to: {value or 'auto'}")
+    log("info", f"Responses 默认模型已更新为：{value or '自动选择'}")
 
 
 async def _update_responses_model_aliases(config_value):
@@ -598,7 +598,7 @@ async def _update_responses_model_aliases(config_value):
         settings.RESPONSES_DEFAULT_MODEL, config_value
     )
     settings.RESPONSES_MODEL_ALIASES = aliases
-    log("info", f"Responses model aliases updated, count: {len(aliases)}")
+    log("info", f"Responses 模型别名已更新，共 {len(aliases)} 条")
 
 
 async def _update_claude_default_model(config_value):
@@ -606,7 +606,7 @@ async def _update_claude_default_model(config_value):
         config_value, settings.CLAUDE_MODEL_ALIASES
     )
     settings.CLAUDE_DEFAULT_MODEL = value
-    log("info", f"Claude default model updated to: {value or 'auto'}")
+    log("info", f"Claude 默认模型已更新为：{value or '自动选择'}")
 
 
 async def _update_claude_model_aliases(config_value):
@@ -614,7 +614,7 @@ async def _update_claude_model_aliases(config_value):
         settings.CLAUDE_DEFAULT_MODEL, config_value
     )
     settings.CLAUDE_MODEL_ALIASES = aliases
-    log("info", f"Claude model aliases updated, count: {len(aliases)}")
+    log("info", f"Claude 模型别名已更新，共 {len(aliases)} 条")
 
 
 # ---------------------------------------------------------------------------

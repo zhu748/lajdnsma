@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timezone
 
 from app.utils.sse import sse_data
+from app.utils.logging import record_response_usage
 from app.utils.stealth import (
     gen_openai_chunk_id,
     gen_openai_tool_call_id,
@@ -120,6 +121,9 @@ def openAI_from_Gemini(
     Returns:
         OpenAI 标准响应
     """
+    raw_data = getattr(response, "data", None)
+    if isinstance(raw_data, dict):
+        record_response_usage(raw_data.get("usageMetadata"))
     now_time = int(time.time()) if created is None else created
     # Strong random chunk id (replaces chatcmpl-{ts}).
     chunk_id = gen_openai_chunk_id() if chunk_id is None else chunk_id
@@ -135,12 +139,19 @@ def openAI_from_Gemini(
     prompt_tokens_raw = getattr(response, "prompt_token_count", None)
     candidates_tokens_raw = getattr(response, "candidates_token_count", None)
     total_tokens_raw = getattr(response, "total_token_count", None)
+    reasoning_tokens_raw = getattr(response, "thoughts_token_count", None)
 
     usage_data = {
         "prompt_tokens": int(prompt_tokens_raw) if prompt_tokens_raw else 0,
         "completion_tokens": int(candidates_tokens_raw) if candidates_tokens_raw else 0,
         "total_tokens": int(total_tokens_raw) if total_tokens_raw else 0,
     }
+    if reasoning_tokens_raw is not None:
+        reasoning_tokens = int(reasoning_tokens_raw)
+        usage_data["completion_tokens"] += reasoning_tokens
+        usage_data["completion_tokens_details"] = {"reasoning_tokens": reasoning_tokens}
+    if not total_tokens_raw:
+        usage_data["total_tokens"] = usage_data["prompt_tokens"] + usage_data["completion_tokens"]
 
     if response.function_call:
         formatted_chunk["choices"][0]["finish_reason"] = "tool_calls"

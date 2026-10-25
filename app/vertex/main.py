@@ -79,7 +79,7 @@ async def startup_event():
         if await init_vertex_ai(credential_manager):
             vertex_log(
                 "info",
-                "Vertex AI credential and model config initialization check completed successfully.",
+                f"Vertex 凭证与模型配置初始化检查成功",
             )
 
             # 刷新模型配置缓存
@@ -93,7 +93,7 @@ async def startup_event():
         else:
             vertex_log(
                 "error",
-                "Failed to initialize a fallback Vertex AI client. API will likely fail.",
+                f"备用 Vertex 客户端初始化失败，后续请求可能不可用",
             )
     except Exception as e:
         vertex_log("error", f"启动时初始化Vertex AI服务出错: {str(e)}")
@@ -136,5 +136,5 @@ async def status():
     # Hardening: previously echoed a static version string and an
     # explicit list of available endpoints.  We now return only a
     # minimal online status — no version, no endpoint list.
-    vertex_log("info", "Status check requested")
+    vertex_log("info", f"收到服务状态检查请求")
     return {"status": "online"}

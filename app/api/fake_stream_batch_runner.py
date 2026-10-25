@@ -104,7 +104,7 @@ async def run_fake_stream_batch_until_success(
                             api_key,
                             request_type="fake-stream",
                             model=chat_request.model,
-                            label="fake stream request success",
+                            label="伪流式请求成功",
                         )
                         if completed_response is not None:
                             if is_gemini:

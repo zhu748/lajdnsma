@@ -33,5 +33,5 @@ def log_empty_response_limit(empty_response_count: int, max_empty_responses: int
     log(
         "warning",
         f"空响应次数达到上限 ({empty_response_count}/{max_empty_responses})，停止轮询",
-        extra={"request_type": request_type, "model": model},
+        extra={"request_type": request_type, "model": model, "terminal_failure": True},
     )
