@@ -97,7 +97,7 @@ class RequestHelpersTestCase(unittest.IsolatedAsyncioTestCase):
             def get(self, key):
                 return task
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 self.removed.append(key)
 
         result = await module.wait_for_existing_task(

@@ -33,7 +33,7 @@ class ChatCompletionRequest(BaseModel):
     source_protocol: Optional[str] = None
     # 函数调用
     tools: Optional[List[Dict[str, Any]]] = None
-    tool_choice: Optional[Union[Literal["none", "auto"], Dict[str, Any]]] = "auto"
+    tool_choice: Optional[Union[Literal["none", "auto", "required"], Dict[str, Any]]] = "auto"
     # Pass-through field for OpenAI Responses API parity.  Previously
     # silently dropped on conversion; clients that sent
     # `parallel_tool_calls=false` would still see Gemini emit parallel
@@ -52,6 +52,7 @@ class ChatRequestGemini(BaseModel):
     safetySettings: Optional[List[Dict[str, Any]]] = None
     generationConfig: Optional[Dict[str, Any]] = None
     tools: Optional[List[Dict[str, Any]]] = None
+    tool_config: Optional[Dict[str, Any]] = Field(default=None, alias="toolConfig")
 
 
 # AI模型请求包装

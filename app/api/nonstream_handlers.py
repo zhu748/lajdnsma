@@ -25,6 +25,7 @@ from app.utils.response_loop_helpers import (
     log_concurrency_increase,
 )
 from app.utils.retry_state import (
+    cancel_pending_tasks,
     compute_inter_batch_backoff,
     elevate_pvp_backoff,
     increase_concurrency,
@@ -169,6 +170,7 @@ async def process_nonstream_with_keepalive_stream(
     is_gemini: bool,
 ):
     async def keepalive_stream_generator():
+        tasks = []
         try:
             _, contents, system_instruction = prepare_request_messages(chat_request)
             current_concurrent = settings.CONCURRENT_REQUESTS
@@ -315,6 +317,10 @@ async def process_nonstream_with_keepalive_stream(
                 extra={"request_type": "non-stream", "keepalive": True},
             )
             raise
+        finally:
+            # 客户端可能恰好在 yield 保活字节时断开，尚未返回批次等待器；
+            # GeneratorExit 也必须取消仍在运行的上游任务。
+            cancel_pending_tasks(tasks)
 
     return StreamingResponse(
         keepalive_stream_generator(), media_type="application/json"

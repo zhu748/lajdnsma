@@ -257,7 +257,7 @@ def response_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionR
             reasoning_effort = effort.lower()
 
     return ChatCompletionRequest(
-        model=payload["model"],
+        model=payload.get("model"),
         messages=messages,
         temperature=payload.get("temperature", 0.7),
         top_p=payload.get("top_p"),
@@ -493,7 +493,7 @@ def claude_request_to_chat_request(payload: Dict[str, Any]) -> ChatCompletionReq
             )
 
     return ChatCompletionRequest(
-        model=payload["model"],
+        model=payload.get("model"),
         messages=messages,
         temperature=payload.get("temperature", 0.7),
         top_p=payload.get("top_p"),

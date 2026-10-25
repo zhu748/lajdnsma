@@ -70,7 +70,7 @@ class OrchestrationHelpersTestCase(unittest.IsolatedAsyncioTestCase):
             def add(self, key, task):
                 self.added.append((key, task))
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 self.removed.append(key)
 
         manager = Manager()
@@ -139,7 +139,7 @@ class AwaitTaskHttpExceptionPassThroughTestCase(unittest.IsolatedAsyncioTestCase
             def __init__(self):
                 self.removed = []
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 self.removed.append(key)
 
         mgr = Manager()
@@ -169,7 +169,7 @@ class AwaitTaskHttpExceptionPassThroughTestCase(unittest.IsolatedAsyncioTestCase
         task = asyncio.create_task(boom_task())
 
         class Manager:
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 pass
 
         async def fake_get_cache(cache_key, is_stream, is_gemini):

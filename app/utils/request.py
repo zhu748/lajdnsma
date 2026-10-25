@@ -22,9 +22,11 @@ class ActiveRequestsManager:
         """获取活跃请求任务"""
         return self.active_requests.get(key)
 
-    def remove(self, key: str):
-        """移除活跃请求任务"""
-        if key in self.active_requests:
+    def remove(self, key: str, expected_task=None):
+        """只清理当前任务，避免旧请求的收尾删除同键的新任务。"""
+        if key in self.active_requests and (
+            expected_task is None or self.active_requests[key] is expected_task
+        ):
             del self.active_requests[key]
             return True
         return False

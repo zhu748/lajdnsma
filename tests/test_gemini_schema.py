@@ -285,6 +285,47 @@ class GeminiSchemaTestCase(unittest.TestCase):
         self.assertEqual(thinking_config["thinkingBudget"], 1024)
         self.assertNotIn("include_thoughts", thinking_config)
 
+    def test_convert_openai_tool_choices_preserves_required_semantics(self):
+        module = load_gemini_module()
+        module.settings.ENABLE_THINKING = False
+        client = module.GeminiClient("test-key")
+        choices = [
+            ("auto", {"mode": "AUTO"}),
+            ("none", {"mode": "NONE"}),
+            ("required", {"mode": "ANY"}),
+            (
+                {"type": "function", "function": {"name": "weather"}},
+                {"mode": "ANY", "allowed_function_names": ["weather"]},
+            ),
+            ({"type": "function_calling_config", "mode": "ANY"}, {"mode": "ANY"}),
+        ]
+        for choice, expected in choices:
+            with self.subTest(choice=choice):
+                request = types.SimpleNamespace(
+                    model="gemini-2.5-pro",
+                    temperature=0.7,
+                    max_tokens=None,
+                    top_p=None,
+                    top_k=None,
+                    stop=None,
+                    n=1,
+                    thinking_budget=None,
+                    tools=[
+                        {"type": "function", "function": {"name": "weather"}},
+                        {"type": "function", "function": {"name": "search"}},
+                    ],
+                    tool_choice=choice,
+                )
+                _, data = client._convert_openAI_request(request, [], None, None)
+                self.assertEqual(data["tool_config"]["function_calling_config"], expected)
+
+                request.parallel_tool_calls = False
+                _, data = client._convert_openAI_request(request, [], None, None)
+                self.assertEqual(
+                    data["tool_config"]["function_calling_config"],
+                    dict(expected, parallel_function_calls=False),
+                )
+
     def test_convert_messages_preserves_tool_call_thought_signature(self):
         module = load_gemini_module()
         client = module.GeminiClient("test-key")

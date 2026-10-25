@@ -1,17 +1,23 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
 from pathlib import Path
+
+# 测试加载器会替换 fastapi 根模块；提前加载新增的真实异常依赖。
+from fastapi.exceptions import RequestValidationError
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeStreamingResponse:
-    def __init__(self, body_iterator, media_type=None):
+    def __init__(self, body_iterator, media_type=None, status_code=200, background=None):
         self.body_iterator = body_iterator
         self.media_type = media_type
+        self.status_code = status_code
+        self.background = background
 
 
 async def _iter_chunks(chunks):
@@ -111,6 +117,53 @@ def load_protocol_handlers():
 
 
 class ProtocolHandlersTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_closing_json_adapter_closes_underlying_iterator(self):
+        module = load_protocol_handlers()
+        closed = []
+
+        async def keepalive():
+            try:
+                yield "\n"
+                yield '{"id":"test"}'
+            finally:
+                closed.append(True)
+
+        response = module._adapt_json_keepalive(
+            FakeStreamingResponse(keepalive(), media_type="application/json"), lambda data: data,
+        )
+        self.assertEqual(await anext(response.body_iterator), "\n")
+        await response.body_iterator.aclose()
+        self.assertEqual(closed, [True])
+
+    async def test_json_keepalive_preserves_json_protocol_and_fragmented_utf8(self):
+        module = load_protocol_handlers()
+        payload = {"id": "chatcmpl_1", "text": "你好 世界"}
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        # 在多字节字符中间切块，模拟真实网络分块。
+        split = encoded.index("你".encode("utf-8")) + 1
+        blank = encoded.index(" 世界".encode("utf-8"))
+        marker = object()
+
+        async def fake_chat_handler(*args):
+            return FakeStreamingResponse(
+                _iter_chunks([b"\n", encoded[:split], encoded[split:blank], b" ", encoded[blank + 1:]]),
+                media_type="application/json", status_code=202, background=marker,
+            )
+
+        for handler, kind in (
+            (module.handle_responses_request, "responses"),
+            (module.handle_claude_messages_request, "claude"),
+        ):
+            response = await handler({"model": "gemini-2.5-pro"}, None, None, None, fake_chat_handler)
+            self.assertEqual(response.media_type, "application/json")
+            self.assertEqual(response.status_code, 202)
+            self.assertIs(response.background, marker)
+            self.assertEqual(await anext(response.body_iterator), b"\n")
+            chunks = [chunk async for chunk in response.body_iterator]
+            converted = json.loads("".join(chunks))
+            self.assertEqual(converted["kind"], kind)
+            self.assertEqual(converted["response"], payload)
+
     async def test_handle_responses_request_non_stream(self):
         module = load_protocol_handlers()
 

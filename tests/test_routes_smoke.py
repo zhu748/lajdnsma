@@ -4,6 +4,9 @@ import types
 import unittest
 from pathlib import Path
 
+# 协议处理器在假 FastAPI 根模块下仍需解析此异常子模块。
+from fastapi.exceptions import RequestValidationError
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -307,7 +310,7 @@ class RoutesSmokeTestCase(unittest.IsolatedAsyncioTestCase):
             def add(self, key, task):
                 raise AssertionError("should not add")
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 raise AssertionError("should not remove")
 
         route_runtime.active_requests_manager = Manager()

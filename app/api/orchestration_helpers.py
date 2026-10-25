@@ -42,9 +42,10 @@ def remove_active_request_if_needed(
     public_mode: bool,
     active_requests_manager,
     pool_key: str | None,
+    process_task=None,
 ):
     if not public_mode and pool_key:
-        active_requests_manager.remove(pool_key)
+        active_requests_manager.remove(pool_key, process_task)
 
 
 async def await_process_task_result(
@@ -59,30 +60,13 @@ async def await_process_task_result(
     is_gemini: bool,
 ):
     try:
-        response = await process_task
-        remove_active_request_if_needed(
-            public_mode=public_mode,
-            active_requests_manager=active_requests_manager,
-            pool_key=pool_key,
-        )
-        return response
+        return await process_task
     except HTTPException:
         # 处理任务内部主动抛出的 HTTPException（例如消息格式校验失败的
         # 400）必须原样透传 —— 旧实现被下方 except Exception 统一转换成
         # 500 "Upstream service error"，把客户端错误伪装成了服务端错误。
-        remove_active_request_if_needed(
-            public_mode=public_mode,
-            active_requests_manager=active_requests_manager,
-            pool_key=pool_key,
-        )
         raise
     except Exception:
-        remove_active_request_if_needed(
-            public_mode=public_mode,
-            active_requests_manager=active_requests_manager,
-            pool_key=pool_key,
-        )
-
         cached_response = await get_cache_func(
             cache_key, is_stream=is_stream, is_gemini=is_gemini
         )
@@ -96,4 +80,12 @@ async def await_process_task_result(
         raise HTTPException(
             status_code=500,
             detail="Upstream service error. Please retry later.",
+        )
+    finally:
+        # CancelledError 不属于 Exception；断连时也必须清理池中的原任务。
+        remove_active_request_if_needed(
+            public_mode=public_mode,
+            active_requests_manager=active_requests_manager,
+            pool_key=pool_key,
+            process_task=process_task,
         )

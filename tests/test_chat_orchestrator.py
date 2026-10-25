@@ -102,6 +102,34 @@ def load_chat_orchestrator():
 
 
 class ChatOrchestratorTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_stream_and_keepalive_requests_do_not_use_active_pool(self):
+        for stream, keepalive in ((True, False), (False, True)):
+            with self.subTest(stream=stream, keepalive=keepalive):
+                module = load_chat_orchestrator()
+                module._test_state.settings.NONSTREAM_KEEPALIVE_ENABLED = keepalive
+
+                async def get_cache(*args, **kwargs):
+                    return None
+
+                async def process(**kwargs):
+                    return {"ok": True}
+
+                class UnusedPool:
+                    def __getattr__(self, name):
+                        raise AssertionError(f"one-shot responses must not use pool.{name}")
+
+                runtime = types.SimpleNamespace(
+                    get_cache=get_cache, active_requests_manager=UnusedPool(),
+                    key_manager=None, response_cache_manager=None,
+                    safety_settings=[], safety_settings_g2=[],
+                )
+                result = await module.handle_aistudio_chat_completion(
+                    request=types.SimpleNamespace(model="m", stream=stream), http_request=None,
+                    runtime=runtime, available_models=["m"], process_stream_request=process,
+                    process_nonstream_with_keepalive_stream=process, process_request=process,
+                )
+                self.assertEqual(result, {"ok": True})
+
     async def test_returns_cached_response_before_creating_task(self):
         module = load_chat_orchestrator()
 
@@ -151,7 +179,7 @@ class ChatOrchestratorTestCase(unittest.IsolatedAsyncioTestCase):
             def add(self, key, task):
                 self.items[key] = task
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 self.removed.append(key)
                 self.items.pop(key, None)
 

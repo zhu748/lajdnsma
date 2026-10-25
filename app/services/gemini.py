@@ -474,6 +474,8 @@ class GeminiClient:
                     mode = "NONE"
                 elif choice == "auto":
                     mode = "AUTO"
+                elif choice == "required":
+                    mode = "ANY"
             elif isinstance(choice, dict) and choice.get("type") == "function":
                 func_name = choice.get("function", {}).get("name")
                 if func_name:

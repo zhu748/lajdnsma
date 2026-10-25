@@ -76,8 +76,13 @@ async def handle_aistudio_chat_completion(
     if cached_response:
         return cached_response
 
-    pool_key = cache_key if not settings.PUBLIC_MODE else None
-    if not settings.PUBLIC_MODE:
+    # StreamingResponse 的迭代器只能消费一次，包括非流式 keepalive 包装。
+    # 两端均禁止合流，避免流式任务覆盖普通请求在池中的任务。
+    can_coalesce = not (
+        settings.PUBLIC_MODE or request.stream or settings.NONSTREAM_KEEPALIVE_ENABLED
+    )
+    pool_key = cache_key if can_coalesce else None
+    if pool_key:
         # Hardening: 与路由层同模式 —— 裸 assert 在 python -O 下消失，
         # None 管理器会在下游抛 AttributeError；显式报错语义更清晰。
         if runtime.active_requests_manager is None:

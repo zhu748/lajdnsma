@@ -137,7 +137,7 @@ class StatsWorkerBatchDrainTestCase(unittest.TestCase):
         self.assertEqual(mgr.get_calls_last_24h(), 500)
 
         # 读污染回归（M9）：get_api_key_usage 不应向 defaultdict 插入条目
-        mgr.get_api_key_usage("never-seen-key")
+        asyncio.run(mgr.get_api_key_usage("never-seen-key"))
         self.assertNotIn("never-seen-key", mgr.api_key_counts)
         self.assertNotIn("never-seen-key", mgr.api_model_counts)
 
@@ -319,7 +319,7 @@ class WaitForExistingTaskTestCase(unittest.IsolatedAsyncioTestCase):
             def get(self, key):
                 return running_task
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 pass
 
         req = types.SimpleNamespace(stream=True, model="m")
@@ -345,7 +345,7 @@ class WaitForExistingTaskTestCase(unittest.IsolatedAsyncioTestCase):
             def get(self, key):
                 return task
 
-            def remove(self, key):
+            def remove(self, key, expected_task=None):
                 self.removed.append(key)
 
         mgr = Manager()

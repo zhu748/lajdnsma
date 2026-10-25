@@ -1,6 +1,10 @@
 """Responses / Claude 协议的业务处理：请求转换与响应适配。"""
+import json
+
 from fastapi import HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import ValidationError
 
 from app.utils.model_mapping import select_alias_model
 from app.utils.protocol_adapters import (
@@ -13,6 +17,39 @@ from app.utils.protocol_adapters import (
     responses_error_response,
 )
 from app.utils.errors import anthropic_error_response
+
+
+def _normalize_protocol_request(payload, converter):
+    try:
+        return converter(payload)
+    except ValidationError as exc:
+        # dict 入口在适配器内构造 Pydantic 模型；其校验失败同样属于
+        # 客户端请求错误，交给统一的 422 日志处理器，而非全局 500。
+        errors = [dict(error, loc=("body", *error["loc"])) for error in exc.errors()]
+        raise RequestValidationError(errors, body=payload) from exc
+
+
+def _adapt_json_keepalive(response, converter):
+    """保留 JSON 空白保活，将最终完整 JSON 转成客户端协议。"""
+    async def generate():
+        try:
+            chunks = []
+            async for chunk in response.body_iterator:
+                if not chunks and not chunk.strip():
+                    yield chunk
+                else:
+                    chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else bytes(chunk))
+            payload = json.loads(b"".join(chunks))
+            yield json.dumps(converter(payload), ensure_ascii=False)
+        finally:
+            close = getattr(response.body_iterator, "aclose", None)
+            if close is not None:
+                await close()
+
+    return StreamingResponse(
+        generate(), media_type="application/json",
+        status_code=response.status_code, background=response.background,
+    )
 
 
 def _map_to_available_model(request, aliases_attr: str, default_attr: str, log_message: str):
@@ -83,7 +120,7 @@ def _resolve_responses_model_alias(request):
 
 
 async def handle_responses_request(payload: dict, http_request, auth_dep, user_agent_dep, chat_handler):
-    normalized_request = response_request_to_chat_request(payload)
+    normalized_request = _normalize_protocol_request(payload, response_request_to_chat_request)
     _resolve_responses_model_alias(normalized_request)
     try:
         response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
@@ -94,6 +131,10 @@ async def handle_responses_request(payload: dict, http_request, auth_dep, user_a
         )
 
     if isinstance(response, StreamingResponse):
+        if response.media_type == "application/json":
+            return _adapt_json_keepalive(
+                response, lambda data: openai_chat_to_response_api(data, payload)
+            )
         return StreamingResponse(
             openai_stream_to_responses_stream(
                 response.body_iterator, normalized_request.model
@@ -105,7 +146,7 @@ async def handle_responses_request(payload: dict, http_request, auth_dep, user_a
 
 
 async def handle_claude_messages_request(payload: dict, http_request, auth_dep, user_agent_dep, chat_handler):
-    normalized_request = claude_request_to_chat_request(payload)
+    normalized_request = _normalize_protocol_request(payload, claude_request_to_chat_request)
     _resolve_claude_model_alias(normalized_request)
     try:
         response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
@@ -116,6 +157,8 @@ async def handle_claude_messages_request(payload: dict, http_request, auth_dep, 
         )
 
     if isinstance(response, StreamingResponse):
+        if response.media_type == "application/json":
+            return _adapt_json_keepalive(response, openai_chat_to_claude_response)
         return StreamingResponse(
             openai_stream_to_claude_stream(
                 response.body_iterator, normalized_request.model

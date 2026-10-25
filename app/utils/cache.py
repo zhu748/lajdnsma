@@ -1,90 +1,58 @@
-"""响应缓存：多值键 deque、精确 LRU 驱逐、xxhash 缓存键。"""
+"""响应缓存：多值键 deque、按写入时间驱逐、结构化 xxhash 缓存键。"""
+import heapq
 import time
 import json
 import xxhash
 import asyncio
 from typing import Dict, Any, Optional, Tuple
-import logging
 from collections import deque
 from app.utils.logging import log
-
-logger = logging.getLogger("my_logger")
-import heapq
 
 # 定义缓存项的结构
 CacheItem = Dict[str, Any]
 
 
-def _hash_generation_params(h, chat_request, is_gemini: bool) -> None:
-    """Round 6（缓存正确性）：把采样/生成参数纳入缓存键。
+# Only delivery mode (stream) is excluded: cached Gemini responses can be
+# rendered as either JSON or SSE. All options that affect generation or
+# response visibility must distinguish requests, including tool selection.
+_OPENAI_CACHE_OPTIONS = (
+    "temperature", "top_p", "top_k", "n", "max_tokens",
+    "max_completion_tokens", "presence_penalty", "frequency_penalty",
+    "seed", "logprobs", "top_logprobs", "response_logprobs", "stop",
+    "tool_choice", "parallel_tool_calls", "thinking_budget", "enable_thinking",
+    "reasoning_effort", "expose_reasoning", "source_protocol",
+)
 
-    旧键只哈希 model + tools + 最近 N 条消息 —— temperature /
-    max_tokens / top_p / stop 等参数不同但消息相同的两个请求共享
-    缓存键，第二个请求会拿到第一个请求在**不同采样参数**下的答案
-    （CALCULATE_CACHE_ENTRIES=6 截断时更易碰撞）。现在把标量生成
-    参数规范化后增量哈希：None/缺省不写入（保持与旧键兼容的"默认
-    请求"路径），非默认值以「参数名:值」形式写入。
-    """
-    # OpenAI 格式的标量采样参数
-    _OPENAI_SCALARS = (
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "max_completion_tokens",
-        "presence_penalty",
-        "frequency_penalty",
-        "seed",
-        "logprobs",
-        "top_logprobs",
-    )
-    # Gemini 原生 payload 里除 generationConfig 外基本不含采样参数
-    _GEMINI_CONFIG_KEYS = (
-        "temperature",
-        "topP",
-        "topK",
-        "maxOutputTokens",
-        "stopSequences",
-        "presencePenalty",
-        "frequencyPenalty",
-        "seed",
-        "thinkingConfig",
-        "responseMimeType",
-        "responseModalities",
-        "candidateCount",
-    )
-    try:
-        if is_gemini:
-            payload = getattr(chat_request, "payload", None)
-            config = getattr(payload, "generationConfig", None)
-            if isinstance(config, dict):
-                for k in _GEMINI_CONFIG_KEYS:
-                    v = config.get(k)
-                    if v is None or v == "" or v == []:
-                        continue
-                    h.update(f"gp:{k}=".encode("utf-8"))
-                    h.update(
-                        json.dumps(v, sort_keys=True, default=str).encode(
-                            "utf-8", errors="surrogateescape"
-                        )
-                    )
-        else:
-            for name in _OPENAI_SCALARS:
-                v = getattr(chat_request, name, None)
-                if v is None or v == "":
-                    continue
-                h.update(f"op:{name}=".encode("utf-8"))
-                h.update(str(v).encode("utf-8", errors="surrogateescape"))
-            stop = getattr(chat_request, "stop", None)
-            if stop:
-                h.update(b"op:stop=")
-                h.update(
-                    json.dumps(stop, sort_keys=True, default=str).encode(
-                        "utf-8", errors="surrogateescape"
-                    )
-                )
-    except Exception:
-        # 哈希失败时宁可退化为旧键（碰撞事小，崩溃事大）
-        pass
+
+def _hash_field(hasher, name: str, value: Any) -> None:
+    """Canonical JSON with length framing preserves types and field boundaries."""
+    encoded = json.dumps(
+        value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str,
+    ).encode("utf-8", errors="surrogatepass")
+    hasher.update(name.encode("ascii") + b"\0")
+    hasher.update(len(encoded).to_bytes(8, "big"))
+    hasher.update(encoded)
+
+
+def _hash_generation_params(hasher, chat_request, is_gemini: bool) -> None:
+    if is_gemini:
+        payload = chat_request.payload
+        for name in ("generationConfig", "safetySettings", "tool_config"):
+            value = getattr(payload, name, None)
+            if name == "tool_config" and value is None:
+                value = getattr(payload, "toolConfig", None)
+            if value is not None:
+                _hash_field(hasher, name, value)
+        instruction = getattr(payload, "system_instruction", None)
+        if instruction is None:
+            instruction = getattr(payload, "systemInstruction", None)
+        _hash_field(hasher, "system_instruction", instruction)
+        _hash_field(hasher, "api_version", getattr(chat_request, "api_version", None))
+    else:
+        for name in _OPENAI_CACHE_OPTIONS:
+            value = getattr(chat_request, name, None)
+            if value is not None:
+                _hash_field(hasher, name, value)
 
 
 class ResponseCacheManager:
@@ -108,8 +76,8 @@ class ResponseCacheManager:
             cache_dict if cache_dict is not None else {}
         )
         self.expiry_time = expiry_time
-        self.max_entries = max_entries  # 总条目数限制
-        self.cur_cache_num = 0  # 当前条目数
+        self.max_entries = max(0, max_entries)  # 总条目数限制
+        self.cur_cache_num = sum(len(items) for items in self.cache.values())
         self.lock = asyncio.Lock()  # Added lock
         # Round 6（性能）：精确 LRU 驱逐堆。(created_at, seq, cache_key)
         # 元组的最小堆；seq 单调递增用于同秒内排序与条目身份验证。
@@ -117,6 +85,25 @@ class ResponseCacheManager:
         # 驱逐时通过比对 deque 内条目的 seq 跳过（详见 _evict_oldest）。
         self._evict_heap: list = []
         self._seq: int = 0
+        # 外部传入的已有缓存同样需要计数和驱逐索引。
+        for key, items in self.cache.items():
+            for item in items:
+                self._seq += 1
+                item["seq"] = self._seq
+                self._evict_heap.append((item.get("created_at", 0), self._seq, key))
+        heapq.heapify(self._evict_heap)
+
+    def _compact_heap_if_needed(self):
+        """消费/过期留下的惰性节点不能随累计请求量无限增长。须持锁。"""
+        if not self.cur_cache_num:
+            self._evict_heap.clear()
+        elif len(self._evict_heap) > max(64, 2 * self.cur_cache_num):
+            self._evict_heap = [
+                (item.get("created_at", 0), item["seq"], key)
+                for key, items in self.cache.items()
+                for item in items
+            ]
+            heapq.heapify(self._evict_heap)
 
     async def get_and_remove(self, cache_key: str) -> Tuple[Optional[Any], bool]:
         """获取并删除指定键的第一个有效缓存项。"""
@@ -153,6 +140,7 @@ class ResponseCacheManager:
                         del self.cache[cache_key]
                     else:
                         self.cache[cache_key] = new_deque
+                    self._compact_heap_if_needed()
 
                 if valid_item_to_remove:
                     return response_to_return, True  # 返回找到的有效项
@@ -224,6 +212,7 @@ class ResponseCacheManager:
                 self.cache.pop(key, None)
         if removed > 0:
             self.cur_cache_num = max(0, self.cur_cache_num - removed)
+            self._compact_heap_if_needed()
             log(
                 "info",
                 f"缓存容量驱逐：移除 {removed} 个最旧条目"
@@ -234,7 +223,6 @@ class ResponseCacheManager:
     async def clean_expired(self):
         """清理所有缓存项中已过期的项。"""
         now = time.time()
-        keys_to_remove = []
         total_cleaned = 0
         async with self.lock:
             # 迭代 cache 的副本以允许在循环中安全地修改 cache
@@ -246,18 +234,10 @@ class ResponseCacheManager:
                 )
                 cleaned_count = original_len - len(valid_items)
 
-                if cleaned_count > 0:
-                    log(
-                        "info", f"清理键 {key[:8]}... 的过期缓存项 {cleaned_count} 个。"
-                    )
-                    total_cleaned += cleaned_count
+                total_cleaned += cleaned_count
 
                 if not valid_items:
-                    keys_to_remove.append(key)  # 标记此键以便稍后删除
-                    # 在持有锁时直接删除键
-                    if key in self.cache:
-                        del self.cache[key]
-                        log("info", f"缓存键 {key[:8]}... 的所有项均已过期，移除该键。")
+                    del self.cache[key]
                 elif cleaned_count > 0:
                     # 替换为只包含有效项的 deque
                     self.cache[key] = valid_items
@@ -265,6 +245,9 @@ class ResponseCacheManager:
             # 统一更新缓存计数
             if total_cleaned > 0:
                 self.cur_cache_num = max(0, self.cur_cache_num - total_cleaned)
+            self._compact_heap_if_needed()
+        if total_cleaned:
+            log("info", f"清理过期缓存 {total_cleaned} 项。")
 
     async def clean_if_needed(self):
         """如果缓存总条目数超过限制，清理全局最旧的项目。
@@ -278,7 +261,8 @@ class ResponseCacheManager:
                 return
 
             # 计算目标大小和需要移除的数量
-            target_size = max(self.max_entries - 10, 10)
+            # 小容量也必须遵守上限；旧的 floor=10 让 0..9 完全失效。
+            target_size = min(max(0, self.max_entries), max(self.max_entries - 10, 10))
             if self.cur_cache_num <= target_size:
                 return
 
@@ -289,150 +273,30 @@ class ResponseCacheManager:
 def generate_cache_key(
     chat_request, last_n_messages: int = 65536, is_gemini=False
 ) -> str:
+    """Hash request options and recent full messages, retaining system prompts.
+
+    Full message objects include tool IDs, function arguments, image MIME types,
+    camelCase native parts and future content types. Length framing prevents
+    user text from colliding with structural markers between messages.
     """
-    根据模型名称和最后 N 条消息生成请求的唯一缓存键。
-    Args:
-        chat_request: 包含模型和消息列表的请求对象 (符合OpenAI格式)。
-        last_n_messages: 需要包含在缓存键计算中的最后消息的数量。
-    Returns:
-        一个代表该请求的唯一缓存键字符串 (xxhash64哈希值)。
-    """
-    h = xxhash.xxh64()
-
-    # 1. 哈希模型名称
-    h.update(chat_request.model.encode("utf-8", errors="surrogateescape"))
-
-    # 1.2 Round 6: 哈希生成/采样参数（temperature/max_tokens/top_p/...），
-    # 防止"同消息不同参数"的请求共享缓存键导致串答（详见函数 docstring）。
-    _hash_generation_params(h, chat_request, is_gemini=is_gemini)
-
-    # 1.5 哈希工具定义。
-    # Correctness: tools 不属于消息历史，旧的键计算只哈希模型 + 最近 N
-    # 条消息 —— 同模型、同最近 6 条消息但 tools 不同的两个请求会共享
-    # 缓存键，第二个请求可能拿到第一个请求（不同工具配置）的缓存答案
-    # （默认 CALCULATE_CACHE_ENTRIES=6 截断时尤为严重）。规范化序列化后
-    # 全量哈希，确保不同工具集的请求不会串扰。
-    tools = None
-    if is_gemini:
-        payload = getattr(chat_request, "payload", None)
-        tools = getattr(payload, "tools", None)
-    else:
-        tools = getattr(chat_request, "tools", None)
-    if tools:
-        try:
-            h.update(b"tools:")
-            h.update(
-                json.dumps(
-                    tools, sort_keys=True, ensure_ascii=False, default=str
-                ).encode("utf-8", errors="surrogateescape")
-            )
-        except (TypeError, ValueError):
-            h.update(b"tools:unserializable")
+    hasher = xxhash.xxh64()
+    _hash_field(hasher, "protocol", "gemini" if is_gemini else "openai")
+    _hash_field(hasher, "model", chat_request.model)
+    _hash_generation_params(hasher, chat_request, is_gemini)
+    payload = chat_request.payload if is_gemini else chat_request
+    _hash_field(hasher, "tools", getattr(payload, "tools", None))
 
     if last_n_messages <= 0:
-        # 如果不考虑消息，直接返回基于模型的哈希
-        return h.hexdigest()
+        return hasher.hexdigest()
 
-    messages_processed = 0
-
-    # 2. 增量哈希最后 N 条消息 (从后往前)
-    if is_gemini:
-        # log('INFO', f"开启增量哈希gemini格式内容")
-        for content_item in reversed(chat_request.payload.contents):
-            if messages_processed >= last_n_messages:
-                break
-            role = content_item.get("role")
-            if role is not None and isinstance(role, str):
-                h.update(b"role:")
-                h.update(role.encode("utf-8", errors="surrogateescape"))
-            # log('INFO', f"哈希gemini格式角色{role}")
-            parts = content_item.get("parts", [])
-            if not isinstance(parts, list):
-                parts = []
-            for part in parts:
-                text_content = part.get("text")
-                if text_content is not None and isinstance(text_content, str):
-                    h.update(b"text:")
-                    h.update(text_content.encode("utf-8", errors="surrogateescape"))
-                    # log('INFO', f"哈希gemini格式文本内容{text_content}")
-
-                inline_data_obj = part.get("inline_data")
-                if inline_data_obj is not None and isinstance(inline_data_obj, dict):
-                    h.update(b"inline_data:")
-                    data_payload = inline_data_obj.get("data", "")
-                    # Hardening: previously only hashed the first 32
-                    # characters of the base64 payload — see the
-                    # image_url branch above for the collision risk.
-                    # We now hash the full payload.
-                    if isinstance(data_payload, str):
-                        h.update(
-                            data_payload.encode("utf-8", errors="surrogateescape")
-                        )
-
-                file_data_obj = part.get("file_data")
-                if file_data_obj is not None and isinstance(file_data_obj, dict):
-                    h.update(b"file_data:")
-                    file_uri = file_data_obj.get("file_uri", "")
-                    if isinstance(file_uri, str):
-                        h.update(b"file_uri:")
-                        h.update(file_uri.encode("utf-8", errors="surrogateescape"))
-            messages_processed += 1
-
-    else:
-        for msg in reversed(chat_request.messages):
-            if messages_processed >= last_n_messages:
-                break
-
-            # 哈希角色
-            h.update(b"role:")
-            h.update(msg.get("role", "").encode("utf-8", errors="surrogateescape"))
-
-            # 哈希内容
-            content = msg.get("content")
-            if isinstance(content, str):
-                h.update(b"text:")
-                h.update(content.encode("utf-8", errors="surrogateescape"))
-            elif isinstance(content, list):
-                # 处理图文混合内容
-                for item in content:
-                    item_type = item.get("type") if hasattr(item, "get") else None
-                    if item_type == "text":
-                        text = item.get("text", "") if hasattr(item, "get") else ""
-                        h.update(b"text:")
-                        h.update(text.encode("utf-8", errors="surrogateescape"))
-                    elif item_type == "image_url":
-                        image_url = (
-                            item.get("image_url", {}) if hasattr(item, "get") else {}
-                        )
-                        image_data = (
-                            image_url.get("url", "")
-                            if hasattr(image_url, "get")
-                            else ""
-                        )
-
-                        h.update(b"image_url:")  # 加入类型标识符
-                        if image_data.startswith("data:image/"):
-                            # Hardening: previously only hashed the first
-                            # 32 characters of the base64 payload.  Two
-                            # different images with the same MIME type
-                            # (e.g. "data:image/png;base64,") share
-                            # the first 32 chars verbatim — so the
-                            # cache key collided and the second image
-                            # would get the first image's cached
-                            # response.  We now hash the entire base64
-                            # payload, which gives each image a unique
-                            # cache key (at the cost of hashing ~MB of
-                            # data per request — acceptable because
-                            # hashlib.sha256 is fast).
-                            h.update(
-                                image_data.encode(
-                                    "utf-8", errors="surrogateescape"
-                                )
-                            )
-                        else:
-                            h.update(
-                                image_data.encode("utf-8", errors="surrogateescape")
-                            )
-
-            messages_processed += 1
-    return h.hexdigest()
+    messages = payload.contents if is_gemini else chat_request.messages
+    start = max(0, len(messages) - last_n_messages)
+    if not is_gemini:
+        # System/developer instructions continue to affect all later turns,
+        # even when the operator limits the number of conversation messages.
+        for message in messages[:start]:
+            if isinstance(message, dict) and message.get("role") in ("system", "developer"):
+                _hash_field(hasher, "instruction", message)
+    for message in messages[start:]:
+        _hash_field(hasher, "message", message)
+    return hasher.hexdigest()
