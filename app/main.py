@@ -418,7 +418,9 @@ async def root(request: Request):
     api_url = f"{base_url}v1" if base_url.endswith("/") else f"{base_url}/v1"
     # 直接返回 index.html 文件
     return templates.TemplateResponse(
-        "index.html", {"request": request, "api_url": api_url}
+        request=request,
+        name="index.html",
+        context={"api_url": api_url},
     )
 
 

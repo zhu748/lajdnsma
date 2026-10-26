@@ -4,7 +4,7 @@
 #    旧版 `COPY . .` 在依赖安装之前，任何一行代码改动都会使依赖
 #    层缓存失效、触发全量重装（30-60s+）。现在日常改代码重建只需
 #    秒级。
-# 2. 依赖用 uv 按 requirements.txt 安装；版本约束与 pyproject.toml 对齐。
+# 2. 依赖从 uv.lock 导出后用 uv 安装，与 CI 使用相同的锁定版本。
 # 3. 运行时只需要 app/（含已构建好的 templates 静态资源）和版本
 #    文件；源码其他部分由 .dockerignore 排除。
 # 4. 以非 root 用户运行容器（安全加固），并用 exec 形式 CMD 保证
@@ -18,10 +18,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 依赖层：只在 requirements.txt 变化时重建
-COPY requirements.txt .
+# 依赖层：只在依赖声明或锁文件变化时重建，避免部署时自动升级框架。
+COPY pyproject.toml uv.lock ./
 RUN pip install uv \
-    && uv pip install --system --no-cache-dir -r requirements.txt
+    && uv export --frozen --no-dev --no-emit-project --format requirements.txt --output-file /tmp/requirements.lock \
+    && uv pip install --system --no-cache-dir --require-hashes -r /tmp/requirements.lock \
+    && rm /tmp/requirements.lock
 
 # 应用层：代码改动时只重建这一层
 COPY app ./app

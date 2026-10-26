@@ -179,6 +179,40 @@ async def vertex_lifespan():
         close_http.assert_awaited_once()
 
 
+def dashboard_rendering():
+    import re
+    import warnings
+
+    from fastapi.testclient import TestClient
+    from app.main import app, dashboard_path
+
+    # Keep startup/upstream credential probes out of this HTTP rendering check.
+    for base_url in ['http://my-http-host.example', 'https://gateway.example']:
+        with patch('app.main._startup'), patch('app.main._shutdown'), TestClient(app, base_url=base_url) as client:
+            with warnings.catch_warnings():
+                warnings.simplefilter('error', DeprecationWarning)
+                response = client.get(dashboard_path)
+                assert response.status_code == 200, response.text
+                assert response.headers['content-type'].startswith('text/html')
+                assert response.template.name == 'index.html'
+                assert response.context['request'].url.path == dashboard_path
+                assert response.context['api_url'] == base_url.replace('http://', 'https://', 1) + '/v1'
+                assert '<div id="app"></div>' in response.text
+
+                head = client.head(dashboard_path)
+                assert head.status_code == 200
+                assert not head.content
+                assert head.headers['content-length'] == response.headers['content-length']
+
+            assets = re.findall(r'(?:src|href)="(/assets/[^\"]+)"', response.text)
+            assert assets
+            for asset in assets:
+                assert client.get(asset).status_code == 200, asset
+            health = client.get('/health')
+            assert health.status_code == 200
+            assert health.json() == {'status': 'ok'}
+
+
 if __name__ == '__main__':
     result = globals()[sys.argv[1]]()
     if asyncio.iscoroutine(result):

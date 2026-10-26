@@ -58,6 +58,14 @@ https://dashboard.render.com/register
 
 ![更新部署](./img/render/7.png)
 
+### 首页返回 500 或凭证格式报错
+
+如果日志出现 `TypeError: unhashable type: 'dict'`，且堆栈经过 `app/main.py` 的 `TemplateResponse`，说明旧版模板调用与新版 Starlette 不兼容。仓库已改用显式的 `request`、`name`、`context` 参数，Docker 构建也改为使用与 CI 相同的 `uv.lock` 版本。需要先将修复推送至仓库，等待 GitHub Actions 成功构建新镜像，再在 Render 点击 **Deploy latest reference**。
+
+如果出现 `凭证 JSON 格式无效（位置 0）`，检查 Render 的 `GOOGLE_CREDENTIALS_JSON` 环境变量。仅使用 Gemini API Key 时，删除该变量或把值完全清空，并设置 `ENABLE_VERTEX=false`；不要填写 `''`、`""` 或示例占位文本。需要 Vertex 时，粘贴完整的服务账号 JSON 内容，外层不要额外包引号。此配置错误与首页模板的 500 是两个独立问题。
+
+健康检查可以使用无需认证的 `/health`。该端点只检查服务存活，上线后仍应访问管理页面确认模板正常。
+
 ## 在酒馆中使用
 
 在酒馆中点击API连接配置（插头），API选择聊天补全，聊天补全来源选择自定义（兼容OpenAI），自定义端点填入前述地址并在最后追加/v1，自定义API密钥填入前述环境变量中的访问密码（默认是123），点击连接后可用模型将出现列表，选择可用模型后保存即可
