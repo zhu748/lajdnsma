@@ -40,19 +40,16 @@ from app.utils.thinking import (
 from app.utils.stealth import (
     build_gemini_headers,
     build_key_probe_headers,
-    gen_anthropic_thinking_signature,
 )
 
 
 def _generate_thought_signature() -> str:
-    # Previously this was the literal string `"skip_thought_signature_validator"`,
-    # which was injected into the Gemini request whenever an assistant tool_call
-    # was missing a thoughtSignature.  The literal is a highly-recognisable
-    # proxy fingerprint (real Gemini thoughtSignatures are opaque ~200-char
-    # base64-like strings).  We now generate a strong-random signature of
-    # the same shape on demand; the function call preserves the legacy
-    # name as a single import surface so callers don't break.
-    return gen_anthropic_thinking_signature()
+    """Google's documented fallback for imported tool history without a signature.
+
+    Random bytes cannot substitute for an upstream cryptographic signature.
+    Real signatures always take precedence at the call site.
+    """
+    return "skip_thought_signature_validator"
 
 
 def generate_secure_random_string(length):
@@ -423,6 +420,11 @@ class GeminiClient:
             config_params["thinkingConfig"] = thinking_config
             
         generationConfig = {k: v for k, v in config_params.items() if v is not None}
+        response_format = getattr(request, "response_format", None) or {}
+        if response_format.get("type") in {"json_object", "json_schema"}:
+            generationConfig["responseMimeType"] = "application/json"
+            if response_format["type"] == "json_schema":
+                generationConfig["responseJsonSchema"] = response_format.get("json_schema", {}).get("schema", {})
 
         api_version = "v1alpha" if "think" in request.model else "v1beta"
 
@@ -495,17 +497,8 @@ class GeminiClient:
                 config: Dict[str, Union[str, List[str]]] = {"mode": mode}
                 if allowed_functions:
                     config["allowed_function_names"] = allowed_functions
-                # Honour the OpenAI `parallel_tool_calls` flag by
-                # passing the equivalent Gemini
-                # `parallel_function_calls` field.  Previously this flag
-                # was silently dropped, so clients that sent
-                # `parallel_tool_calls=false` would still see Gemini
-                # emit parallel tool calls.
-                if (
-                    hasattr(request, "parallel_tool_calls")
-                    and request.parallel_tool_calls is False
-                ):
-                    config["parallel_function_calls"] = False
+                # Gemini FunctionCallingConfig has no parallel_function_calls
+                # switch. Sending this invented field causes an upstream 400.
                 tool_config = {"function_calling_config": config}
 
         # 3. 添加 tool_config 到 data
@@ -699,6 +692,8 @@ class GeminiClient:
                             "args": arguments if isinstance(arguments, dict) else {},
                         }
                     }
+                    if tool_call.get("id"):
+                        function_call_part["functionCall"]["id"] = tool_call["id"]
                     extra_content = tool_call.get("extra_content") or {}
                     google_extra = extra_content.get("google", {})
                     thought_signature = (
@@ -707,11 +702,6 @@ class GeminiClient:
                         or tool_call.get("thought_signature")
                         or tool_call.get("thoughtSignature")
                     )
-                    # Previously fell back to the literal
-                    # `GEMINI_DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"`
-                    # which is a recognizable proxy fingerprint.  We now
-                    # generate a strong-random signature of realistic
-                    # shape on demand when one is missing.
                     if not thought_signature:
                         thought_signature = _generate_thought_signature()
                     function_call_part["thoughtSignature"] = thought_signature
@@ -755,6 +745,8 @@ class GeminiClient:
                             "response": {"content": content},
                         }
                     }
+                    if tool_call_id:
+                        function_response_part["functionResponse"]["id"] = tool_call_id
 
                     gemini_history.append(
                         {"role": role_to_use, "parts": [function_response_part]}
@@ -834,6 +826,20 @@ class GeminiClient:
             # 转换成 HTTP 400 返回给客户端。
             raise ValueError("; ".join(errors))
 
+        # Tool adapters can represent parallel calls/results as separate messages.
+        # Keep their part order while grouping them into a single Gemini turn.
+        merged_history = []
+        for turn in gemini_history:
+            if merged_history and merged_history[-1]["role"] == turn["role"]:
+                merged_history[-1]["parts"].extend(turn["parts"])
+            else:
+                merged_history.append(turn)
+        gemini_history = merged_history
+        has_tool_history = any(
+            "functionCall" in part or "functionResponse" in part
+            for turn in gemini_history for part in turn["parts"]
+        )
+
         # --- 后处理 ---
 
         # 注入搜索提示
@@ -844,7 +850,7 @@ class GeminiClient:
             )
 
         # 注入随机字符串
-        if settings.RANDOM_STRING and not skip_random_string:
+        if settings.RANDOM_STRING and not skip_random_string and not has_tool_history:
             gemini_history.insert(
                 1,
                 {

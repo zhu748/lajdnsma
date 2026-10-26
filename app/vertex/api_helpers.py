@@ -89,6 +89,8 @@ def create_generation_config(request: OpenAIRequest) -> Dict[str, Any]:
             )
             for entry in safety_list
         ]
+    from app.vertex.native_tools import native_request_options
+    config.update(native_request_options(request))
     return config
 
 
@@ -96,6 +98,11 @@ def is_response_valid(response):
     if response is None:
         vertex_log("debug", f"上游响应为空，判定为无效响应")
         return False
+
+    for candidate in getattr(response, "candidates", None) or []:
+        for part in getattr(getattr(candidate, "content", None), "parts", None) or []:
+            if getattr(part, "function_call", None) is not None:
+                return True
 
     # Check for direct text attribute
     if (
@@ -151,6 +158,7 @@ async def _base_fake_stream_engine(
     check_block_reason_func: Optional[Callable[[Any], None]] = None,
     reasoning_text_to_yield: Optional[str] = None,
     actual_content_text_to_yield: Optional[str] = None,
+    created_ts: Optional[int] = None,
 ):
     api_call_task = api_call_task_creator()
 
@@ -160,7 +168,7 @@ async def _base_fake_stream_engine(
     # part of the same response — previously each keepalive chunk got
     # a new random id + new timestamp, which is detectable as
     # non-OpenAI behaviour.
-    created_ts = int(time.time())
+    created_ts = created_ts if created_ts is not None else int(time.time())
 
     if keep_alive_interval_seconds > 0:
         while not api_call_task.done():
@@ -281,13 +289,21 @@ async def _base_fake_stream_engine(
             if i + chunk_size < len(content_to_chunk):
                 await asyncio.sleep(random.uniform(0.02, 0.15))
 
+        from app.vertex.native_tools import candidate_tool_calls
+        candidates = getattr(full_api_response, "candidates", None) or []
+        tool_calls = candidate_tool_calls(candidates[0], index_offset=0) if candidates else []
+        if tool_calls:
+            yield "data: " + json.dumps({
+                "id": response_id, "object": "chat.completion.chunk", "created": created_ts,
+                "model": sse_model_name, "choices": [{"index": 0, "delta": {"tool_calls": tool_calls}, "finish_reason": None}],
+            }) + "\n\n"
         metadata = getattr(full_api_response, "usage_metadata", None)
         candidates = getattr(full_api_response, "candidates", None) or []
         reason = getattr(candidates[0], "finish_reason", None) if candidates else None
         yield create_final_chunk(
             sse_model_name, response_id, created_ts=created_ts,
             usage=_openai_usage(metadata) if metadata is not None else None,
-            finish_reason=_openai_finish_reason(reason),
+            finish_reason="tool_calls" if tool_calls and _openai_finish_reason(reason) == "stop" else _openai_finish_reason(reason),
         )
         yield "data: [DONE]\n\n"
 
@@ -327,6 +343,7 @@ async def gemini_fake_stream_generator(
         f"准备 Gemini 伪流式请求：模型={request_obj.model}，上游模型={model_for_api_call}，客户端模型={model_name_for_log}，分别处理思考与正文",
     )
     response_id = gen_openai_chunk_id()
+    created_ts = int(time.time())
 
     # 1. Create and await the API call task
     api_call_task = asyncio.create_task(
@@ -353,9 +370,9 @@ async def gemini_fake_stream_generator(
                 # empty reasoning_content.  Strong random chunk id instead of
                 # the fixed "chatcmpl-keepalive" string.  Jittered interval.
                 keep_alive_data = {
-                    "id": gen_openai_chunk_id(),
+                    "id": response_id,
                     "object": "chat.completion.chunk",
-                    "created": int(time.time()),
+                    "created": created_ts,
                     "model": request_obj.model,
                     "choices": [
                         {
@@ -432,9 +449,10 @@ async def gemini_fake_stream_generator(
             check_block_reason_func=_check_gemini_block_wrapper,  # Checks raw_response
             process_text_func=None,  # Text processing already done above
             response_id=response_id,
+            created_ts=created_ts,
             sse_model_name=request_obj.model,
             keep_alive_interval_seconds=0,  # Keep-alive for this inner call is 0
-            is_auto_attempt=is_auto_attempt,
+            is_auto_attempt=True,
             reasoning_text_to_yield=final_reasoning_text,
             actual_content_text_to_yield=final_actual_content_text,
         ):
@@ -461,6 +479,7 @@ async def gemini_fake_stream_generator(
         # upstream request so it doesn't run to completion as an orphan
         # (cancel on an already-finished task is a no-op).
         api_call_task.cancel()
+        await asyncio.gather(api_call_task, return_exceptions=True)
 
 
 def _vertex_trailing_model_prefill(
@@ -514,7 +533,21 @@ async def execute_gemini_call(
     request_obj: OpenAIRequest,
     is_auto_attempt: bool = False,
 ):
-    actual_prompt_for_call = prompt_func(request_obj.messages)
+    from app.vertex.message_processing import create_gemini_prompt
+    from app.utils.thinking import sanitize_thinking_genai
+    messages = request_obj.messages
+    gen_config_for_call = gen_config_for_call.copy()
+    sanitize_thinking_genai(model_to_call, gen_config_for_call)
+    if prompt_func is create_gemini_prompt:
+        instructions = []
+        while messages and messages[0].role in {"system", "developer"}:
+            instruction_prompt = create_gemini_prompt([messages[0]])
+            if instruction_prompt:
+                instructions.extend(instruction_prompt.parts)
+            messages = messages[1:]
+        if instructions:
+            gen_config_for_call["system_instruction"] = types.Content(parts=instructions)
+    actual_prompt_for_call = prompt_func(messages)
 
     # --- Prefill / model-turn 结尾兼容补丁（Vertex 路径） ---
     # 与 Gemini API 路径同一语义（见 app/utils/model_mapping.py）：
@@ -627,7 +660,7 @@ async def execute_gemini_call(
                     actual_prompt_for_call,
                     gen_config_for_call,
                     request_obj,
-                    is_auto_attempt,
+                    False,
                     prefill_echo=_prefill_echo,
                 ),
                 media_type="text/event-stream",
@@ -642,18 +675,19 @@ async def execute_gemini_call(
         created_ts_for_stream = int(time.time())
 
         async def _gemini_real_stream_generator_inner():
+            upstream = None
             try:
                 # Prefill 回显剥离（真流式）：跨 chunk 状态机，只在输出
                 # 仍与前缀逐字匹配期间暂存，失配立即放行。
                 _echo_filter = PrefillEchoStreamFilter(_prefill_echo)
-                final_reason = "stop"
-                async for (
-                    chunk_item_call
-                ) in await current_client.aio.models.generate_content_stream(
+                final_reason = None
+                tool_count = 0
+                upstream = await current_client.aio.models.generate_content_stream(
                     model=model_to_call,
                     contents=actual_prompt_for_call,
                     config=gen_config_for_call,
-                ):
+                )
+                async for chunk_item_call in upstream:
                     if getattr(chunk_item_call, "candidates", None):
                         reason = getattr(chunk_item_call.candidates[0], "finish_reason", None)
                         if reason is not None:
@@ -662,7 +696,17 @@ async def execute_gemini_call(
                         chunk_item_call, request_obj.model, response_id_for_stream, 0,
                         created_ts=created_ts_for_stream,
                         echo_filter=_echo_filter,
+                        tool_index_offset=tool_count,
                     )
+                    if getattr(chunk_item_call, "candidates", None):
+                        tool_count += sum(
+                            getattr(part, "function_call", None) is not None
+                            for part in getattr(getattr(chunk_item_call.candidates[0], "content", None), "parts", None) or []
+                        )
+                if final_reason is None:
+                    raise ValueError("Upstream stream ended without a finish reason")
+                if tool_count and final_reason == "stop":
+                    final_reason = "tool_calls"
                 # 流结束释放仍处于未决状态的暂存前缀（罕见：连接异常
                 # 中断且无 finish 帧）——按真实内容原样补发，绝不吞输出。
                 _tail_text = _echo_filter.finalize_text()
@@ -698,10 +742,11 @@ async def execute_gemini_call(
                 )
                 err_resp = create_openai_error_response(500, "Upstream service error during streaming.", "server_error")
                 j_err = json.dumps(err_resp)
-                if not is_auto_attempt:
-                    yield f"data: {j_err}\n\n"
-                    yield "data: [DONE]\n\n"
-                raise e_stream_call
+                yield f"data: {j_err}\n\n"
+                yield "data: [DONE]\n\n"
+            finally:
+                if upstream is not None and hasattr(upstream, "aclose"):
+                    await upstream.aclose()
 
         return StreamingResponse(
             _gemini_real_stream_generator_inner(), media_type="text/event-stream"

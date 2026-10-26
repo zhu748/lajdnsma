@@ -178,25 +178,11 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.messages[1]["name"], "shell")
         self.assertEqual(request.messages[1]["content"], "D:/hajimi")
 
-    def test_response_request_adds_stateless_previous_response_note(self):
-        # Hardened: previously this test asserted that a system message
-        # saying "this gateway is stateless" was injected.  We removed
-        # that string because it leaks the proxy identity to upstream
-        # Gemini.  The new behaviour is to silently ignore
-        # previous_response_id (stateless adapters can't honor it).
-        request = response_request_to_chat_request(
-            {
-                "model": "gemini-2.5-pro",
-                "previous_response_id": "resp_123",
-                "input": "continue",
-            }
-        )
-
-        # The user input should be the only message; no system message
-        # hinting at "stateless gateway" should be present.
-        self.assertEqual(len(request.messages), 1)
-        self.assertEqual(request.messages[0]["role"], "user")
-        self.assertEqual(request.messages[0]["content"], "continue")
+    def test_response_request_rejects_unavailable_server_state(self):
+        with self.assertRaisesRegex(ValueError, "previous_response_id"):
+            response_request_to_chat_request({
+                "model": "gemini-2.5-pro", "previous_response_id": "resp_123", "input": "continue",
+            })
 
     def test_response_request_converts_function_tools(self):
         request = response_request_to_chat_request(
@@ -241,7 +227,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             request.tool_choice,
-            {"type": "function_calling_config", "mode": "ANY"},
+            "required",
         )
 
 
@@ -493,7 +479,7 @@ class ProtocolAdapterTestCase(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             request.tool_choice,
-            {"type": "function_calling_config", "mode": "ANY"},
+            "required",
         )
 
     def test_claude_request_to_chat_request_preserves_images_and_hides_thinking(self):

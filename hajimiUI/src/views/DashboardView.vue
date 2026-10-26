@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import StatusSection from '../components/dashboard/StatusSection.vue'
 import ConfigSection from '../components/dashboard/ConfigSection.vue'
+import ProtocolEndpoints from '../components/dashboard/ProtocolEndpoints.vue'
 import LogSection from '../components/dashboard/LogSection.vue'
 import { useDashboardStore } from '../stores/dashboard'
 
@@ -10,6 +11,14 @@ const refreshTimer = ref(null)
 const pw = ref('')
 const pwError = ref('')
 const pwLoading = ref(false)
+const modeError = ref('')
+const modeSaving = ref(false)
+const navigation = [
+  { id: 'overview', number: '01', label: '运行概览' },
+  { id: 'connections', number: '02', label: '协议接入' },
+  { id: 'configuration', number: '03', label: '服务配置' },
+  { id: 'activity', number: '04', label: '请求日志' },
+]
 
 const isUnlocked = computed(() => dashboardStore.isUnlocked)
 const isDarkMode = computed(() => dashboardStore.isDarkMode)
@@ -18,7 +27,7 @@ const lastError = computed(() => dashboardStore.lastError)
 const isRefreshing = computed(() => dashboardStore.isRefreshing)
 
 onMounted(() => {
-  if (isUnlocked.value) startPolling()
+  if (dashboardStore.sessionPassword) dashboardStore.fetchDashboardData()
   // Perf(round4): 标签页隐藏时暂停 5s 轮询（后台标签里的仪表盘刷新
   // 没有意义，只会持续消耗服务端 /api/dashboard-data 与日志聚合开销；
   // 回到前台时立即拉一次最新数据再恢复轮询。
@@ -42,10 +51,11 @@ function handleVisibilityChange() {
 // 此前只有手动 Lock / 卸载会停，401 后定时器继续空转打 401。
 watch(isUnlocked, (unlocked) => {
   if (!unlocked) stopPolling()
+  else startPolling()
 })
 
 function startPolling() {
-  if (refreshTimer.value) return
+  if (refreshTimer.value || document.hidden || !isUnlocked.value) return
   refreshTimer.value = setInterval(() => {
     dashboardStore.fetchDashboardData()
   }, 5000) // 5s — was 1s, but with auth in the loop the lower frequency is enough
@@ -69,8 +79,8 @@ async function unlock() {
   dashboardStore.setSessionPassword(pw.value)
   try {
     await dashboardStore.fetchDashboardData()
-    if (dashboardStore.lastError === 'AUTH_FAILED' || dashboardStore.lastError === 'PASSWORD_REQUIRED') {
-      pwError.value = '密码验证失败'
+    if (dashboardStore.lastError) {
+      pwError.value = dashboardStore.lastError === 'AUTH_FAILED' ? '密码验证失败' : dashboardStore.lastError
       dashboardStore.setSessionPassword('')
     } else {
       startPolling()
@@ -98,14 +108,18 @@ function toggleDarkMode() {
 }
 
 async function toggleVertex() {
-  // Vertex toggle uses the session password.
+  if (modeSaving.value) return
+  modeSaving.value = true
+  modeError.value = ''
   try {
     const newValue = !enableVertex.value
     await dashboardStore.updateConfig('enableVertex', newValue)
     // The next poll will pick up the new value.
     await dashboardStore.fetchDashboardData()
   } catch (e) {
-    console.error('toggle Vertex:', e)
+    modeError.value = e.message || '切换 Vertex 模式失败'
+  } finally {
+    modeSaving.value = false
   }
 }
 
@@ -130,20 +144,21 @@ function formatTime(t) {
             <line x1="12" y1="19" x2="20" y2="19" />
           </svg>
         </span>
-        <span class="app-header__brand-text">网关控制台</span>
+        <span class="app-header__brand-text">Hajimi <span class="brand-divider">/</span> <span class="brand-caption">网关控制台</span></span>
       </div>
 
       <div class="app-header__spacer" />
 
       <div class="app-header__actions">
-        <span v-if="isUnlocked" class="pill pill--success hidden-sm">
+        <span v-if="isUnlocked" class="pill hidden-sm" :class="lastError ? 'pill--warning' : 'pill--success'">
           <span class="pill__dot pill__dot--pulse" />
-          在线
+          {{ lastError ? '连接异常' : '在线' }}
         </span>
         <button
           v-if="isUnlocked"
           class="btn btn--secondary btn--sm"
           @click="toggleVertex"
+          :disabled="modeSaving"
           :title="enableVertex ? '关闭 Vertex 模式' : '开启 Vertex 模式'"
         >
           Vertex
@@ -158,6 +173,7 @@ function formatTime(t) {
         <button
           class="btn btn--ghost btn--sm btn--icon"
           @click="toggleDarkMode"
+          :aria-label="isDarkMode ? '切换浅色模式' : '切换深色模式'"
           :title="isDarkMode ? '切换浅色模式' : '切换深色模式'"
         >
           <span v-if="isDarkMode">☀</span>
@@ -169,6 +185,8 @@ function formatTime(t) {
           :class="{ 'btn--spinning': isRefreshing }"
           @click="handleRefresh"
           title="刷新数据"
+          aria-label="刷新数据"
+          :disabled="isRefreshing"
         >
           <span class="refresh-icon">↻</span>
         </button>
@@ -184,7 +202,7 @@ function formatTime(t) {
     </header>
 
     <!-- ============ Main ============ -->
-    <main class="app-main">
+    <main class="app-main" :class="{ 'app-main--console': isUnlocked }">
       <!-- Password gate -->
       <div v-if="!isUnlocked" class="lock-card-wrap">
         <div class="card lock-card">
@@ -195,7 +213,8 @@ function formatTime(t) {
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
             </div>
-            <div class="lock-card__title">需要身份验证</div>
+            <div class="lock-card__eyebrow">WELCOME TO HAJIMI</div>
+            <h1 class="lock-card__title">欢迎回到控制台</h1>
             <div class="lock-card__subtitle">输入管理密码以访问控制台</div>
           </div>
           <div class="lock-card__body">
@@ -211,7 +230,7 @@ function formatTime(t) {
                   autofocus
                   autocomplete="current-password"
                 >
-                <div v-if="pwError" class="field__hint" style="color:var(--danger-strong);">
+                <div v-if="pwError" role="alert" class="field__hint" style="color:var(--danger-strong);">
                   {{ pwError }}
                 </div>
               </div>
@@ -225,14 +244,30 @@ function formatTime(t) {
 
       <!-- Console -->
       <template v-else>
-        <div v-if="lastError === 'AUTH_FAILED'" class="banner banner--warning">
-          <strong>会话已过期。</strong>
-          保存的密码已失效，请锁定后重新解锁。
+        <div v-if="modeError" role="alert" class="banner banner--warning">{{ modeError }}</div>
+        <div class="console-layout">
+          <aside class="console-sidebar">
+            <div class="sidebar-caption">工作空间</div>
+            <nav aria-label="控制台导航" class="console-nav">
+              <a v-for="item in navigation" :key="item.id" :href="`#${item.id}`">
+                <span class="nav-number mono">{{ item.number }}</span>{{ item.label }}<span class="nav-arrow" aria-hidden="true">↗</span>
+              </a>
+            </nav>
+            <div class="sidebar-note"><span class="pill__dot" :class="lastError ? 'connection-warning' : 'connection-ok'" /><span>{{ lastError ? '连接异常' : '每 5 秒同步状态' }}</span></div>
+          </aside>
+          <div class="console-content">
+            <div class="console-heading">
+              <div><p class="console-eyebrow">HAJIMI / WORKSPACE</p><h1>服务总览</h1><p class="console-description">从一次请求到每一枚令牌，让服务运行一目了然。</p></div>
+              <div class="backend-indicator"><span class="backend-indicator__icon" aria-hidden="true">↗</span><div><span>当前后端</span><strong>{{ enableVertex ? 'Vertex AI' : 'AI Studio' }}</strong></div></div>
+            </div>
+            <div v-if="lastError" class="banner banner--warning" role="alert">数据暂时无法更新：{{ lastError }}。当前显示上次成功同步的结果。<button class="btn btn--ghost btn--sm" @click="handleRefresh">重试</button></div>
+            <div id="overview" class="console-section"><StatusSection /></div>
+            <div id="connections" class="console-section"><ProtocolEndpoints /></div>
+            <div id="configuration" class="console-section"><ConfigSection /></div>
+            <div id="activity" class="console-section"><LogSection /></div>
+            <footer class="console-footer"><span>Hajimi Gateway</span><span>{{ dashboardStore.lastUpdated ? `最后同步 ${formatTime(dashboardStore.lastUpdated)}` : '等待数据同步' }}</span></footer>
+          </div>
         </div>
-
-        <StatusSection />
-        <ConfigSection />
-        <LogSection />
       </template>
     </main>
   </div>
@@ -310,5 +345,50 @@ function formatTime(t) {
 @keyframes refresh-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+</style>
+
+<style scoped>
+.brand-divider { color: var(--border-strong); margin: 0 10px; font-weight: 400; }
+.brand-caption { color: var(--text-muted); font-size: 12px; font-weight: 400; }
+.console-layout { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 40px; }
+.console-sidebar { position: sticky; top: 96px; align-self: start; padding-top: 12px; }
+.sidebar-caption { font-size: 11px; letter-spacing: .1em; color: var(--text-subtle); padding: 0 12px; margin-bottom: 16px; }
+.console-nav { display: flex; flex-direction: column; gap: 7px; }
+.console-nav a { display: flex; align-items: center; gap: 12px; color: var(--text-muted); padding: 12px; border-radius: 9px; font-size: 13px; text-decoration: none; transition: background .15s, color .15s; }
+.console-nav a:hover, .console-nav a:focus-visible { background: var(--accent-subtle); color: var(--accent-strong); }
+.nav-number { font-size: 10px; opacity: .6; }
+.nav-arrow { margin-left: auto; opacity: .5; }
+.sidebar-note { margin: 36px 12px 0; padding-top: 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-muted); }
+.connection-ok { background: var(--success); }
+.connection-warning { background: var(--warning); }
+.console-content { min-width: 0; }
+.console-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 32px; }
+.console-eyebrow { font: 10px var(--font-mono); letter-spacing: .16em; color: var(--accent-strong); margin: 0 0 14px; }
+.console-heading h1 { font-size: clamp(24px, 3vw, 32px); letter-spacing: -.04em; font-weight: 600; line-height: 1.2; }
+.console-description { font-size: 12px; color: var(--text-muted); margin: 12px 0 0; }
+.backend-indicator { display: flex; gap: 12px; align-items: center; flex-shrink: 0; padding: 14px 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elevated); }
+.backend-indicator__icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; color: var(--accent-strong); background: var(--accent-subtle); font-size: 19px; }
+.backend-indicator span:not(.backend-indicator__icon) { display: block; color: var(--text-muted); font-size: 10px; margin-bottom: 4px; }
+.backend-indicator strong { font-size: 13px; font-weight: 600; }
+.console-section { scroll-margin-top: 90px; }
+.console-footer { display: flex; gap: 16px; justify-content: space-between; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-subtle); font-size: 11px; }
+.lock-card__eyebrow { margin: 4px 0 12px; font: 10px var(--font-mono); letter-spacing: .14em; color: var(--accent-strong); }
+@media (max-width: 1050px) {
+ .console-layout { grid-template-columns: 1fr; gap: 24px; }
+ .console-sidebar { position: static; padding: 0; }
+ .console-nav { flex-direction: row; gap: 4px; overflow-x: auto; padding-bottom: 3px; }
+ .console-nav a { white-space: nowrap; flex: 1; justify-content: center; padding: 10px; border: 1px solid var(--border); background: var(--bg-elevated); }
+ .sidebar-caption, .sidebar-note, .nav-arrow { display: none; }
+}
+@media (max-width: 600px) {
+ .console-heading { align-items: start; gap: 12px; padding-bottom: 24px; }
+ .console-description { max-width: 220px; line-height: 1.7; }
+ .backend-indicator { padding: 10px; gap: 8px; }
+ .backend-indicator__icon { display: none; }
+ .console-nav a { padding: 9px 8px; font-size: 12px; }
+ .nav-number { display: none; }
+ .console-footer { flex-direction: column; gap: 6px; }
+ .brand-caption, .brand-divider { display: none; }
 }
 </style>

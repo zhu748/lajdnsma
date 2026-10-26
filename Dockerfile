@@ -4,8 +4,7 @@
 #    旧版 `COPY . .` 在依赖安装之前，任何一行代码改动都会使依赖
 #    层缓存失效、触发全量重装（30-60s+）。现在日常改代码重建只需
 #    秒级。
-# 2. 依赖用 uv 安装（比 pip 快 10-100 倍），--frozen 锁定 uv.lock
-#    的精确版本，构建可复现。
+# 2. 依赖用 uv 按 requirements.txt 安装；版本约束与 pyproject.toml 对齐。
 # 3. 运行时只需要 app/（含已构建好的 templates 静态资源）和版本
 #    文件；源码其他部分由 .dockerignore 排除。
 # 4. 以非 root 用户运行容器（安全加固），并用 exec 形式 CMD 保证
@@ -30,7 +29,8 @@ COPY version.txt .
 
 # 非 root 运行（安全加固）
 RUN useradd --create-home --shell /usr/sbin/nologin appuser \
-    && chown -R appuser:appuser /app
+    && mkdir -p /data/settings/credentials \
+    && chown -R appuser:appuser /app /data/settings
 USER appuser
 
 EXPOSE 7860

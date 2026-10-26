@@ -214,41 +214,30 @@ class HeaderConsistencyTestCase(unittest.TestCase):
     def setUp(self):
         self.mod = load_module("stealth_r4", "app/utils/stealth.py")
 
-    def test_sdk_ua_carries_matching_client_header(self):
-        ua = "google-genai-sdk-python/1.8.2 gl-python/3.12.6"
-        self.assertEqual(self.mod._x_goog_api_client_for(ua), ua)
+    def test_sdk_identity_matches_installed_versions(self):
+        from importlib.metadata import version
+        expected = f"google-genai-sdk/{version('google-genai')} gl-python/{sys.version.split()[0]}"
+        self.assertEqual(self.mod.pick_user_agent(), expected)
 
-    def test_browser_ua_omits_client_header(self):
-        ua = (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        )
-        self.assertIsNone(self.mod._x_goog_api_client_for(ua))
+    def test_identity_stable_across_keys(self):
+        self.assertEqual(self.mod.pick_user_agent('first'), self.mod.pick_user_agent('rotated'))
 
-    def test_curl_ua_omits_client_header(self):
-        self.assertIsNone(self.mod._x_goog_api_client_for("curl/8.9.1"))
+    def test_identity_does_not_retain_credentials(self):
+        for i in range(1000):
+            self.mod.pick_user_agent(f'synthetic-{i}')
+        self.assertFalse(hasattr(self.mod, '_key_to_ua'))
 
     def test_build_gemini_headers_consistent(self):
-        """钉住同一 key 后，headers 里 UA 与 x-goog-api-client 必须同源。"""
-        key = "AIzaSy" + "9" * 33
-        # 首次选择并钉住
-        pinned_ua = self.mod.pick_user_agent(key)
-        headers = self.mod.build_gemini_headers(key, streaming=True)
-        self.assertEqual(headers["User-Agent"], pinned_ua)
-        if pinned_ua.startswith("google-genai-sdk-python/"):
-            self.assertEqual(headers["x-goog-api-client"], pinned_ua)
-        else:
-            self.assertNotIn("x-goog-api-client", headers)
+        headers = self.mod.build_gemini_headers('synthetic', streaming=True)
+        self.assertEqual(headers['User-Agent'], headers['x-goog-api-client'])
+        self.assertEqual(headers['Accept'], 'text/event-stream')
+        self.assertEqual(headers['Content-Type'], 'application/json')
 
     def test_probe_headers_consistent(self):
-        key = "AIzaSy" + "8" * 33
-        pinned_ua = self.mod.pick_user_agent(key)
-        headers = self.mod.build_key_probe_headers(key)
-        self.assertEqual(headers["User-Agent"], pinned_ua)
-        if pinned_ua.startswith("google-genai-sdk-python/"):
-            self.assertIn("x-goog-api-client", headers)
-        else:
-            self.assertNotIn("x-goog-api-client", headers)
+        headers = self.mod.build_key_probe_headers('synthetic')
+        self.assertEqual(headers['User-Agent'], headers['x-goog-api-client'])
+        self.assertEqual(headers['Accept'], 'application/json')
+        self.assertNotIn('Content-Type', headers)
 
 
 # ---------------------------------------------------------------------------

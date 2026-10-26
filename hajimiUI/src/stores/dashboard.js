@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
+import { errorMessage } from '../services/http'
 
 export const useDashboardStore = defineStore('dashboard', () => {
   // ---------- Session password (post-hardening: every dashboard-data
@@ -7,8 +8,26 @@ export const useDashboardStore = defineStore('dashboard', () => {
   // for the lifetime of the tab and persist it in sessionStorage to
   // survive a page reload). ----------
   const sessionPassword = ref(sessionStorage.getItem('gw_pw') || '')
+  const isAuthenticated = ref(false)
+  let sessionVersion = 0
+  let activeFetch = null
+  let dataVersion = 0
 
   function setSessionPassword(pw) {
+    sessionVersion += 1
+    activeFetch?.controller.abort()
+    activeFetch = null
+    isRefreshing.value = false
+    isAuthenticated.value = false
+    isConfigLoaded.value = false
+    status.value = structuredClone(defaultStatus)
+    config.value = structuredClone(defaultConfig)
+    selectedModel.value = 'all'
+    lastUpdated.value = null
+    logs.value = []
+    apiKeyStats.value = []
+    availableModels.value = []
+    timeSeriesData.value = { calls: [], tokens: [] }
     sessionPassword.value = pw || ''
     if (pw) {
       sessionStorage.setItem('gw_pw', pw)
@@ -17,7 +36,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
-  const isUnlocked = computed(() => Boolean(sessionPassword.value))
+  const isUnlocked = computed(() => Boolean(sessionPassword.value) && isAuthenticated.value)
 
   // ---------- Stats ----------
   const status = ref({
@@ -73,6 +92,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
     keyRotationStrategy: 'fill',
   })
 
+  const defaultStatus = JSON.parse(JSON.stringify(status.value))
+  const defaultConfig = JSON.parse(JSON.stringify(config.value))
+
   const apiKeyStats = ref([])
   const logs = ref([])
   const availableModels = ref([])
@@ -121,13 +143,21 @@ export const useDashboardStore = defineStore('dashboard', () => {
       lastError.value = 'PASSWORD_REQUIRED'
       return
     }
-    if (isRefreshing.value) return
+    if (activeFetch) return activeFetch.promise
     isRefreshing.value = true
     lastError.value = ''
-    try {
+    const version = sessionVersion
+    const dataRevision = dataVersion
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    const operation = { controller, promise: null }
+    activeFetch = operation
+    operation.promise = (async () => { try {
       const response = await fetch('/api/dashboard-data', {
         headers: authHeaders(),
+        signal: controller.signal,
       })
+      if (version !== sessionVersion) return
       if (response.status === 401) {
         // Session password is wrong/expired — drop it so the lock
         // screen reappears.
@@ -139,14 +169,23 @@ export const useDashboardStore = defineStore('dashboard', () => {
         throw new Error(`HTTP ${response.status}`)
       }
       const data = await response.json()
+      if (version !== sessionVersion) return
+      if (dataRevision !== dataVersion) return
       updateDashboardData(data)
+      isAuthenticated.value = true
       lastUpdated.value = new Date()
     } catch (err) {
+      if (version !== sessionVersion || dataRevision !== dataVersion) return
       console.error('fetch dashboard-data:', err)
-      lastError.value = err.message || 'NETWORK'
+      lastError.value = err.name === 'AbortError' ? '请求超时，请重试' : err.message || 'NETWORK'
     } finally {
-      isRefreshing.value = false
-    }
+      clearTimeout(timer)
+      if (activeFetch === operation) {
+        activeFetch = null
+        isRefreshing.value = false
+      }
+    } })()
+    return operation.promise
   }
 
   function updateDashboardData(data) {
@@ -247,22 +286,48 @@ export const useDashboardStore = defineStore('dashboard', () => {
   }
 
   // ---------- Config update ----------
-  async function updateConfig(key, value, password) {
-    const snakeCaseKey = key.replace(/[A-Z]/g, (l) => `_${l.toLowerCase()}`)
-    const response = await fetch('/api/update-config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        key: snakeCaseKey,
-        value,
-        password: password || sessionPassword.value,
-      }),
-    })
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || `HTTP ${response.status}`)
+  function invalidateDashboardFetch() {
+    dataVersion += 1
+    activeFetch?.controller.abort()
+    activeFetch = null
+    isRefreshing.value = false
+  }
+
+  function captureSession() {
+    const version = sessionVersion
+    return () => {
+      if (version !== sessionVersion) throw new Error('会话已变更，请重新登录')
     }
-    return response.json()
+  }
+
+  async function postConfig(endpoint, payload, password) {
+    const version = sessionVersion
+    invalidateDashboardFetch()
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 15000)
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({ ...payload, password: password || sessionPassword.value }),
+      })
+      const data = await response.json().catch(() => ({}))
+      if (version !== sessionVersion) throw new Error('会话已变更，请重新登录')
+      if (!response.ok) throw new Error(errorMessage(data, `HTTP ${response.status}`))
+      return data
+    } catch (err) {
+      if (err.name === 'AbortError') throw new Error('保存超时，请刷新确认服务器状态')
+      throw err
+    } finally {
+      clearTimeout(timer)
+      if (version === sessionVersion) invalidateDashboardFetch()
+    }
+  }
+
+  function updateConfig(key, value, password) {
+    const snakeCaseKey = key.replace(/[A-Z]/g, (l) => `_${l.toLowerCase()}`)
+    return postConfig('/api/update-config', { key: snakeCaseKey, value }, password)
   }
 
   return {
@@ -287,6 +352,8 @@ export const useDashboardStore = defineStore('dashboard', () => {
     setSelectedModel,
     toggleDarkMode,
     updateConfig,
+    postConfig,
+    captureSession,
     authHeaders,
   }
 })

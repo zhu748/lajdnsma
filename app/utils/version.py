@@ -1,21 +1,7 @@
-"""Version check — hardened.
+"""Optional remote version check, using the shared HTTP transport.
 
-Previously this module did a blocking `requests.get(...)` against a
-hardcoded GitHub raw URL containing the upstream project name.  Two
-problems:
-
-1. The URL path leaked the project identity to GitHub's raw CDN.
-2. `requests` defaults to `python-requests/x.x.x` UA, bypassing the
-   shared httpx client used everywhere else in the project.
-
-Hardening:
-* The remote URL is now configurable via the `VERSION_CHECK_URL` env
-  var.  If unset (default), the check is fully skipped — no outbound
-  request, no fingerprint, no startup delay.
-* When enabled, the call goes through the shared async httpx client
-  with a realistic SDK-style UA picked by `pick_user_agent(None)`.
-* The remote URL is not echoed back to the client; only the version
-  comparison result is.
+VERSION_CHECK_URL opts in to remote access. Local version discovery always runs;
+auxiliary downloads do not use the Google API identity or credentials.
 """
 
 from __future__ import annotations
@@ -25,7 +11,6 @@ from pathlib import Path
 
 import app.config.settings as settings
 from app.utils.logging import log
-from app.utils.stealth import pick_user_agent
 
 # version.txt 位于仓库根目录；用 __file__ 相对定位而非 "./version.txt"，
 # 后者依赖进程 CWD（uvicorn 从其他目录启动时读不到，dashboard 会永远
@@ -71,9 +56,7 @@ async def check_version() -> bool:
 
         client = await get_async_client()
         headers = {
-            "User-Agent": pick_user_agent(None),
             "Accept": "text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
         }
         response = await client.get(remote_url, headers=headers, timeout=5.0)
         if response.status_code == 200:

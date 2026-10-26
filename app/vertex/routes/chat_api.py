@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from google.genai import types
 from google import genai
 
+from app.config import settings
 from app.utils.logging import vertex_log
 from app.utils.thinking import apply_thinking_override_genai
 from app.vertex.api_helpers import (
@@ -39,7 +40,8 @@ from app.vertex.message_processing import (
     create_encrypted_full_gemini_prompt,
 )
 from app.vertex.model_names import parse_model_request, validate_special_variants
-from app.vertex.models import OpenAIRequest
+from app.vertex.models import OpenAIRequest, OpenAIMessage
+from app.utils.chat_requests import normalize_chat_messages
 from app.vertex.routes.openai_direct import (
     close_cached_openai_clients,  # re-export: app/main.py 从本模块导入关闭钩子
     handle_openai_direct_request,
@@ -51,6 +53,8 @@ from app.vertex.routes.openai_direct import (
 # wasn't using it.
 # （同时保留为模块级符号：test_round3 锁定 chat_api._get_client_from_pool）
 from app.vertex.vertex_ai_init import _get_client_from_pool
+from app.vertex import client_pool
+from app.vertex.native_tools import NativeRequestError
 import app.vertex.config as app_config
 
 router = APIRouter()
@@ -97,7 +101,7 @@ def _resolve_express_client(request_model: str, base_model_name: str):
     client_to_use = None
     for original_idx, key_val in indexed_keys:
         try:
-            client_to_use = genai.Client(vertexai=True, api_key=key_val)
+            client_to_use = client_pool.get_client(("express", key_val), lambda: genai.Client(vertexai=True, api_key=key_val))
             vertex_log(
                 "info",
                 f"模型 {request_model} 使用 Vertex Express 模式，基础模型={base_model_name}，密钥序号={original_idx}",
@@ -117,7 +121,7 @@ def _resolve_express_client(request_model: str, base_model_name: str):
         vertex_log("error", f"请求处理失败：{error_msg}")
         return None, JSONResponse(
             status_code=500,
-            content=create_openai_error_response(500, error_msg, "server_error"),
+            content=create_openai_error_response(500, "Upstream service error.", "server_error"),
         )
     return client_to_use, None
 
@@ -151,7 +155,7 @@ def _resolve_sa_client(credential_manager_instance, request_model: str):
             vertex_log("error", f"请求处理失败：{error_msg}")
             return None, JSONResponse(
                 status_code=500,
-                content=create_openai_error_response(500, error_msg, "server_error"),
+                content=create_openai_error_response(500, "Upstream service error.", "server_error"),
             )
         vertex_log(
             "info",
@@ -278,7 +282,7 @@ def _apply_thinking_and_tools_overrides(
 
     if flags.is_grounded_search:
         search_tool = types.Tool(google_search=types.GoogleSearch())
-        generation_config["tools"] = [search_tool]
+        generation_config.setdefault("tools", []).append(search_tool)
     elif flags.is_encrypted_model:
         generation_config["system_instruction"] = ENCRYPTION_INSTRUCTIONS_PLACEHOLDER
         current_prompt_func = create_encrypted_gemini_prompt
@@ -308,17 +312,43 @@ def _apply_thinking_and_tools_overrides(
     return current_prompt_func
 
 
+def _retain_stream_client(response, client):
+    if not isinstance(response, StreamingResponse):
+        return False
+    response.body_iterator = client_pool.stream_with_release(response.body_iterator, client)
+    return True
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     fastapi_request: Request,
     request: OpenAIRequest,
     api_key: str = Depends(get_api_key),
 ):
+    retained_client = None
+    transferred = False
     try:
+        # Standalone Vertex requests also require nested content/tool validation.
+        try:
+            messages = normalize_chat_messages([m.model_dump(exclude_unset=True) for m in request.messages])
+            request = request.model_copy(update={"messages": [OpenAIMessage.model_validate(m) for m in messages]})
+        except ValueError as exc:
+            raise NativeRequestError(str(exc)) from exc
         credential_manager_instance = get_credential_manager(fastapi_request)
 
         # 模型名解析：标志位 + 剥离前后缀后的基础模型名
         flags = parse_model_request(request.model)
+        if flags.is_openai_direct_model and request.stream and getattr(settings, "FAKE_STREAMING", False) and request.n not in (None, 1):
+            raise NativeRequestError("Vertex fake streaming currently supports n=1 only")
+        if not flags.is_openai_direct_model:
+            if request.n not in (None, 1):
+                raise NativeRequestError("Native Vertex currently supports n=1 only")
+            has_tools = bool(getattr(request, "tools", None)) or any(
+                getattr(message, "tool_calls", None) or message.role == "tool"
+                for message in request.messages
+            )
+            if has_tools and (flags.is_encrypted_model or flags.is_encrypted_full_model or flags.is_auto_model):
+                raise NativeRequestError("Tool calling requires a plain native Vertex model or the -openai route")
 
         # -nothinking / -max 后缀的模型白名单校验
         variant_error = validate_special_variants(request.model, flags)
@@ -330,7 +360,7 @@ async def chat_completions(
                 ),
             )
 
-        generation_config = create_generation_config(request)
+        generation_config = {} if flags.is_openai_direct_model else create_generation_config(request)
 
         # --- 客户端选择（OpenAI Direct 自带客户端，走独立分支） ---
         client_to_use = None
@@ -353,10 +383,14 @@ async def chat_completions(
                 request, credential_manager_instance, flags.base_model_name
             )
 
+        client_pool.retain(client_to_use)
+        retained_client = client_to_use
         if flags.is_auto_model:
-            return await _handle_auto_model(
+            result = await _handle_auto_model(
                 client_to_use, flags.base_model_name, generation_config, request
             )
+            transferred = _retain_stream_client(result, client_to_use)
+            return result
 
         current_prompt_func = _apply_thinking_and_tools_overrides(
             flags, flags.base_model_name, generation_config
@@ -369,18 +403,28 @@ async def chat_completions(
         # but the API call might need the full "gemini-1.5-pro-search".
         # Let's use `request.model` for the API call here, and `base_model_name` for checks like Express eligibility.
         # For non-auto mode, is_auto_attempt defaults to False in execute_gemini_call
-        return await execute_gemini_call(
+        result = await execute_gemini_call(
             client_to_use,
             flags.base_model_name,
             current_prompt_func,
             generation_config,
             request,
         )
+        transferred = _retain_stream_client(result, client_to_use)
+        return result
 
+    except NativeRequestError as e:
+        return JSONResponse(status_code=400, content=create_openai_error_response(
+            400, str(e), "invalid_request_error"
+        ))
     except Exception as e:
         error_msg = f"聊天接口发生未预期错误：{str(e)}"
         vertex_log("error", f"请求处理失败：{error_msg}")
         return JSONResponse(
             status_code=500,
-            content=create_openai_error_response(500, error_msg, "server_error"),
+            content=create_openai_error_response(500, "Upstream service error.", "server_error"),
         )
+
+    finally:
+        if retained_client is not None and not transferred:
+            await client_pool.release(retained_client)

@@ -84,7 +84,9 @@ class RpmSlidingWindowTestCase(unittest.TestCase):
         async def fill():
             # 交替打两个 key，总计 200 次 —— 旧实现只保留最近 100 条全局记录
             for i in range(100):
+                mgr.record_outbound_attempt("k1", "m")
                 await mgr.update_stats("k1", "m", 1)
+                mgr.record_outbound_attempt("k2", "m")
                 await mgr.update_stats("k2", "m", 1)
 
         asyncio.run(fill())
@@ -122,6 +124,7 @@ class RpmSlidingWindowTestCase(unittest.TestCase):
         mgr = mod.ApiStatsManager(enable_background=False)
 
         async def fill():
+            mgr.record_outbound_attempt("k1", "m")
             await mgr.update_stats("k1", "m", 1)
 
         asyncio.run(fill())

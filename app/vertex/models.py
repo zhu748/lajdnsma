@@ -19,8 +19,9 @@ class ContentPartText(BaseModel):
 
 
 class OpenAIMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
     role: str
-    content: Union[str, List[Union[ContentPartText, ContentPartImage, Dict[str, Any]]]]
+    content: Optional[Union[str, List[Union[ContentPartText, ContentPartImage, Dict[str, Any]]]]] = None
 
 
 class OpenAIRequest(BaseModel):

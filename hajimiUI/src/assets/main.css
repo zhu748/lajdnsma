@@ -778,3 +778,17 @@
 @media (max-width: 640px) {
   .visible-sm { display: flex; }
 }
+
+/* Workspace rhythm and touch/keyboard affordances. */
+.app-main--console { padding-top: 36px; }
+.section-description { font-size: 12px; line-height: 1.7; color: var(--text-muted); margin: 6px 0 0; }
+.section__header h2 { margin: 0; }
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.card { border-radius: var(--r-xl); }
+.modal { box-shadow: var(--shadow-xl); }
+@media (max-width: 768px) {
+ .app-main--console { padding-top: 20px; }
+ .btn--icon { min-width: 40px; min-height: 40px; }
+}
+
+.dark-mode .btn--primary { color: #07342C; }

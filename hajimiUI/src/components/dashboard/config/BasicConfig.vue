@@ -1,8 +1,12 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
-import { ref, reactive, watch } from 'vue'
+import { reactive, watch } from 'vue'
+import { createConfigDraft } from '../../../composables/configDraft'
+import { useConfigSaveGuard } from '../../../composables/configSaveGuard'
+import { validateNumericChanges } from '../../../composables/configValidation'
 
 const dashboardStore = useDashboardStore()
+const beginSave = useConfigSaveGuard(dashboardStore)
 
 const localConfig = reactive({
   maxRequestsPerMinute: 0,
@@ -10,7 +14,7 @@ const localConfig = reactive({
   keyRotationStrategy: 'fill',
 })
 
-const populatedFromStore = ref(false)
+const syncDraft = createConfigDraft(localConfig)
 
 watch(
   () => ({
@@ -20,18 +24,29 @@ watch(
     loaded: dashboardStore.isConfigLoaded,
   }),
   (n) => {
-    if (n.loaded && !populatedFromStore.value) {
-      localConfig.maxRequestsPerMinute = n.a
-      localConfig.maxRequestsPerDayPerIp = n.b
-      localConfig.keyRotationStrategy = n.c || 'fill'
-      populatedFromStore.value = true
-    }
+    if (n.loaded) syncDraft({
+      maxRequestsPerMinute: n.a,
+      maxRequestsPerDayPerIp: n.b,
+      keyRotationStrategy: n.c || 'fill',
+    })
   },
   { deep: true, immediate: true }
 )
 
+function validateDraft(draft = localConfig) {
+  validateNumericChanges(draft, dashboardStore.config, [
+    ['maxRequestsPerMinute', 'RPM 限制', 1],
+    ['maxRequestsPerDayPerIp', '每日单 IP 限制', 1],
+  ])
+}
+
 async function saveComponentConfigs(passwordFromParent) {
   if (!passwordFromParent) return { success: false, message: '基础配置：缺少密码' }
+  const submitted = JSON.parse(JSON.stringify(localConfig))
+  try { validateDraft(submitted) } catch (e) {
+    return { success: false, message: `基础配置：${e.message}` }
+  }
+  const assertCurrent = beginSave()
   let allSucceeded = true
   const messages = []
   const labelMap = {
@@ -39,13 +54,17 @@ async function saveComponentConfigs(passwordFromParent) {
     maxRequestsPerDayPerIp: '每日单 IP 限制',
     keyRotationStrategy: '密钥轮换策略',
   }
-  for (const key of Object.keys(localConfig)) {
-    if (localConfig[key] !== dashboardStore.config[key]) {
+  for (const key of Object.keys(submitted)) {
+    if (submitted[key] !== dashboardStore.config[key]) {
       try {
-        await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent)
-        dashboardStore.config[key] = localConfig[key]
+        assertCurrent()
+        await dashboardStore.updateConfig(key, submitted[key], passwordFromParent)
+        assertCurrent()
+        syncDraft.acknowledge(key, submitted[key])
+        dashboardStore.config[key] = submitted[key]
         messages.push(`${labelMap[key] || key}成功`)
       } catch (e) {
+        assertCurrent()
         allSucceeded = false
         messages.push(`${labelMap[key] || key}失败：${e.message}`)
       }
@@ -55,7 +74,7 @@ async function saveComponentConfigs(passwordFromParent) {
   return { success: allSucceeded, message: `基础配置：${messages.join('；')}` }
 }
 
-defineExpose({ saveComponentConfigs, localConfig })
+defineExpose({ saveComponentConfigs, localConfig, validateDraft })
 </script>
 
 <template>
@@ -67,7 +86,7 @@ defineExpose({ saveComponentConfigs, localConfig })
         <input
           v-model.number="localConfig.maxRequestsPerMinute"
           type="number"
-          min="0"
+          min="1"
           class="input"
         >
         <div class="field__hint">每个 IP 每分钟最大请求数。</div>
@@ -77,7 +96,7 @@ defineExpose({ saveComponentConfigs, localConfig })
         <input
           v-model.number="localConfig.maxRequestsPerDayPerIp"
           type="number"
-          min="0"
+          min="1"
           class="input"
         >
         <div class="field__hint">每个 IP 每日最大请求数。</div>

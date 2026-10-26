@@ -104,7 +104,8 @@ def include_reasoning_for_request(chat_request):
 
 
 def openAI_from_Gemini(
-    response, stream=True, include_reasoning=True, chunk_id=None, created=None
+    response, stream=True, include_reasoning=True, chunk_id=None, created=None,
+    tool_index_offset=0, has_tool_calls=False,
 ):
     """
     根据 GeminiResponseWrapper 对象创建 OpenAI 标准响应对象块。
@@ -132,7 +133,11 @@ def openAI_from_Gemini(
         "id": chunk_id,
         "created": now_time,
         "model": response.model,
-        "choices": [{"index": 0, "finish_reason": response.finish_reason}],
+        "choices": [{"index": 0, "finish_reason": {
+            "STOP": "stop", "MAX_TOKENS": "length", "SAFETY": "content_filter",
+            "RECITATION": "content_filter", "BLOCKLIST": "content_filter",
+            "PROHIBITED_CONTENT": "content_filter", "SPII": "content_filter",
+        }.get(response.finish_reason, response.finish_reason)}],
     }
 
     # 准备 usage 数据，处理属性缺失或为 None 的情况
@@ -153,8 +158,10 @@ def openAI_from_Gemini(
     if not total_tokens_raw:
         usage_data["total_tokens"] = usage_data["prompt_tokens"] + usage_data["completion_tokens"]
 
+    if (response.function_call or has_tool_calls) and (not stream or response.finish_reason):
+        if formatted_chunk["choices"][0]["finish_reason"] in {None, "stop"}:
+            formatted_chunk["choices"][0]["finish_reason"] = "tool_calls"
     if response.function_call:
-        formatted_chunk["choices"][0]["finish_reason"] = "tool_calls"
         tool_calls = []
         # 处理函数调用的每一部分
         for index, part in enumerate(response.function_call):
@@ -163,7 +170,7 @@ def openAI_from_Gemini(
             function_args_str = json.dumps(part.get("args", {}), ensure_ascii=False)
 
             # Strong random tool_call id (replaces call_{name}__{ts}_{idx}).
-            tool_call_id = gen_openai_tool_call_id(function_name)
+            tool_call_id = part.get("id") or gen_openai_tool_call_id(function_name)
             tool_call = {
                 "id": tool_call_id,
                 "type": "function",
@@ -174,13 +181,17 @@ def openAI_from_Gemini(
             }
             if part.get("extra_content"):
                 tool_call["extra_content"] = part["extra_content"]
+            if stream:
+                tool_call["index"] = index + tool_index_offset
             tool_calls.append(tool_call)
 
         content_chunk = {
             "role": "assistant",
-            "content": None,  # 函数调用时 content 为 null
+            "content": response.text or None,
             "tool_calls": tool_calls,
         }
+        if include_reasoning and response.thoughts:
+            content_chunk["reasoning_content"] = response.thoughts
     elif response.text or (include_reasoning and response.thoughts):
         content_chunk = {"role": "assistant", "content": response.text}
         if include_reasoning and response.thoughts:
@@ -189,13 +200,13 @@ def openAI_from_Gemini(
     if stream:
         formatted_chunk["choices"][0]["delta"] = content_chunk
         formatted_chunk["object"] = "chat.completion.chunk"
-        # 仅在流结束时添加 usage 字段
-        if response.finish_reason:
+        # Preserve usage-only chunks as well as usage on the finish chunk.
+        if response.finish_reason or any((prompt_tokens_raw, candidates_tokens_raw, total_tokens_raw, reasoning_tokens_raw)):
             formatted_chunk["usage"] = usage_data
         return sse_data(formatted_chunk)
 
     else:
-        formatted_chunk["choices"][0]["message"] = content_chunk
+        formatted_chunk["choices"][0]["message"] = content_chunk or {"role": "assistant", "content": None}
         formatted_chunk["object"] = "chat.completion"
         # 非流式响应总是包含 usage 字段，以满足 response_model 验证
         formatted_chunk["usage"] = usage_data

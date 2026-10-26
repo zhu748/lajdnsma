@@ -12,7 +12,8 @@ handler 约定：
   等需要自定义响应的场景使用，此时通用收尾不执行）
 - 校验失败     → 抛 HTTPException(4xx)，由端点原样上抛
 """
-import json
+import asyncio
+import math
 
 from fastapi import Depends, HTTPException
 
@@ -22,12 +23,11 @@ from app.api.dashboard.model_mapping import (
     _validate_claude_model_mapping,
     _validate_responses_model_mapping,
 )
-from app.api.dashboard.runtime import run_blocking_init_vertex
 from app.config.persistence import save_settings
 from app.services import GeminiClient
 from app.utils.logging import log
 from app.utils.pvp import resolve_pvp_key, sanitize_pvp_selector
-from app.vertex.credentials_manager import parse_multiple_json_credentials
+from app.vertex.credentials_manager import prepare_json_credentials
 from app.vertex.model_loader import refresh_models_config_cache
 from app.vertex.vertex_ai_init import reset_client_pool
 import app.config.settings as settings
@@ -46,28 +46,30 @@ def _bool_setting(config_value) -> bool:
 
 
 def _int_setting(config_value, *, err_msg: str, min_allowed: int) -> int:
-    """int 转换 + 下限校验。
-
-    类型完全不符（如 None → TypeError）按历史语义冒泡，由端点的
-    except Exception 兜底为 500。
-    """
+    """Accept integer values without silently truncating floats or booleans."""
     try:
+        if isinstance(config_value, bool) or not isinstance(config_value, (int, str, float)):
+            raise ValueError(err_msg)
+        if isinstance(config_value, float) and (not math.isfinite(config_value) or not config_value.is_integer()):
+            raise ValueError(err_msg)
         value = int(config_value)
         if value < min_allowed:
             raise ValueError(err_msg)
         return value
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=422, detail=f"参数类型错误：{err_msg}，应为整数") from None
 
 
 def _float_setting(config_value, *, err_msg: str) -> float:
     try:
+        if isinstance(config_value, bool) or not isinstance(config_value, (int, str, float)):
+            raise ValueError(err_msg)
         value = float(config_value)
-        if value <= 0:
+        if not math.isfinite(value) or value <= 0:
             raise ValueError(err_msg)
         return value
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=f"参数类型错误：{str(e)}")
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(status_code=422, detail=f"参数类型错误：{err_msg}，应为有限数字") from None
 
 
 def _str_setting(config_value, *, err_msg: str = "参数类型错误：应为字符串") -> str:
@@ -271,121 +273,29 @@ async def _update_vertex_express_api_key(config_value):
         log("warning", f"尝试刷新模型配置时出错: {str(e)}")
 
 
-def _precheck_credentials_json(config_value: str) -> None:
-    """写入前的 JSON 结构预检（单个或多个凭证对象均可通过）。"""
-    try:
-        # parse_multiple_json_credentials 解析失败时会记录错误并返回列表
-        temp_parsed = parse_multiple_json_credentials(config_value)
-        if not temp_parsed:
-            try:
-                # 更严格的兜底：连宽松解析都没找到对象时，再按单个 JSON 校验
-                json.loads(config_value)
-            except json.JSONDecodeError:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Google Credentials JSON 格式无效。它既不是有效的单个JSON对象，也不是逗号分隔的多个JSON对象。",
-                )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Google Credentials JSON 预检查失败: {str(e)}",
-        )
-
-
 async def _update_google_credentials_json(config_value):
     config_value = _str_setting(
         config_value, err_msg="参数类型错误：Google Credentials JSON 应为字符串"
-    )
-
-    # 空字符串或 "true" 视为清空请求占位符：不做更新，直接早退
-    # （此处自定义响应绕过端点的通用成功收尾）
+    ).strip()
+    # Blank secret inputs preserve the existing credential, matching the UI.
     if not config_value or config_value.lower() == "true":
-        log("info", "Google Credentials JSON未更新，因为值为空或为'true'")
-        save_settings()  # 仍然保存其他可能的设置更改
-        return {
-            "status": "success",
-            "message": "配置项 google_credentials_json 未更新，值为空或为'true'",
-        }
-
-    _precheck_credentials_json(config_value)
-
-    settings.GOOGLE_CREDENTIALS_JSON = config_value
-    log("info", "Google Credentials JSON 设置已更新 (内容未记录)。")
-
-    # 凭证变更后立即清空客户端池，避免旧凭证客户端继续服务直到 TTL 过期
-    # （原 global fallback 单例已随死代码移除，池即唯一的客户端缓存）
-    reset_client_pool()
-
-    # 注：走到这里时 config_value 必非空（空值已在上方早退）
-    credential_manager = runtime.credential_manager
-    if credential_manager is not None:
-        cleared_count = credential_manager.clear_json_string_credentials()
-        log(
-            "info",
-            f"从 CredentialManager 中清除了 {cleared_count} 个先前由 JSON 字符串加载的凭据。",
-        )
-
-        parsed_json_objects = parse_multiple_json_credentials(config_value)
-        if parsed_json_objects:
-            loaded_count = credential_manager.load_credentials_from_json_list(
-                parsed_json_objects
-            )
-            if loaded_count > 0:
-                log(
-                    "info",
-                    f"从更新的 Google Credentials JSON 中加载了 {loaded_count} 个凭据到 CredentialManager。",
-                )
-            else:
-                log(
-                    "warning",
-                    "尝试加载Google Credentials JSON凭据失败，没有凭据被成功加载。",
-                )
-        else:
-            # 多对象解析无果时，退回按单个 JSON 对象加载
-            try:
-                single_cred = json.loads(config_value)
-                if credential_manager.add_credential_from_json(single_cred):
-                    log("info", "作为单个JSON对象成功加载了一个凭据。")
-                else:
-                    log("warning", "作为单个JSON对象加载凭据失败。")
-            except json.JSONDecodeError:
-                log("warning", "Google Credentials JSON无法作为JSON对象解析。")
-            except Exception as e:
-                log("warning", f"尝试加载单个JSON凭据时出错: {str(e)}")
-
-        # 检查凭证是否存在
-        if credential_manager.get_total_credentials() == 0:
-            log(
-                "warning",
-                "警告：当前没有可用的凭证。Vertex AI功能可能无法正常工作。",
-            )
-    else:
-        log("warning", "CredentialManager未初始化，无法加载Google Credentials JSON。")
-
-    # 先保存设置，再触发 Vertex 重初始化（重初始化会重建全局 client）
-    save_settings()
+        return {"status": "success", "message": "Google Credentials JSON 未更新，保留原凭证"}
+    manager = runtime.credential_manager
+    if manager is None:
+        raise HTTPException(status_code=503, detail="凭证管理器尚未初始化")
     try:
-        if credential_manager is None:
-            log("warning", "重新初始化Vertex AI时发现credential_manager为None")
-        else:
-            log(
-                "info",
-                f"开始重新初始化Vertex AI，当前凭证数: {credential_manager.get_total_credentials()}",
-            )
+        prepared = await asyncio.to_thread(prepare_json_credentials, config_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
 
-        await run_blocking_init_vertex()
-        log("info", "Vertex AI服务重新初始化完成")
-
-        # 显式刷新模型配置缓存
-        refresh_success = await refresh_models_config_cache()
-        if refresh_success:
-            log("info", "成功刷新模型配置缓存")
-        else:
-            log("warning", "刷新模型配置缓存失败，将使用默认模型或现有缓存")
-    except Exception as e:
-        log("error", f"重新初始化Vertex AI服务时出错: {str(e)}")
+    # No await between replacing active identities and updating config/pools.
+    # Parsing and private-key validation have already succeeded for the batch.
+    manager.replace_json_string_credentials(prepared)
+    app_config.update_config("GOOGLE_CREDENTIALS_JSON", config_value)
+    reset_client_pool()
+    log("info", f"Google Credentials JSON 已更新，共 {len(prepared)} 个凭证")
+    # Normal endpoint finalization persists once. No remote model-list refresh
+    # is needed: changing credentials does not change MODELS_CONFIG_URL.
 
 
 # ---------------------------------------------------------------------------
@@ -433,17 +343,12 @@ async def _update_max_thinking_model_levels(config_value):
                     "应为 minimal/low/medium/high、off、dynamic 或数字"
                 ),
             )
-        if isinstance(v, str):
-            s = v.strip()
-            if not s:
-                continue
-            # 数字字符串统一转 int，避免同值异型比对不一致
-            if s.lstrip("-").isdigit():
-                cleaned[key] = int(s)
-            else:
-                cleaned[key] = s
+        if isinstance(v, str) and v.strip().lower() in {
+            "minimal", "low", "medium", "high", "off", "none", "disable", "disabled", "dynamic", "auto",
+        }:
+            cleaned[key] = v.strip().lower()
         else:
-            cleaned[key] = int(v) if isinstance(v, float) and v.is_integer() else v
+            cleaned[key] = _int_setting(v, err_msg=f"模型 {key} 的 budget 必须为不小于 -1 的整数", min_allowed=-1)
     settings.MAX_THINKING_MODEL_LEVELS = cleaned
     log("info", f"按模型思考等级已更新，共 {len(cleaned)} 项")
 
@@ -666,8 +571,8 @@ async def update_config(config_data: dict = Depends(require_body_password)):
     config_key = config_data.get("key")
     config_value = config_data.get("value")
 
-    if not config_key:
-        raise HTTPException(status_code=400, detail="缺少配置项键名")
+    if not isinstance(config_key, str) or not config_key:
+        raise HTTPException(status_code=400, detail="配置项键名必须为非空字符串")
 
     handler = CONFIG_HANDLERS.get(config_key)
     if handler is None:

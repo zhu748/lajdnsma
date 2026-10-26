@@ -63,7 +63,8 @@ class ApiStatsManager:
         # 后台处理相关
         self.enable_background = enable_background
         self.batch_interval = batch_interval
-        self._update_queue = queue.Queue()
+        self._generation = 0
+        self._update_queue = queue.Queue(maxsize=4096)
         self._worker_thread = None
         self._stop_event = threading.Event()
 
@@ -96,14 +97,15 @@ class ApiStatsManager:
     def _worker_loop(self):
         """后台工作线程的主循环
 
+        每批最多 256 项，队列上限 4096；退出前处理剩余更新。
         Perf fix: 旧实现每 10ms 只 get_nowait() 一条更新，消费速率上限
         ~100 条/秒；持续 QPS 超过该值时 _update_queue 无界增长（内存泄
         漏），同时线程以 100Hz 空转唤醒浪费 CPU。新实现：
         1. 阻塞等待第一条更新（最多等 batch_interval 秒）——空闲时零唤醒；
-        2. 拿到第一条后立即排空队列中当前积压的所有更新（一次性批处理，
+        2. 拿到第一条后逐批处理队列中积压的更新（一次性批处理，
            消费速率只受锁开销限制，可达每秒数十万条）。
         """
-        while not self._stop_event.is_set():
+        while not self._stop_event.is_set() or not self._update_queue.empty():
             try:
                 # 阻塞等待第一条更新（空闲时挂起，不空转）
                 try:
@@ -112,8 +114,8 @@ class ApiStatsManager:
                     continue
 
                 batch = [first]
-                # 立即排空当前积压的整批更新
-                while True:
+                # 限制每批大小，避免连续生产者阻止批次落盘
+                while len(batch) < 256:
                     try:
                         batch.append(self._update_queue.get_nowait())
                     except queue.Empty:
@@ -125,66 +127,41 @@ class ApiStatsManager:
                 log("error", f"后台处理线程错误: {str(e)}")
                 time.sleep(1)  # 发生错误时短暂休眠
 
+    def _record_counts(self, api_key, model, tokens):
+        """Caller holds _counters_lock."""
+        self.api_key_counts[api_key] += 1
+        self.model_counts[model] += 1
+        self.api_model_counts[api_key][model] += 1
+        self.api_key_tokens[api_key] += tokens
+        self.model_tokens[model] += tokens
+        self.api_model_tokens[api_key][model] += tokens
+
     def _process_batch(self, batch):
-        """处理一批更新"""
         with self._counters_lock:
-            for api_key, model, tokens in batch:
-                self.api_key_counts[api_key] += 1
-                self.model_counts[model] += 1
-                self.api_model_counts[api_key][model] += 1
-                self.api_key_tokens[api_key] += tokens
-                self.model_tokens[model] += tokens
-                self.api_model_tokens[api_key][model] += tokens
+            for item in batch:
+                api_key, model, tokens = item[:3]
+                generation = item[3] if len(item) > 3 else self._generation
+                if generation == self._generation:
+                    self._record_counts(api_key, model, tokens)
 
     async def update_stats(self, api_key, model, tokens=0):
-        """更新API调用统计
-
-        Round 5: 删除了逐笔 "API调用已记录" info 日志——它以每请求一条
-        的频率刷入 LogManager 的有界缓冲，中等 QPS 下几秒内就把冷却
-        触发、429、密钥失败等真正需要运维看到的 warning/error 全部挤出
-        日志面板（可观测性反退化）。每笔调用已有 request start/success
-        等带 key/model 上下文的日志，无需重复。
-        """
-        now = datetime.now()
-        now_ts = now.timestamp()
-
-        if self.enable_background:
-            # 将更新放入队列
-            self._update_queue.put((api_key, model, tokens))
-        else:
-            # 同步更新
-            with self._counters_lock:
-                self.api_key_counts[api_key] += 1
-                self.model_counts[model] += 1
-                self.api_model_counts[api_key][model] += 1
-                self.api_key_tokens[api_key] += tokens
-                self.model_tokens[model] += tokens
-                self.api_model_tokens[api_key][model] += tokens
-
-        # 更新时间序列数据
-        minute_ts = self._get_minute_timestamp(now)
-
-        with self._time_series_lock:
-            if minute_ts not in self.time_buckets:
-                self.time_buckets[minute_ts] = {"calls": 0, "tokens": 0}
-
-            self.time_buckets[minute_ts]["calls"] += 1
-            self.time_buckets[minute_ts]["tokens"] += tokens
-            self.current_minute = minute_ts
-
-        # 更新 per-key RPM 滑动窗口（写入时顺手裁剪过期项，均摊 O(过期数)）
-        with self._rpm_lock:
-            if (
-                api_key not in self._key_rpm_windows
-                and len(self._key_rpm_windows) >= _MAX_TRACKED_KEYS
-            ):
-                pass  # 防御性上限：密钥池异常庞大时放弃追踪新 key
+        """Queue bounded batches; reset epochs prevent stale work resurrecting counts."""
+        minute_ts = self._get_minute_timestamp(datetime.now())
+        with self._counters_lock:
+            if self.enable_background and not self._stop_event.is_set():
+                try:
+                    self._update_queue.put_nowait((api_key, model, tokens, self._generation))
+                except queue.Full:
+                    # Under overload do a small synchronous increment, never drop
+                    # accounting or block an async request on a queue put.
+                    self._record_counts(api_key, model, tokens)
             else:
-                window = self._key_rpm_windows[api_key]
-                window.append(now_ts)
-                cutoff = now_ts - _RPM_WINDOW_SECONDS
-                while window and window[0] < cutoff:
-                    window.popleft()
+                self._record_counts(api_key, model, tokens)
+            with self._time_series_lock:
+                bucket = self.time_buckets.setdefault(minute_ts, {"calls": 0, "tokens": 0})
+                bucket["calls"] += 1
+                bucket["tokens"] += tokens
+                self.current_minute = minute_ts
 
     def record_outbound_attempt(self, api_key: str, model: str = "") -> None:
         """Round 6: 在上游请求**发射时**记录 RPM 窗口时间戳（而非完成时）。
@@ -198,9 +175,7 @@ class ApiStatsManager:
         （nonstream_completion / fake_stream_handlers /
         native_stream_handlers 创建 GeminiClient 处）调用；
         update_stats 仍在完成时调用（它同时维护计数器/时间序列/token）。
-        完成路径的窗口写入保留 —— 双写对滑动窗口是幂等的（多计一次
-        会让退避略保守，这正是高负载下需要的方向；反之漏计会让退避
-        失效）。
+        完成路径只更新成功次数与 token，不再重复写 RPM 窗口。
         """
         now_ts = time.time()
         with self._rpm_lock:
@@ -387,6 +362,7 @@ class ApiStatsManager:
     async def reset(self):
         """重置所有统计数据"""
         with self._counters_lock:
+            self._generation += 1
             self.api_key_counts.clear()
             self.model_counts.clear()
             self.api_model_counts.clear()
@@ -394,8 +370,8 @@ class ApiStatsManager:
             self.model_tokens.clear()
             self.api_model_tokens.clear()
 
-        with self._time_series_lock:
-            self.time_buckets.clear()
+            with self._time_series_lock:
+                self.time_buckets.clear()
 
         with self._rpm_lock:
             self._key_rpm_windows.clear()

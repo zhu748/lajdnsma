@@ -1,4 +1,6 @@
 """Gemini embedding 上游客户端（batchEmbedContents）。"""
+import base64
+import struct
 from app.models.schemas import EmbeddingRequest, EmbeddingData, EmbeddingResponse, Usage
 from app.utils.http_client import get_async_client
 from app.utils.logging import log
@@ -9,7 +11,7 @@ class EmbeddingClient:
         self.api_key = api_key
 
     async def create_embeddings(self, request: EmbeddingRequest) -> EmbeddingResponse:
-        model_name = request.model
+        model_name = request.model.removeprefix("models/")
         
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:batchEmbedContents"
         headers = build_embedding_headers(self.api_key)
@@ -47,16 +49,20 @@ class EmbeddingClient:
         # The response is a JSON object with an "embeddings" key.
         # Each item in the list is an object with a "values" key.
         embeddings = response_json.get("embeddings", [])
+        if len(embeddings) != len(inputs):
+            raise ValueError("Upstream returned an unexpected number of embeddings")
         log(
             "INFO",
             f"向量生成请求完成，返回 {len(embeddings)} 个向量",
             extra=extra_log,
         )
 
-        embedding_data = [
-            EmbeddingData(embedding=item["values"], index=i)
-            for i, item in enumerate(embeddings)
-        ]
+        embedding_data = []
+        for i, item in enumerate(embeddings):
+            values = item["values"]
+            if request.encoding_format == "base64":
+                values = base64.b64encode(struct.pack(f"<{len(values)}f", *values)).decode("ascii")
+            embedding_data.append(EmbeddingData(embedding=values, index=i))
 
         # The Gemini API does not provide token usage for embeddings.
         # We'll return a default usage object.

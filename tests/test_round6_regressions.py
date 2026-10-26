@@ -10,7 +10,7 @@
    缓存容量驱逐改为堆式精确 LRU（O(logN) 且日志合并单行）
 5. 性能：RPM 窗口在请求发射时计数（record_outbound_attempt），
    在途/失败请求不再漏记
-6. 防风控：浏览器 UA 携带 sec-ch-ua/sec-fetch 系列头，SDK UA 不携带
+6. 请求头：Google SDK 版本一致，服务端请求不混入浏览器上下文头
 """
 import asyncio
 import sys
@@ -550,52 +550,41 @@ class CacheHeapEvictionTestCase(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 6. 浏览器 UA 指纹头（stealth.py）
+# 6. Google 请求头一致性（stealth.py）
 # ---------------------------------------------------------------------------
 
 
-class BrowserFingerprintHeadersTestCase(unittest.TestCase):
+class GoogleRequestHeadersTestCase(unittest.TestCase):
     def _load(self):
         return load_module("stealth_r6", "app/utils/stealth.py", _fake_env())
 
-    def test_browser_ua_gets_sec_headers(self):
+    def test_server_requests_do_not_claim_browser_context(self):
         mod = self._load()
-        headers = mod.build_gemini_headers("AIzaSytest")
-        if headers["User-Agent"].startswith("Mozilla/"):
-            self.assertIn("sec-ch-ua", headers)
-            self.assertIn("sec-fetch-dest", headers)
-            self.assertEqual(headers["sec-fetch-dest"], "empty")
-            self.assertEqual(headers["sec-fetch-mode"], "cors")
-            self.assertIn("Origin", headers)
-            self.assertIn("aistudio.google.com", headers["Origin"])
-            # 浏览器 UA 不携带 SDK 头
-            self.assertNotIn("x-goog-api-client", headers)
-        else:
-            # SDK/curl UA：不带浏览器头
-            self.assertNotIn("sec-ch-ua", headers)
-            self.assertNotIn("sec-fetch-dest", headers)
-            self.assertNotIn("Origin", headers)
+        for builder in (mod.build_gemini_headers, mod.build_embedding_headers,
+                        mod.build_openai_compat_headers, mod.build_key_probe_headers):
+            headers = {k.lower(): v for k, v in builder('synthetic').items()}
+            self.assertFalse(any(k.startswith('sec-') for k in headers))
+            self.assertNotIn('origin', headers)
+            self.assertNotIn('referer', headers)
+            self.assertNotIn('accept-language', headers)
 
-    def test_sec_ch_ua_version_matches_ua(self):
+    def test_all_google_endpoints_share_one_identity(self):
         mod = self._load()
-        ua = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
-        headers = {}
-        mod._apply_browser_fingerprint_headers(headers, ua)
-        self.assertIn('v="132"', headers["sec-ch-ua"])
-        self.assertEqual(headers["sec-ch-ua-platform"], '"Windows"')
-        self.assertEqual(headers["sec-ch-ua-mobile"], "?0")
+        baseline = mod.build_gemini_headers('first')['User-Agent']
+        for builder in (mod.build_gemini_headers, mod.build_embedding_headers,
+                        mod.build_openai_compat_headers, mod.build_key_probe_headers):
+            headers = builder('second')
+            self.assertEqual(headers['User-Agent'], baseline)
+            self.assertEqual(headers['x-goog-api-client'], baseline)
 
-    def test_sdk_ua_gets_no_browser_headers(self):
+    def test_builders_return_independent_request_headers(self):
         mod = self._load()
-        ua = "google-genai-sdk-python/1.8.2 gl-python/3.12.6"
-        headers = {"User-Agent": ua}
-        mod._apply_browser_fingerprint_headers(headers, ua)
-        self.assertNotIn("sec-ch-ua", headers)
-        self.assertNotIn("sec-fetch-dest", headers)
-        # SDK UA 反而应携带 x-goog-api-client
-        headers = mod._apply_goog_client_header(headers, ua)
-        self.assertEqual(headers["x-goog-api-client"], ua)
+        first = mod.build_gemini_headers('first')
+        first['x-goog-api-key'] = 'first'
+        first['Accept'] = 'mutated'
+        second = mod.build_gemini_headers('second')
+        self.assertNotIn('x-goog-api-key', second)
+        self.assertEqual(second['Accept'], 'application/json')
 
 
 # ---------------------------------------------------------------------------

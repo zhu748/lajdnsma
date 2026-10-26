@@ -20,7 +20,7 @@ _OPENAI_CACHE_OPTIONS = (
     "max_completion_tokens", "presence_penalty", "frequency_penalty",
     "seed", "logprobs", "top_logprobs", "response_logprobs", "stop",
     "tool_choice", "parallel_tool_calls", "thinking_budget", "enable_thinking",
-    "reasoning_effort", "expose_reasoning", "source_protocol",
+    "reasoning_effort", "expose_reasoning", "source_protocol", "response_format",
 )
 
 
@@ -79,7 +79,7 @@ class ResponseCacheManager:
         self.max_entries = max(0, max_entries)  # 总条目数限制
         self.cur_cache_num = sum(len(items) for items in self.cache.values())
         self.lock = asyncio.Lock()  # Added lock
-        # Round 6（性能）：精确 LRU 驱逐堆。(created_at, seq, cache_key)
+        # Round 6（性能）：按写入时间驱逐堆。(created_at, seq, cache_key)
         # 元组的最小堆；seq 单调递增用于同秒内排序与条目身份验证。
         # get_and_remove / clean_expired 移除的条目会留下惰性堆节点，
         # 驱逐时通过比对 deque 内条目的 seq 跳过（详见 _evict_oldest）。
@@ -106,47 +106,26 @@ class ResponseCacheManager:
             heapq.heapify(self._evict_heap)
 
     async def get_and_remove(self, cache_key: str) -> Tuple[Optional[Any], bool]:
-        """获取并删除指定键的第一个有效缓存项。"""
+        """Consume the first live item without rebuilding the remaining queue.
+
+        Expired items are removed as they reach the head; clean_expired handles
+        global expiry. A hot key with N live responses takes O(N) total work to
+        drain rather than rescanning/copying its remaining queue on every hit.
+        """
         now = time.time()
         async with self.lock:
-            if cache_key in self.cache:
-                cache_deque = self.cache[cache_key]
-
-                # 查找第一个有效项并收集过期项
-                valid_item_to_remove = None
-                response_to_return = None
-                new_deque = deque()
-                items_removed_count = 0
-
-                for item in cache_deque:
-                    if now < item.get("expiry_time", 0):
-                        if valid_item_to_remove is None:  # 找到第一个有效项
-                            valid_item_to_remove = item
-                            response_to_return = item.get("response", None)
-                            items_removed_count += 1  # 计数此项为移除
-
-                        else:
-                            new_deque.append(item)  # 保留后续有效项
-                    else:
-                        items_removed_count += 1  # 计数过期项为移除
-
-                # 更新缓存状态
-                if items_removed_count > 0:
-                    self.cur_cache_num = max(
-                        0, self.cur_cache_num - items_removed_count
-                    )
-                    if not new_deque:
-                        # 如果所有项都被移除（过期或我们取的那个）
-                        del self.cache[cache_key]
-                    else:
-                        self.cache[cache_key] = new_deque
-                    self._compact_heap_if_needed()
-
-                if valid_item_to_remove:
-                    return response_to_return, True  # 返回找到的有效项
-
-            # 如果键不存在或未找到有效项
-            return None, False
+            items = self.cache.get(cache_key)
+            found, response = False, None
+            while items:
+                item = items.popleft()
+                self.cur_cache_num -= 1
+                if now < item.get("expiry_time", 0):
+                    found, response = True, item.get("response")
+                    break
+            if not items:
+                self.cache.pop(cache_key, None)
+            self._compact_heap_if_needed()
+            return response, found
 
     async def store(self, cache_key: str, response: Any):
         """存储响应到缓存（追加到键对应的deque）"""
@@ -252,7 +231,7 @@ class ResponseCacheManager:
     async def clean_if_needed(self):
         """如果缓存总条目数超过限制，清理全局最旧的项目。
 
-        Round 6：驱逐逻辑迁移到 _evict_oldest（堆式精确 LRU），本方法
+        Round 6：驱逐逻辑迁移到 _evict_oldest（按写入时间的堆式驱逐），本方法
         只做阈值判断与调用，全部在锁内完成但成本均摊 O(logN)。
         """
 

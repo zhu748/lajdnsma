@@ -1,5 +1,6 @@
 """单 key 真流式生成器（chunk/summary 二元组协议）。"""
 import time
+import json
 
 from app.services import GeminiClient
 from app.utils import handle_gemini_error, update_api_call_stats
@@ -33,6 +34,10 @@ async def generate_native_stream_chunks(
     success = False
     token = 0
     empty = False
+    failed_after_output = False
+    tool_count = 0
+    expects_finish_marker = False
+    saw_finish_marker = False
     # Protocol: OpenAI 规定同一次流式补全的所有 chunk 共享相同的 id 与
     # created。旧实现每收到一个上游 chunk 就生成全新 id —— 按 id 聚合
     # chunk 的客户端会把一次响应拆成 N 个"补全"，且"每 chunk 换 id"
@@ -65,6 +70,8 @@ async def generate_native_stream_chunks(
         # test_empty_chunk_marks_empty 显式覆盖，属有意保留。
         async for chunk in stream_generator:
             if chunk:
+                expects_finish_marker |= hasattr(chunk, "finish_reason")
+                saw_finish_marker |= bool(getattr(chunk, "finish_reason", None))
                 if chunk.total_token_count:
                     token = int(chunk.total_token_count)
                 success = True
@@ -82,7 +89,10 @@ async def generate_native_stream_chunks(
                         ),
                         chunk_id=stream_chunk_id,
                         created=stream_created,
+                        tool_index_offset=tool_count,
+                        has_tool_calls=tool_count > 0,
                     )
+                    tool_count += len(getattr(chunk, "function_call", None) or [])
             else:
                 log_empty_response_count(
                     api_key,
@@ -100,7 +110,18 @@ async def generate_native_stream_chunks(
                     token=token,
                 )
                 break
+        if success and expects_finish_marker and not saw_finish_marker:
+            raise RuntimeError("Upstream stream ended without a finish reason")
     except Exception as e:
+        if success:
+            failed_after_output = True
+            success = False
+            error = {"error": {"message": "Upstream stream interrupted.", "code": 502}}
+            if is_gemini:
+                error["error"]["status"] = "UNAVAILABLE"
+            else:
+                error["error"]["type"] = "server_error"
+            yield "chunk", sse_text(json.dumps(error))
         error_detail = handle_gemini_error(e, api_key)
         log_request_failure(
             api_key,
@@ -129,4 +150,4 @@ async def generate_native_stream_chunks(
             token=token,
         )
 
-    yield "summary", {"success": success, "empty": empty, "token": token}
+    yield "summary", {"success": success, "empty": empty, "token": token, "failed_after_output": failed_after_output}

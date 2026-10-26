@@ -3,8 +3,6 @@ import asyncio
 
 import httpx
 
-from app.utils.stealth import pick_user_agent
-
 
 _async_client: httpx.AsyncClient | None = None
 _client_lock = asyncio.Lock()
@@ -33,11 +31,8 @@ UPSTREAM_TIMEOUT = httpx.Timeout(
     pool=UPSTREAM_POOL_TIMEOUT,
 )
 
-# Round 6: HTTP/2 支持（若 h2 已安装则启用）。
-# 官方 google-genai SDK 与 Chrome 浏览器的 ALPN 都协商 h2；一个只报
-# http/1.1 的 TLS 客户端，无论 UA 怎么伪装，都在协议层暴露了
-# "这不是它声称的那个客户端"。启用 http2=True 后 httpx 会同时
-# 声明 h2 + http/1.1，与真实 SDK 行为一致。
+# Negotiate HTTP/2 when available for multiplexing. This does not reproduce
+# another client's TLS fingerprint, HTTP/2 settings or header ordering.
 try:  # pragma: no cover - 环境探测
     import h2  # noqa: F401
 
@@ -46,34 +41,23 @@ except ImportError:  # pragma: no cover
     _HTTP2_ENABLED = False
 
 
-def _build_async_client() -> httpx.AsyncClient:
-    """Create the shared outbound HTTP client with connection pooling enabled.
+def build_async_client(*, event_hooks=None, transport=None) -> httpx.AsyncClient:
+    """Pooled transport defaults shared by REST and Vertex OpenAI clients.
 
-    Hardening (anti-fingerprint):
-    * Sets a process-level default User-Agent so any call that forgets to
-      override `headers=` still presents a realistic UA instead of httpx's
-      default `python-httpx/x.x.x`.
-    * Keeps connection pool size moderate.  50 keepalive connections is
-      plenty for a single-instance proxy and avoids the "TLS session
-      pinned to one client identity" smell of much larger pools.
-    * Round 6: HTTP/2 enabled when the `h2` extra is installed, matching
-      the ALPN behaviour of the official SDKs and Chrome.
-    * Round 6: layered timeouts instead of a flat 600s scalar (see
-      UPSTREAM_TIMEOUT above for rationale).
+    Protocol headers and credentials belong to each request/client, never the
+    shared transport. Auxiliary version/model-config downloads keep httpx's UA.
     """
     return httpx.AsyncClient(
         timeout=UPSTREAM_TIMEOUT,
         http2=_HTTP2_ENABLED,
+        event_hooks=event_hooks,
+        transport=transport,
         limits=httpx.Limits(
             max_connections=200,
             max_keepalive_connections=50,
             keepalive_expiry=30.0,
         ),
-        headers={
-            "User-Agent": pick_user_agent(None),
-            "Accept-Encoding": "gzip, deflate",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
+        headers={"Accept-Encoding": "gzip, deflate"},
     )
 
 
@@ -83,7 +67,7 @@ async def get_async_client() -> httpx.AsyncClient:
     if _async_client is None or _async_client.is_closed:
         async with _client_lock:
             if _async_client is None or _async_client.is_closed:
-                _async_client = _build_async_client()
+                _async_client = build_async_client()
     return _async_client
 
 

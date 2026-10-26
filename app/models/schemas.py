@@ -1,6 +1,6 @@
 """Pydantic 模型全集（请求 / 响应 / 流式 chunk / 错误体）。"""
 from typing import List, Dict, Optional, Union, Literal, Any
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 # openAI 请求
@@ -13,7 +13,10 @@ class ChatCompletionRequest(BaseModel):
     n: int = 1
     stream: bool = False
     stop: Optional[Union[str, List[str]]] = None
-    max_tokens: Optional[int] = None
+    max_tokens: Optional[int] = Field(
+        default=None, gt=0, validation_alias=AliasChoices("max_completion_tokens", "max_tokens")
+    )
+    response_format: Optional[Dict[str, Any]] = None
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     seed: Optional[int] = None
@@ -134,14 +137,14 @@ class ChatResponseGemini(BaseModel):
 
 
 class EmbeddingRequest(BaseModel):
-    input: Union[str, List[str]]
+    input: Union[str, List[str]] = Field(min_length=1)
     model: str
-    encoding_format: Optional[str] = "float"
+    encoding_format: Literal["float", "base64"] = "float"
 
 
 class EmbeddingData(BaseModel):
     object: str = "embedding"
-    embedding: List[float]
+    embedding: Union[List[float], str]
     index: int
 
 

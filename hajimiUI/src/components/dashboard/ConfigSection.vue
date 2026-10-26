@@ -5,8 +5,10 @@ import BasicConfig from './config/BasicConfig.vue'
 import FeaturesConfig from './config/FeaturesConfig.vue'
 import VersionInfo from './config/VersionInfo.vue'
 import VertexConfig from './config/VertexConfig.vue'
+import { useConfigSaveGuard } from '../../composables/configSaveGuard'
 
 const dashboardStore = useDashboardStore()
+const beginSave = useConfigSaveGuard(dashboardStore)
 const isExpanded = ref(false)
 const basicConfigRef = ref(null)
 const featuresConfigRef = ref(null)
@@ -26,6 +28,7 @@ function toggleExpand() {
 }
 
 async function handleSaveAll() {
+  if (isOverallSaving.value) return
   if (!sharedPassword.value) {
     overallError.value = '请输入管理密码'
     overallSuccess.value = ''
@@ -36,14 +39,19 @@ async function handleSaveAll() {
   overallSuccess.value = ''
   const errors = []
   const successes = []
+  const assertCurrent = beginSave()
+  const submittedPassword = sharedPassword.value
   try {
+    basicConfigRef.value?.validateDraft()
+    featuresConfigRef.value?.validateDraft()
     if (basicConfigRef.value?.saveComponentConfigs) {
-      const r = await basicConfigRef.value.saveComponentConfigs(sharedPassword.value)
+      const r = await basicConfigRef.value.saveComponentConfigs(submittedPassword)
       if (r.success) successes.push(r.message)
       else errors.push(r.message)
     }
+    assertCurrent()
     if (featuresConfigRef.value?.saveComponentConfigs) {
-      const r = await featuresConfigRef.value.saveComponentConfigs(sharedPassword.value)
+      const r = await featuresConfigRef.value.saveComponentConfigs(submittedPassword)
       if (r.success) successes.push(r.message)
       else errors.push(r.message)
     }
@@ -67,6 +75,7 @@ async function handleSaveAll() {
         v-if="!enableVertex"
         class="btn btn--secondary btn--sm"
         @click="toggleExpand"
+        :disabled="isOverallSaving"
       >
         {{ isExpanded ? '收起' : '编辑' }}
       </button>
@@ -121,7 +130,7 @@ async function handleSaveAll() {
               >
             </div>
             <div class="row save-row__btns">
-              <button class="btn btn--secondary btn--sm" @click="isExpanded = false">取消</button>
+              <button class="btn btn--secondary btn--sm" @click="isExpanded = false" :disabled="isOverallSaving">取消</button>
               <button
                 class="btn btn--primary btn--sm"
                 @click="handleSaveAll"

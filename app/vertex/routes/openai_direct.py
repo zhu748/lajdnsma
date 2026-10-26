@@ -2,7 +2,7 @@
 
 包含该路径的完整链路：
 1. AsyncOpenAI 客户端缓存（按 endpoint/token/headers 键控，防 FD 泄漏）
-2. stealth 请求头构建（剥离 OpenAI SDK 的 X-Stainless-* 指纹头）
+2. Google REST 请求头与最终出站头清理
 3. 真/伪流式与非流式三种调用形态
 4. extra_content.google.thought → reasoning_content 的三种提取路径
 
@@ -22,82 +22,46 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.config import settings
 from app.config.safety import get_safety_settings
 from app.utils.logging import vertex_log
-from app.utils.stealth import gen_openai_chunk_id, pick_user_agent
+from app.utils.stealth import gen_openai_chunk_id, build_openai_compat_headers
+from app.utils.http_client import build_async_client, UPSTREAM_TIMEOUT
 from app.vertex.api_helpers import create_openai_error_response
 from app.vertex.credentials_manager import _refresh_auth
 from app.vertex.models import OpenAIRequest
 import app.vertex.config as app_config
+from app.vertex import client_pool
 
-# ---------------------------------------------------------------------------
-# OpenAI Direct 路径的 AsyncOpenAI 客户端缓存
-# ---------------------------------------------------------------------------
-# Perf/resource fix: 旧实现每个请求都 new 一个 `openai.AsyncOpenAI`
-# 且从不 close —— 每个请求都完整 TCP+TLS 握手（+100~300ms 延迟），
-# 且未关闭的客户端持有连接/socket，长期运行会 FD 泄漏（Too many open
-# files）。
-#
-# GCP OAuth token 约一小时才轮换一次，同一 token 期间的所有请求完全
-# 可以复用同一个客户端（AsyncOpenAI 内部的 httpx 连接池本身就是为
-# 并发共享设计的）。因此按 (endpoint, token, stream 模式) 键控缓存，
-# 上限 _MAX_CACHED_OPENAI_CLIENTS，淘汰时后台关闭旧客户端释放连接。
-_openai_client_cache: Dict[tuple, openai.AsyncOpenAI] = {}
-_openai_client_cache_lock = asyncio.Lock()
-_MAX_CACHED_OPENAI_CLIENTS = 32
-
-# Resource fix: fire-and-forget tasks are only weakly referenced by the
-# event loop; if nothing else holds a reference the task can be garbage-
-# collected mid-flight ("Task was destroyed but it is pending"), leaking
-# the client it was supposed to close.  Hold strong references until done.
-_background_close_tasks: set = set()
-
-
-async def _close_client_quietly(client: openai.AsyncOpenAI) -> None:
+# OpenAI and native clients share reference-counted retirement so evicting a
+# cached client never interrupts a response that is still being streamed.
+async def _close_client_quietly(client):
     try:
         await client.close()
-    except Exception as e:  # noqa: BLE001 - best-effort cleanup
-        vertex_log("warning", f"关闭已淘汰的 OpenAI 客户端失败：{e}")
+    except Exception:
+        vertex_log("warning", "关闭 OpenAI 客户端失败")
 
 
-async def _get_cached_openai_client(
-    base_url: str,
-    gcp_token: str,
-    stealth_headers: Dict[str, str],
-) -> openai.AsyncOpenAI:
-    """按 (endpoint, token, headers) 复用 AsyncOpenAI 客户端。"""
-    key = (base_url, gcp_token, tuple(sorted(stealth_headers.items())))
-    async with _openai_client_cache_lock:
-        client = _openai_client_cache.get(key)
-        if client is not None:
-            return client
-
-        client = openai.AsyncOpenAI(
-            base_url=base_url,
-            api_key=gcp_token,
-            default_headers=stealth_headers,
-            timeout=600.0,
-            max_retries=0,  # we handle retries ourselves with jitter
-        )
-        # 插入末尾保持插入序，淘汰时从头部取最旧的
-        _openai_client_cache[key] = client
-
-        # 超出容量时淘汰最旧的（>=1 小时未轮换的 token，几乎不可能仍在
-        # 被在途请求使用；关闭放到后台任务，不阻塞请求路径）
-        while len(_openai_client_cache) > _MAX_CACHED_OPENAI_CLIENTS:
-            _old_key = next(iter(_openai_client_cache))
-            _old_client = _openai_client_cache.pop(_old_key)
-            _close_task = asyncio.create_task(_close_client_quietly(_old_client))
-            _background_close_tasks.add(_close_task)
-            _close_task.add_done_callback(_background_close_tasks.discard)
-        return client
+async def _get_cached_openai_client(base_url, gcp_token, stealth_headers):
+    key = ("openai", base_url, gcp_token, tuple(sorted(stealth_headers.items())))
+    return client_pool.get_client(key, lambda: openai.AsyncOpenAI(
+        base_url=base_url, api_key=gcp_token, default_headers=stealth_headers,
+        http_client=build_async_client(event_hooks={"request": [_prepare_google_request]}),
+        timeout=UPSTREAM_TIMEOUT, max_retries=0,
+    ), closer=_close_client_quietly)
 
 
-async def close_cached_openai_clients() -> None:
-    """进程关闭时释放全部缓存客户端（由 main lifespan 调用）。"""
-    async with _openai_client_cache_lock:
-        clients = list(_openai_client_cache.values())
-        _openai_client_cache.clear()
-    for client in clients:
-        await _close_client_quietly(client)
+async def _prepare_google_request(request):
+    """Remove SDK telemetry after all SDK merges, just before HTTP transport.
+
+    Empty strings still send headers, and retry/timeout headers are inserted
+    after default_headers. OpenAI account environment settings must not be
+    forwarded to Google either. Keep Google's auth/quota headers intact.
+    """
+    for name in list(request.headers):
+        if name.startswith("x-stainless-") or name in {"openai-organization", "openai-project"}:
+            del request.headers[name]
+
+
+async def close_cached_openai_clients():
+    await client_pool.shutdown("openai")
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +112,8 @@ async def openai_true_stream_generator(
     model_name: str,
 ):
     """OpenAI Direct 真流式：透传上游 SSE chunk 并剥离 extra_content。"""
+    stream_response = None
+    finished = set()
     try:
         # Ensure stream=True is explicitly passed for real streaming
         openai_params_for_true_stream = {
@@ -155,16 +121,20 @@ async def openai_true_stream_generator(
             "stream_options": {**(openai_params.get("stream_options") or {}), "include_usage": True},
         }
         stream_response = await openai_client.chat.completions.create(
-            **openai_params_for_true_stream, extra_body=openai_extra_body
+            **openai_params_for_true_stream, extra_body=openai_extra_body,
+            extra_headers={"Accept": "text/event-stream"},
         )
         async for chunk in stream_response:
             try:
                 chunk_as_dict = chunk.model_dump(exclude_unset=True, exclude_none=True)
 
                 choices = chunk_as_dict.get("choices")
-                if choices and isinstance(choices, list) and len(choices) > 0:
-                    delta = choices[0].get("delta")
-                    if delta and isinstance(delta, dict):
+                for choice in choices or []:
+                    if choice.get("finish_reason"):
+                        finished.add(choice.get("index", 0))
+                for choice in choices or []:
+                    delta = choice.get("delta")
+                    if isinstance(delta, dict):
                         _strip_openai_extra_content(delta)
 
                 yield f"data: {json.dumps(chunk_as_dict)}\n\n"
@@ -183,6 +153,8 @@ async def openai_true_stream_generator(
                 yield f"data: {json_payload_for_chunk_error}\n\n"
                 yield "data: [DONE]\n\n"
                 return
+        if len(finished) < (openai_params.get("n") or 1):
+            raise ValueError("Upstream stream ended without all finish reasons")
         yield "data: [DONE]\n\n"
     except Exception as stream_error:
         original_error_message = str(stream_error)
@@ -200,6 +172,13 @@ async def openai_true_stream_generator(
         yield "data: [DONE]\n\n"
 
 
+    finally:
+        if stream_response is not None:
+            close = getattr(stream_response, "aclose", None) or getattr(stream_response, "close", None)
+            if close is not None:
+                await close()
+
+
 # ---------------------------------------------------------------------------
 # 伪流式：非流式调用 + SSE 模拟
 # ---------------------------------------------------------------------------
@@ -215,6 +194,7 @@ async def _openai_fake_stream_engine(
     is_auto_attempt=False,
     reasoning_text_to_yield="",
     actual_content_text_to_yield="",
+    created_ts=None,
 ):
     """OpenAI Direct 伪流式引擎。与 api_helpers._base_fake_stream_engine
     （Gemini 版本）是两份独立实现——keepalive 位置、空响应处理与异常
@@ -240,10 +220,21 @@ async def _openai_fake_stream_engine(
         # timestamp within the same second — which is detectable when
         # streamed over >1s as "all chunks within one second all share
         # the same `created`" is the official behaviour.
-        created_ts = int(time.time())
+        created_ts = created_ts if created_ts is not None else int(time.time())
         choices = getattr(api_response, "choices", None) or []
         finish_reason = getattr(choices[0], "finish_reason", None) if choices else None
         finish_reason = finish_reason or "stop"
+        message = getattr(choices[0], "message", None) if choices else None
+        tool_calls = getattr(message, "tool_calls", None) or []
+        if tool_calls:
+            calls = [call.model_dump(exclude_none=True) if hasattr(call, "model_dump") else dict(call) for call in tool_calls]
+            for index, call in enumerate(calls):
+                call["index"] = index
+            yield "data: " + json.dumps({
+                "id": response_id, "object": "chat.completion.chunk",
+                "created": created_ts, "model": sse_model_name,
+                "choices": [{"index": 0, "delta": {"tool_calls": calls}, "finish_reason": None}],
+            }) + "\n\n"
 
         # Get the full text from the response
         full_text = ""
@@ -390,7 +381,8 @@ async def openai_fake_stream_generator(
 
         _api_call_task = asyncio.create_task(
             openai_client.chat.completions.create(
-                **params_for_non_stream_call, extra_body=openai_extra_body
+                **params_for_non_stream_call, extra_body=openai_extra_body,
+                extra_headers={"Accept": "application/json"},
             )
         )
         raw_response = await _api_call_task
@@ -470,6 +462,7 @@ async def openai_fake_stream_generator(
                 extract_text_from_response_func=_extract_openai_full_text,
                 is_valid_response_func=_is_openai_response_valid,
                 response_id=response_id,
+                created_ts=created_ts,
                 sse_model_name=request_obj.model,
                 keep_alive_interval_seconds=0,
                 is_auto_attempt=is_auto_attempt,
@@ -499,6 +492,7 @@ async def openai_fake_stream_generator(
                 yield "data: [DONE]\n\n"
     finally:
         temp_task_for_keepalive_check.cancel()
+        await asyncio.gather(temp_task_for_keepalive_check, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------
@@ -509,29 +503,8 @@ OPENAI_DIRECT_LOCATION = "global"  # 固定为 global（用户确认）
 
 
 def _build_openai_direct_headers(gcp_token: str, is_stream: bool) -> Dict[str, str]:
-    """构建 stealth 请求头。
-
-    Hardening: 之前裸 openai.AsyncOpenAI 客户端会泄漏 SDK 默认 UA
-    `AsyncOpenAI/Python/x.x.x` 及整组 `X-Stainless-*` 自省头
-    （Lang/Package-Version/OS/Arch/Runtime/Async）—— 强 "Python
-    OpenAI SDK 客户端" 指纹。现在注入 stealth UA + Content-Type/
-    Accept，并把 X-Stainless 家族置空（SDK 显式允许置空以不发该头）。
-    """
-    return {
-        "User-Agent": pick_user_agent(gcp_token),
-        "Accept": "text/event-stream" if is_stream else "application/json",
-        "Accept-Encoding": "gzip, deflate",
-        "Accept-Language": "en-US,en;q=0.9",
-        # 置空的 X-Stainless-* 头：空字符串表示"不发送此头"
-        "X-Stainless-Lang": "",
-        "X-Stainless-Package-Version": "",
-        "X-Stainless-OS": "",
-        "X-Stainless-Arch": "",
-        "X-Stainless-Runtime": "",
-        "X-Stainless-Runtime-Version": "",
-        "X-Stainless-Async": "",
-        "X-Stainless-Retry-Count": "",
-    }
+    """Build the shared Google REST profile; SDK-added headers are removed later."""
+    return build_openai_compat_headers(gcp_token, streaming=is_stream)
 
 
 async def handle_openai_direct_request(
@@ -580,7 +553,12 @@ async def handle_openai_direct_request(
     )
     underlying_model_id = f"google/{base_model_name}"
 
-    stealth_headers = _build_openai_direct_headers(gcp_token, request.stream)
+    # Pool identity must not depend on downstream streaming: a fake stream
+    # sends a JSON request upstream. True SSE sets Accept on that request only.
+    stealth_headers = _build_openai_direct_headers(gcp_token, False)
+    quota_project = getattr(rotated_credentials, "quota_project_id", None)
+    if quota_project:
+        stealth_headers["x-goog-user-project"] = quota_project
     # Perf fix: 客户端由有界缓存按 (endpoint, token, headers) 提供，
     # 连接池在同一 GCP token 期间跨请求复用（见 _get_cached_openai_client）。
     openai_client = await _get_cached_openai_client(
@@ -606,6 +584,9 @@ async def handle_openai_direct_request(
         "stop": request.stop,
         "seed": request.seed,
         "n": request.n,
+        **{key: getattr(request, key) for key in (
+            "tools", "tool_choice", "parallel_tool_calls", "response_format", "reasoning_effort",
+        ) if getattr(request, key, None) is not None},
     }
     openai_params = {k: v for k, v in openai_params.items() if v is not None}
 
@@ -616,6 +597,8 @@ async def handle_openai_direct_request(
         openai_extra_body = {"google": {"safety_settings": openai_safety_settings}}
     else:
         openai_extra_body = None
+
+    client_pool.retain(openai_client)
 
     if request.stream:
         # 每次调用时直接从 settings 获取最新的 FAKE_STREAMING 值
@@ -637,7 +620,7 @@ async def handle_openai_direct_request(
             # openai_params 已含 stream=True；伪流式生成器内部会用
             # stream=False 的非流式调用。
             return StreamingResponse(
-                openai_fake_stream_generator(
+                client_pool.stream_with_release(openai_fake_stream_generator(
                     openai_client=openai_client,
                     openai_params=openai_params,
                     openai_extra_body=openai_extra_body,
@@ -648,7 +631,7 @@ async def handle_openai_direct_request(
                     gcp_project_id=project_id,
                     gcp_location=location,
                     base_model_id_for_tokenizer=base_model_name,
-                ),
+                ), openai_client),
                 media_type="text/event-stream",
             )
         else:  # Regular OpenAI streaming
@@ -657,9 +640,9 @@ async def handle_openai_direct_request(
                 f"模型 {request.model} 已启用 OpenAI 真流式响应",
             )
             return StreamingResponse(
-                openai_true_stream_generator(
+                client_pool.stream_with_release(openai_true_stream_generator(
                     openai_client, openai_params, openai_extra_body, request.model
-                ),
+                ), openai_client),
                 media_type="text/event-stream",
             )
 
@@ -670,6 +653,7 @@ async def handle_openai_direct_request(
         response = await openai_client.chat.completions.create(
             **openai_params_for_non_stream,
             extra_body=openai_extra_body,
+            extra_headers={"Accept": "application/json"},
         )
         response_dict = response.model_dump(exclude_unset=True, exclude_none=True)
 
@@ -698,6 +682,9 @@ async def handle_openai_direct_request(
         )
         vertex_log("error", error_msg_generate)
         error_response = create_openai_error_response(
-            500, error_msg_generate, "server_error"
+            500, "Upstream service error.", "server_error"
         )
         return JSONResponse(status_code=500, content=error_response)
+
+    finally:
+        await client_pool.release(openai_client)

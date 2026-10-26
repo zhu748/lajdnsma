@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from app.models.schemas import ErrorResponse
+from app.middleware import BodySizeLimitMiddleware, ResponseHeadersMiddleware
 from app.services import GeminiClient
 from app.utils import (
     APIKeyManager,
@@ -70,76 +71,33 @@ def _spawn_background_task(coro) -> asyncio.Task:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await _startup()
-    yield
-    await _shutdown()
+    try:
+        yield
+    finally:
+        await _shutdown()
 
 
 app = FastAPI(lifespan=lifespan)
 app.add_exception_handler(RequestValidationError, handle_request_validation_error)
 
 
-@app.middleware("http")
-async def enforce_body_size_limit(request: Request, call_next):
-    """Reject request bodies larger than MAX_REQUEST_BODY_BYTES.
-
-    We check `Content-Length` for requests that declare it.  Requests
-    that use chunked transfer encoding (no Content-Length) are
-    streamed; the body itself is not pre-read, but FastAPI/Starlette
-    will still parse it during routing — that's a known limitation
-    that we accept for now (chunked clients are rare for chat APIs).
-    """
-    cl = request.headers.get("content-length")
-    if cl:
-        try:
-            if int(cl) > MAX_REQUEST_BODY_BYTES:
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": {"message": "Request body too large.", "type": "invalid_request_error"}},
-                )
-        except (TypeError, ValueError):
-            pass
-    return await call_next(request)
-
-
-# --------------- Response header hardening middleware ---------------
-# Real OpenAI / Anthropic responses don't carry uvicorn's default
-# `Server: uvicorn` header, and they don't send `X-Powered-By` at
-# all.  Their absence + a neutral `Server` value removes one of the
-# easiest-to-probe markers that an upstream (or client) can use to
-# identify this as a uvicorn-hosted proxy.
-@app.middleware("http")
-async def harden_response_headers(request: Request, call_next):
-    response = await call_next(request)
-    # Replace uvicorn's default `Server: uvicorn` with a neutral value.
-    # `cloudflare` is a safe choice because it's also commonly seen
-    # in front of real OpenAI/Anthropic deployments.
-    response.headers["Server"] = "cloudflare"
-    # Strip FastAPI/Starlette-added disclosure headers if present.
-    # CRITICAL FIX: 旧写法 `response.headers.pop("X-Powered-By", None)`
-    # 调用了 MutableHeaders 根本不存在的 .pop() 方法 —— Starlette 的
-    # MutableHeaders 只有 __delitem__，没有 pop。该异常被全局异常处
-    # 理器吞掉后，**每个请求都返回 500**（冒烟测试发现）。改为
-    # membership check + del，兼容所有 Starlette 版本。
-    if "x-powered-by" in response.headers:
-        del response.headers["x-powered-by"]
-    return response
+# Pure ASGI wrappers preserve SSE cancellation and avoid BaseHTTPMiddleware overhead.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+app.add_middleware(ResponseHeadersMiddleware)
 
 
 # --------------- CORS 中间件 ---------------
-# Hardening: previously `allow_methods=["*"]` +
-# `allow_headers=["*"]` was too permissive — real OpenAI/Anthropic
-# CORS responses are a restricted whitelist (POST, OPTIONS +
-# Authorization, Content-Type, Accept).  The wide `*` is itself a
-# fingerprint because the OPTIONS preflight response then advertises
-# every method.  We also turn off `allow_credentials` unless the
-# operator explicitly sets it (proxy traffic doesn't need cookies).
+# Browser SDKs also send telemetry and opt-in headers (x-stainless-*,
+# x-goog-api-client, anthropic-dangerous-direct-browser-access, etc.).
+# Reflect requested headers for configured origins; authentication still applies
+# to the actual request. Cookie credentials remain disabled.
 if settings.ALLOWED_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.ALLOWED_ORIGINS,
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept"],
+        allow_headers=["*"],
     )
 
 app.add_middleware(RequestReportingMiddleware)
@@ -382,6 +340,8 @@ async def _shutdown():
         await close_cached_openai_clients()
     except Exception as e:
         log("error", f"关闭 OpenAI 客户端缓存失败：{str(e)}")
+    from app.vertex.client_pool import shutdown as shutdown_vertex_clients
+    await shutdown_vertex_clients()
     await close_async_client()
 
 

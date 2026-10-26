@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request
 
 from app.api import route_runtime
-from app.api.chat_routes import aistudio_chat_completions
+from app.api.chat_routes import aistudio_chat_completions, chat_completions
 from app.api.protocol_handlers import (
     handle_claude_messages_request,
     handle_responses_request,
@@ -29,7 +29,7 @@ async def responses_api(
         http_request,
         _dp,
         _du,
-        aistudio_chat_completions,
+        chat_completions,
     )
 
 
@@ -50,7 +50,7 @@ async def claude_messages(
         http_request,
         _dp,
         _du,
-        aistudio_chat_completions,
+        chat_completions,
     )
 
 
@@ -74,6 +74,8 @@ async def gemini_chat_completions(
     try:
         model_name, action_type = model_and_responseType.split(":", 1)
         model_name = model_name.removeprefix("models/")
+        if not model_name or action_type not in {"generateContent", "streamGenerateContent"}:
+            raise ValueError("Unsupported Gemini action")
         if action_type == "streamGenerateContent":
             is_stream = True
     except ValueError as exc:

@@ -1,11 +1,17 @@
 <script setup>
 import { ref, onMounted, onUnmounted, watch, nextTick, computed } from 'vue'
 import { useDashboardStore } from '../../../stores/dashboard'
-import * as echarts from 'echarts'
+import * as echarts from 'echarts/core'
+import { LineChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
 const dashboardStore = useDashboardStore()
 const chartContainer = ref(null)
 let chart = null
+let resizeObserver = null
 
 const chartData = ref({
   timestamps: [],
@@ -22,12 +28,14 @@ function buildOption() {
   return {
     // 平滑动画：首次渲染 600ms，后续每 5s 数据刷新时 400ms 过渡，
     // 折线以插值方式滑动而不是瞬间跳变，观感更「实时」。
-    animation: true,
+    animation: !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+    color: [dark ? '#5EEAD4' : '#0F766E', '#609AC5'],
+    textStyle: { fontFamily: 'Noto Sans SC, sans-serif' },
     animationDuration: 600,
     animationDurationUpdate: 400,
     animationEasing: 'cubicOut',
     animationEasingUpdate: 'cubicInOut',
-    grid: { left: 8, right: 8, top: 8, bottom: 8, containLabel: true },
+    grid: { left: 8, right: 8, top: 8, bottom: 34, containLabel: true },
     tooltip: {
       trigger: 'axis',
       backgroundColor: dark ? '#18181B' : '#FFFFFF',
@@ -36,7 +44,7 @@ function buildOption() {
       textStyle: { color: dark ? '#FAFAFA' : '#18181B', fontSize: 12 },
       axisPointer: {
         type: 'line',
-        lineStyle: { color: '#6366F1', type: 'dashed' },
+        lineStyle: { color: dark ? '#5EEAD4' : '#0F766E', type: 'dashed' },
       },
     },
     legend: {
@@ -79,11 +87,11 @@ function buildOption() {
         smooth: true,
         showSymbol: false,
         data: chartData.value.apiCalls,
-        lineStyle: { width: 2, color: '#6366F1' },
+        lineStyle: { width: 2, color: dark ? '#5EEAD4' : '#0F766E' },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(99,102,241,0.20)' },
-            { offset: 1, color: 'rgba(99,102,241,0)' },
+            { offset: 0, color: 'rgba(15,118,110,0.15)' },
+            { offset: 1, color: 'rgba(15,118,110,0)' },
           ]),
         },
       },
@@ -94,11 +102,11 @@ function buildOption() {
         smooth: true,
         showSymbol: false,
         data: chartData.value.tokens,
-        lineStyle: { width: 2, color: '#10B981' },
+        lineStyle: { width: 2, color: '#609AC5' },
         areaStyle: {
           color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: 'rgba(16,185,129,0.18)' },
-            { offset: 1, color: 'rgba(16,185,129,0)' },
+            { offset: 0, color: 'rgba(96,154,197,0.10)' },
+            { offset: 1, color: 'rgba(96,154,197,0)' },
           ]),
         },
       },
@@ -132,14 +140,10 @@ function handleResize() {
 }
 
 watch(
-  () => dashboardStore.timeSeriesData,
+  () => [dashboardStore.timeSeriesData.calls, dashboardStore.timeSeriesData.tokens],
   () => {
     nextTick(refreshChart)
   }
-  // Perf(round4): 移除 deep: true —— store 每次轮询都是整体替换
-  // timeSeriesData.value.calls / .tokens 的数组引用，浅层 watch 即可
-  // 触发；deep 模式会额外全树遍历 31 个数据点 × 2 条序列，转而变成
-  // 每 5s 一次的纯浪费。
 )
 
 watch(isDark, () => {
@@ -148,11 +152,16 @@ watch(isDark, () => {
 
 onMounted(() => {
   initChart()
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(chartContainer.value)
+  }
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
+  resizeObserver?.disconnect()
   if (chart) {
     chart.dispose()
     chart = null

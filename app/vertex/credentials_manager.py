@@ -4,6 +4,8 @@ import glob
 import random
 import json
 import time
+import threading
+from collections import OrderedDict
 from typing import List, Dict, Any
 from google.auth.transport.requests import Request as AuthRequest
 from google.oauth2 import service_account
@@ -11,14 +13,30 @@ import app.vertex.config as app_config  # Changed from relative
 from app.utils.logging import vertex_log
 
 
-# Hardened token cache: per-project_id (token, expiry_epoch).
-# service_account tokens last 1h; we cache for 50min to refresh before
-# expiry.  Avoiding token refresh on every request is important because
-# every refresh is recorded by Cloud Audit Log as a separate
-# `service_account.token.refresh` event — high refresh rate is itself an
-# anomalous-account fingerprint.
-_TOKEN_CACHE: dict[str, tuple] = {}  # {project_id: (token, expiry_epoch)}
-_TOKEN_TTL_SECONDS = 50 * 60  # 50 minutes
+# Tokens are identities, not project-wide capabilities. Cache by account/key,
+# scopes and delegated subject; striped locks coalesce concurrent refreshes.
+_TOKEN_CACHE = OrderedDict()
+_TOKEN_CACHE_LOCK = threading.Lock()
+_TOKEN_REFRESH_LOCKS = [threading.Lock() for _ in range(32)]
+_TOKEN_TTL_SECONDS = 50 * 60
+_MAX_CACHED_TOKENS = 512
+
+
+def credential_identity(credentials):
+    email = getattr(credentials, "service_account_email", None)
+    key_id = getattr(getattr(credentials, "signer", None), "key_id", None)
+    return (
+        getattr(credentials, "project_id", None), email, key_id,
+        tuple(getattr(credentials, "scopes", None) or ()),
+        getattr(credentials, "_subject", None),
+        getattr(credentials, "quota_project_id", None),
+        id(credentials) if not email and not key_id else None,
+    )
+
+
+def clear_token_cache():
+    with _TOKEN_CACHE_LOCK:
+        _TOKEN_CACHE.clear()
 
 
 def get_credential_manager(fastapi_request) -> "CredentialManager":
@@ -38,123 +56,120 @@ def get_credential_manager(fastapi_request) -> "CredentialManager":
     return credential_manager_instance
 
 
-# Helper function to parse multiple JSONs from a string
+def parse_credentials_json(json_str: str) -> List[Dict[str, Any]]:
+    """Parse complete objects, arrays, or comma/whitespace separated objects.
+
+    JSONDecoder respects braces inside strings. Never accept a valid prefix of
+    a malformed upload or silently discard an invalid entry.
+    """
+    if not isinstance(json_str, str) or not json_str.strip():
+        raise ValueError("凭证 JSON 不能为空")
+    def invalid_constant(value):
+        raise ValueError("凭证 JSON 不允许非有限数字")
+    decoder = json.JSONDecoder(parse_constant=invalid_constant)
+    text = json_str.strip()
+    objects = []
+    position = 0
+    try:
+        while position < len(text):
+            item, end = decoder.raw_decode(text, position)
+            if isinstance(item, list):
+                if position != 0 or text[end:].strip():
+                    raise ValueError("凭证数组必须是完整 JSON")
+                objects.extend(item)
+            else:
+                objects.append(item)
+            position = end
+            while position < len(text) and text[position].isspace():
+                position += 1
+            if position < len(text) and text[position] == ',':
+                position += 1
+                while position < len(text) and text[position].isspace():
+                    position += 1
+                if position == len(text):
+                    raise ValueError("凭证 JSON 末尾不能有逗号")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"凭证 JSON 格式无效（位置 {exc.pos}）") from None
+    if not objects or any(not isinstance(item, dict) for item in objects):
+        raise ValueError("凭证必须是非空 JSON 对象或对象数组")
+    return objects
+
+
 def parse_multiple_json_credentials(json_str: str) -> List[Dict[str, Any]]:
-    """
-    Parse multiple JSON objects from a string separated by commas.
-    Format expected: {json_object1},{json_object2},...
-    Returns a list of parsed JSON objects.
-    """
-    # 检查输入是否为None或空字符串
+    """Startup compatibility wrapper: invalid configuration yields no entries."""
     if not json_str or not json_str.strip():
-        vertex_log(
-            "debug", f"凭证 JSON 为空，无需解析"
-        )
+        return []
+    try:
+        return parse_credentials_json(json_str)
+    except ValueError as exc:
+        vertex_log("warning", str(exc))
         return []
 
-    credentials_list = []
-    nesting_level = 0
-    current_object_start = -1
 
-    for i, char in enumerate(json_str):
-        if char == "{":
-            if nesting_level == 0:
-                current_object_start = i
-            nesting_level += 1
-        elif char == "}":
-            if nesting_level > 0:
-                nesting_level -= 1
-                if nesting_level == 0 and current_object_start != -1:
-                    # Found a complete top-level JSON object
-                    json_object_str = json_str[current_object_start : i + 1]
-                    try:
-                        credentials_info = json.loads(json_object_str)
-                        # Basic validation for service account structure
-                        required_fields = [
-                            "type",
-                            "project_id",
-                            "private_key_id",
-                            "private_key",
-                            "client_email",
-                        ]
-                        if all(field in credentials_info for field in required_fields):
-                            credentials_list.append(credentials_info)
-                            vertex_log(
-                                "debug", f"凭证 JSON 对象解析成功"
-                            )
-                        else:
-                            vertex_log(
-                                "warning",
-                                f"凭证 JSON 缺少必填字段，已跳过该对象",
-                            )
-                    except json.JSONDecodeError as e:
-                        vertex_log(
-                            "error",
-                            f"凭证 JSON 解析失败：{e}",
-                        )
-                    current_object_start = -1  # Reset for the next object
-            else:
-                # Found a closing brace without a matching open brace in scope, might indicate malformed input
-                vertex_log(
-                    "warning",
-                    f"位置 {i} 出现多余的右花括号，JSON 格式可能不正确",
-                )
-
-    if nesting_level != 0:
-        vertex_log(
-            "warning",
-            f"凭证 JSON 的花括号未配对，剩余嵌套层数 {nesting_level}",
+def _credential_entry(info: Dict[str, Any]) -> Dict[str, Any]:
+    required = ("project_id", "private_key_id", "private_key", "client_email", "token_uri")
+    if not isinstance(info, dict) or info.get("type") != "service_account":
+        raise ValueError("凭证类型必须为 service_account")
+    if any(not isinstance(info.get(key), str) or not info[key].strip() for key in required):
+        raise ValueError("凭证缺少有效的服务账号必填字段")
+    try:
+        credentials = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/cloud-platform"],
         )
+    except Exception:
+        # SDK exceptions may include private key material; never echo them.
+        raise ValueError("服务账号凭证或私钥无效") from None
+    return {"credentials": credentials, "project_id": credentials.project_id, "source": "json_string"}
 
-    vertex_log(
-        "debug",
-        f"已解析 {len(credentials_list)} 个凭证对象",
-    )
-    return credentials_list
+
+def prepare_json_credentials(json_str: str) -> List[Dict[str, Any]]:
+    """Validate every entry locally before changing any active credentials."""
+    prepared = []
+    identities = set()
+    for info in parse_credentials_json(json_str):
+        entry = _credential_entry(info)
+        identity = credential_identity(entry["credentials"])
+        if identity not in identities:
+            prepared.append(entry)
+            identities.add(identity)
+    return prepared
 
 
 def _refresh_auth(credentials):
-    """Helper function to refresh GCP token.
-
-    Hardened: caches the refreshed token in `_TOKEN_CACHE` keyed by
-    project_id so we don't refresh on every request (every refresh is
-    a Cloud Audit Log event; high refresh rate is an anomalous-account
-    fingerprint).
-    """
+    """Reuse only a matching principal's token; refresh once per concurrent group."""
     if not credentials:
-        vertex_log("error", f"无法刷新认证令牌：未提供凭证")
         return None
-    project_id_for_log = getattr(credentials, "project_id", "Unknown")
-
-    # Check cache first
-    cached = _TOKEN_CACHE.get(project_id_for_log)
-    if cached is not None:
-        token, expiry = cached
-        if time.time() < expiry:
-            # Apply cached token back to the credentials object so the
-            # downstream google.genai client picks it up.
-            try:
-                credentials.token = token
-            except Exception:
-                pass
+    key = credential_identity(credentials)
+    with _TOKEN_REFRESH_LOCKS[hash(key) % len(_TOKEN_REFRESH_LOCKS)]:
+        with _TOKEN_CACHE_LOCK:
+            cached = _TOKEN_CACHE.get(key)
+            if cached is not None and time.time() < cached[1]:
+                _TOKEN_CACHE.move_to_end(key)
+                credentials.token = cached[0]
+                if cached[2] is not None:
+                    credentials.expiry = cached[2]
+                return cached[0]
+        try:
+            credentials.refresh(AuthRequest())
+            token = credentials.token
+            if not token:
+                return None
+            expiry = getattr(credentials, "expiry", None)
+            valid_until = time.time() + _TOKEN_TTL_SECONDS
+            if expiry is not None:
+                # google-auth uses naive UTC expiries in this pinned version.
+                from datetime import timezone
+                expiry_utc = expiry if expiry.tzinfo else expiry.replace(tzinfo=timezone.utc)
+                valid_until = min(valid_until, expiry_utc.timestamp() - 60)
+            with _TOKEN_CACHE_LOCK:
+                _TOKEN_CACHE[key] = (token, valid_until, expiry)
+                _TOKEN_CACHE.move_to_end(key)
+                while len(_TOKEN_CACHE) > _MAX_CACHED_TOKENS:
+                    _TOKEN_CACHE.popitem(last=False)
             return token
-
-    try:
-        credentials.refresh(AuthRequest())
-        token = credentials.token
-        # Cache for 50 minutes (real tokens last 1h)
-        _TOKEN_CACHE[project_id_for_log] = (token, time.time() + _TOKEN_TTL_SECONDS)
-        vertex_log(
-            "info", f"项目 {project_id_for_log} 的认证令牌已刷新并缓存"
-        )
-        return token
-    except Exception as e:
-        # Cleanup: the except block used to re-assign project_id_for_log to
-        # the same value it already holds — dead store, removed.
-        vertex_log(
-            "error", f"项目 {project_id_for_log} 的 GCP 认证令牌刷新失败：{e}"
-        )
-        return None
+        except Exception as exc:
+            vertex_log("error", f"GCP 认证令牌刷新失败：{exc}")
+            return None
 
 
 # Credential Manager for handling multiple service accounts
@@ -192,103 +207,32 @@ class CredentialManager:
         )
         return removed_count
 
+    def replace_json_string_credentials(self, prepared: List[Dict[str, Any]]) -> None:
+        """Install an already validated batch in one assignment; preserve other sources."""
+        retained = [item for item in self.in_memory_credentials if item.get("source") != "json_string"]
+        self.in_memory_credentials = retained + prepared
+        self.credentials = None
+        self.project_id = None
+
     def add_credential_from_json(self, credentials_info: Dict[str, Any]) -> bool:
-        """
-        Add a credential from a JSON object to the manager's in-memory list.
-
-        Args:
-            credentials_info: Dict containing service account credentials
-
-        Returns:
-            bool: True if credential was added successfully, False otherwise
-        """
         try:
-            # Validate structure again before creating credentials object
-            required_fields = [
-                "type",
-                "project_id",
-                "private_key_id",
-                "private_key",
-                "client_email",
-            ]
-            if not all(field in credentials_info for field in required_fields):
-                vertex_log(
-                    "warning",
-                    f"凭证 JSON 缺少必填字段，已跳过",
-                )
-                return False
-
-            credentials = service_account.Credentials.from_service_account_info(
-                credentials_info,
-                scopes=["https://www.googleapis.com/auth/cloud-platform"],
-            )
-            project_id = credentials.project_id
-            vertex_log(
-                "debug",
-                f"已根据 JSON 创建凭证对象，项目={project_id}",
-            )
-
-            # Store the credentials object and project ID
-            self.in_memory_credentials.append(
-                {
-                    "credentials": credentials,
-                    "project_id": project_id,
-                    "source": "json_string",  # Add source for clarity
-                }
-            )
-            vertex_log(
-                "info",
-                f"已将项目 {project_id} 的 JSON 凭证加入管理器",
-            )
-            return True
-        except Exception as e:
-            vertex_log(
-                "error", f"根据 JSON 创建凭证失败：{e}"
-            )
+            entry = _credential_entry(credentials_info)
+        except ValueError as exc:
+            vertex_log("warning", str(exc))
             return False
+        identity = credential_identity(entry["credentials"])
+        if any(credential_identity(item["credentials"]) == identity for item in self.in_memory_credentials):
+            return False
+        self.in_memory_credentials.append(entry)
+        return True
 
     def load_credentials_from_json_list(self, json_list: List[Dict[str, Any]]) -> int:
-        """
-        Load multiple credentials from a list of JSON objects into memory.
-
-        Args:
-            json_list: List of dicts containing service account credentials
-
-        Returns:
-            int: Number of credentials successfully loaded
-        """
-        # Avoid duplicates if called multiple times
-        existing_projects = {cred["project_id"] for cred in self.in_memory_credentials}
-        success_count = 0
-        newly_added_projects = set()
-
-        for credentials_info in json_list:
-            project_id = credentials_info.get("project_id")
-            # Check if this project_id from JSON exists in files OR already added from JSON
-            is_duplicate_file = any(
-                os.path.basename(f) == f"{project_id}.json"
-                for f in self.credentials_files
-            )  # Basic check
-            is_duplicate_mem = (
-                project_id in existing_projects or project_id in newly_added_projects
-            )
-
-            if project_id and not is_duplicate_file and not is_duplicate_mem:
-                if self.add_credential_from_json(credentials_info):
-                    success_count += 1
-                    newly_added_projects.add(project_id)
-            elif project_id:
-                vertex_log(
-                    "debug",
-                    f"项目 {project_id} 的凭证已存在，跳过重复项",
-                )
-
-        if success_count > 0:
-            vertex_log(
-                "info",
-                f"已从 JSON 列表新增 {success_count} 个内存凭证",
-            )
-        return success_count
+        # Project IDs do not identify a principal. Keep distinct accounts and
+        # rotated signing keys even when they belong to the same project.
+        count = sum(self.add_credential_from_json(info) for info in json_list)
+        if count:
+            vertex_log("info", f"已从 JSON 列表新增 {count} 个内存凭证")
+        return count
 
     def load_credentials_list(self):
         """Load the list of available credential files"""

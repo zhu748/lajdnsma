@@ -227,7 +227,7 @@ async def generate_native_stream_response(
         if stream_summary["empty"]:
             empty_response_count += 1
 
-        if stream_summary["success"]:
+        if stream_summary["success"] or stream_summary.get("failed_after_output"):
             return
 
         # 批次失败：计数 +1，下一轮循环顶部会先退避

@@ -1,4 +1,5 @@
 <script setup>
+import AppDialog from '../../ui/AppDialog.vue'
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../../../stores/dashboard'
 
@@ -37,17 +38,13 @@ onUnmounted(() => clearInterval(tickTimer))
 const lastUpdatedText = computed(() => {
   const t = dashboardStore.lastUpdated
   if (!t) return ''
+  if (dashboardStore.lastError) return `更新失败 · 上次同步 ${t.toLocaleTimeString('zh-CN', { hour12: false })}`
   const diff = Math.max(0, Math.floor((nowTick.value - t.getTime()) / 1000))
   if (diff < 5) return '刚刚更新'
   if (diff < 60) return `${diff} 秒前更新`
   return `更新于 ${t.toLocaleTimeString('zh-CN', { hour12: false })}`
 })
 
-const handleEscKey = (e) => {
-  if (e.key === 'Escape' && showModelsModal.value) showModelsModal.value = false
-}
-onMounted(() => document.addEventListener('keydown', handleEscKey))
-onUnmounted(() => document.removeEventListener('keydown', handleEscKey))
 
 function fmt(n) {
   if (n == null) return '0'
@@ -77,7 +74,7 @@ function fmt(n) {
           <div class="kpi__value">{{ dashboardStore.status.keyCount }}</div>
           <div class="kpi__hint">池内有效</div>
         </div>
-        <div class="kpi kpi--clickable kpi--accent-2" @click="showModelsModal = true">
+        <button type="button" class="kpi kpi--clickable kpi--accent-2" @click="showModelsModal = true" aria-label="查看可用模型">
           <span class="kpi__accent kpi__accent--accent" aria-hidden="true"></span>
           <div class="kpi__head">
             <span class="kpi__icon kpi__icon--accent" aria-hidden="true">
@@ -90,7 +87,7 @@ function fmt(n) {
           </div>
           <div class="kpi__value">{{ dashboardStore.status.modelCount }}</div>
           <div class="kpi__hint">点击查看列表 →</div>
-        </div>
+        </button>
         <div class="kpi kpi--success">
           <span class="kpi__accent kpi__accent--success" aria-hidden="true"></span>
           <div class="kpi__head">
@@ -99,7 +96,7 @@ function fmt(n) {
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
               </svg>
             </span>
-            <div class="kpi__label">调用 · 24小时</div>
+            <div class="kpi__label">调用 · 本统计周期</div>
           </div>
           <div class="kpi__value">{{ fmt(dashboardStore.status.last24hCalls) }}</div>
           <div class="kpi__hint">每小时 {{ fmt(dashboardStore.status.hourlyCalls) }} · 每分钟 {{ fmt(dashboardStore.status.minuteCalls) }}</div>
@@ -114,7 +111,7 @@ function fmt(n) {
                 <path d="M10 6h4" />
               </svg>
             </span>
-            <div class="kpi__label">令牌 · 24小时</div>
+            <div class="kpi__label">令牌 · 本统计周期</div>
           </div>
           <div class="kpi__value">{{ fmt(dashboardStore.status.last24hTokens) }}</div>
           <div class="kpi__hint">每小时 {{ fmt(dashboardStore.status.hourlyTokens) }} · 每分钟 {{ fmt(dashboardStore.status.minuteTokens) }}</div>
@@ -127,7 +124,7 @@ function fmt(n) {
         <div class="vertex-info__body">
           <div class="vertex-info__title">Vertex 模式已启用</div>
           <div class="vertex-info__text">
-            当前服务正通过 Vertex AI 后端路由。该模式下，统计信息与各密钥计数将单独上报。
+            当前服务正通过 Vertex AI 后端路由。当前面板暂不汇总 Vertex 用量，请在 Google Cloud 控制台查看调用与账单。
           </div>
         </div>
       </div>
@@ -135,14 +132,13 @@ function fmt(n) {
       <!-- 数据新鲜度指示器：显示距离上次成功拉取的时间，
            服务离线/后端卡顿时运维能第一时间发现数据不新鲜 -->
       <div v-if="!dashboardStore.status.enableVertex && lastUpdatedText" class="freshness-bar">
-        <span class="freshness-bar__dot" :class="{ 'freshness-bar__dot--stale': dashboardStore.isRefreshing }"></span>
+        <span class="freshness-bar__dot" :class="{ 'freshness-bar__dot--stale': dashboardStore.isRefreshing || dashboardStore.lastError }"></span>
         <span class="freshness-bar__text">{{ lastUpdatedText }}</span>
       </div>
     </div>
 
     <!-- Models modal -->
-    <div v-if="showModelsModal" class="modal-overlay" @click.self="showModelsModal = false">
-      <div class="modal" style="max-width:560px;">
+    <AppDialog v-model="showModelsModal" title="可用模型" width="560px">
         <div class="modal__header">
           <div>
             <div class="modal__title">可用模型</div>
@@ -172,59 +168,19 @@ function fmt(n) {
         <div class="modal__footer">
           <button class="btn btn--secondary btn--sm" @click="showModelsModal = false">关闭</button>
         </div>
-      </div>
-    </div>
+      </AppDialog>
   </div>
 </template>
 
 <style scoped>
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0;
-}
-@media (max-width: 1024px) {
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
-}
-@media (max-width: 640px) {
-  .stats-grid { grid-template-columns: 1fr; }
-}
-
-.kpi {
-  position: relative;
-  padding: var(--sp-4) var(--sp-5) var(--sp-4) calc(var(--sp-5) + 4px);
-  border-right: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  overflow: hidden;
-}
-.kpi::before {
-  /* Subtle top accent bar that becomes visible on hover to
-     signal interactivity without making the dashboard visually
-     noisy at rest. */
-  content: '';
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  background: transparent;
-  transition: background var(--dur-base) var(--ease-out);
-}
-.kpi:hover::before {
-  background: var(--border-strong);
-}
-.kpi:nth-child(4n) { border-right: none; }
-.kpi:nth-last-child(-n+2) { border-bottom: none; }
-@media (max-width: 1024px) {
-  .kpi:nth-child(2n) { border-right: none; }
-  .kpi:nth-last-child(-n+2) { border-bottom: 1px solid var(--border); }
-  .kpi:nth-last-child(-n+1) { border-bottom: none; }
-}
-@media (max-width: 640px) {
-  .kpi { border-right: none; }
-  .kpi:nth-last-child(-n+2) { border-bottom: 1px solid var(--border); }
-  .kpi:last-child { border-bottom: none; }
+.stats-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.kpi { position: relative; padding: 24px 20px; display: flex; flex-direction: column; align-items: flex-start; text-align: left; gap: 5px; border: 0; border-right: 1px solid var(--border); background: transparent; color: inherit; min-width: 0; }
+.kpi:last-child { border-right: 0; }
+@media (max-width: 760px) {
+ .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+ .kpi { padding: 20px 16px; }
+ .kpi:nth-child(2n) { border-right: 0; }
+ .kpi:nth-child(-n+2) { border-bottom: 1px solid var(--border); }
 }
 
 /* Per-card colored left accent strip — adds visual hierarchy
@@ -234,9 +190,9 @@ function fmt(n) {
   left: 0;
   top: 0;
   bottom: 0;
-  width: 3px;
+  width: 2px;
   border-radius: 0;
-  opacity: 0.65;
+  opacity: 0.35;
   transition: opacity var(--dur-base) var(--ease-out);
 }
 .kpi:hover .kpi__accent { opacity: 1; }

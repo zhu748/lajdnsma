@@ -1,6 +1,7 @@
 <script setup>
+import AppDialog from '../ui/AppDialog.vue'
 import { useDashboardStore } from '../../stores/dashboard'
-import { ref } from 'vue'
+import { onBeforeUnmount, ref } from 'vue'
 import StatusStats from './status/StatusStats.vue'
 import ApiKeyStats from './status/ApiKeyStats.vue'
 
@@ -10,6 +11,8 @@ const showResetDialog = ref(false)
 const resetPassword = ref('')
 const resetError = ref('')
 const isResetting = ref(false)
+let resetController
+onBeforeUnmount(() => resetController?.abort())
 
 function openResetDialog() {
   showResetDialog.value = true
@@ -23,25 +26,25 @@ function closeResetDialog() {
 }
 
 async function resetStats() {
+  if (isResetting.value) return
   if (!resetPassword.value) {
     resetError.value = '请输入密码'
     return
   }
   isResetting.value = true
+  resetController = new AbortController()
   resetError.value = ''
   try {
     const response = await fetch('/api/reset-stats', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: resetPassword.value }),
+      signal: resetController.signal,
     })
     const data = await response.json()
     if (!response.ok) throw new Error(data.detail || '重置失败')
     await dashboardStore.fetchDashboardData()
-    setTimeout(async () => {
-      await dashboardStore.fetchDashboardData()
-      closeResetDialog()
-    }, 500)
+    closeResetDialog()
   } catch (e) {
     resetError.value = e.message || '重置失败'
   } finally {
@@ -55,9 +58,9 @@ async function resetStats() {
     <div class="section__header">
       <div class="section__title">运行状态</div>
       <div class="row">
-        <span class="pill pill--success">
+        <span class="pill" :class="dashboardStore.lastError ? 'pill--warning' : 'pill--success'">
           <span class="pill__dot pill__dot--pulse" />
-          运行中
+          {{ dashboardStore.lastError ? '数据待更新' : '运行中' }}
         </span>
         <button
           v-if="!dashboardStore.status.enableVertex"
@@ -73,11 +76,10 @@ async function resetStats() {
     <ApiKeyStats />
 
     <!-- Reset dialog -->
-    <div v-if="showResetDialog" class="modal-overlay" @click.self="closeResetDialog">
-      <div class="modal">
+    <AppDialog v-model="showResetDialog" title="重置计数" :busy="isResetting" v-slot="{ close }">
         <div class="modal__header">
           <div class="modal__title">重置计数</div>
-          <button class="btn btn--ghost btn--icon btn--sm" @click="closeResetDialog">✕</button>
+          <button class="btn btn--ghost btn--icon btn--sm" @click="close" :disabled="isResetting" aria-label="关闭重置计数窗口">✕</button>
         </div>
         <div class="modal__body">
           <p class="text-muted mb-4" style="font-size:var(--fs-sm);">
@@ -99,12 +101,11 @@ async function resetStats() {
           </div>
         </div>
         <div class="modal__footer">
-          <button class="btn btn--secondary btn--sm" @click="closeResetDialog">取消</button>
+          <button class="btn btn--secondary btn--sm" @click="close" :disabled="isResetting">取消</button>
           <button class="btn btn--primary btn--sm" @click="resetStats" :disabled="isResetting">
             {{ isResetting ? '重置中…' : '确认重置' }}
           </button>
         </div>
-      </div>
-    </div>
+      </AppDialog>
   </section>
 </template>

@@ -23,13 +23,38 @@ app/
 │   ├── message_processing.py / model_names.py / credentials_manager.py ...
 ├── utils/                  # 工具层（密钥选择 / 错误处理 / 协议转换 / 统计 / 缓存）
 └── config/                 # 配置层（settings / 持久化 / safety 模式）
-tests/                      # 449 项回归测试（含源码文本契约，重构前必读
+tests/                      # 回归测试（含真实依赖契约和历史源码文本契约，重构前必读
                             #   tests/test_round4/round5 的注释说明）
 ```
 
 分层约定：`api` 层不直接发起上游请求，`services`/`vertex` 层不感知 HTTP，
 `utils` 层为纯函数或独立状态机；面板与业务共用 `route_runtime`/`dashboard.runtime`
 注入的运行时对象。
+
+## 开发与验证
+
+```bash
+uv sync --frozen
+uv run pytest -q
+cd hajimiUI
+npm ci
+npm test
+npm run build
+```
+
+前端构建在临时目录成功后更新模板，资源名由 Vite 内容哈希管理。旧资源保留供已打开的页面使用，部署流程可按保留周期清理。
+
+浏览器回归脚本为 `scripts/qa_dashboard.cjs`，使用模拟 API 数据检查桌面、手机、深色模式、登录、Vertex、空数据及断线恢复。安装 Playwright 与 Chromium 后，在仓库根目录运行 `UI_REVIEW_PRODUCTION=1 node scripts/qa_dashboard.cjs` 可验证已构建的模板；浏览器在自定义路径时设置 `BROWSER_EXECUTABLE`。脚本不使用真实密钥，截图默认写入 `/tmp/lajdnsma-ui-review`。
+
+[2026-10-26 审查、修复与兼容边界](docs/AUDIT_2026-10-26.md) 包含协议支持限制、验证结果与后续工作。原生 Vertex 已补齐函数工具、调用结果与签名往返，以及非流式/真流式/伪流式转换；加密和 auto 变体暂不支持工具请求。AI Studio 转换、原生 Vertex 和 Vertex 伪流式目前仅支持 `n=1`。Responses 不提供服务端会话存储或后台任务，`previous_response_id`、`store=true`、`background=true` 会返回 400，请传完整会话历史。
+
+Chat / Responses / Messages 兼容转换入口和独立 Vertex 入口会在调用前校验消息与工具关联。工具续聊需要完整历史、有效调用 ID 和 JSON 对象参数；不支持的内容块和无关联工具结果会明确报错。Responses 的异步函数工具尚不支持。Chat 转换当前支持文本与图片；Gemini 原生入口按其原生协议与上游能力处理。
+
+管理面板会在保存前校验完整草稿；服务端拒绝非法数值与不完整的凭证批次。Google 凭证更新失败时保留原凭证，同项目不同账号可同时配置。凭证变更仅在当前进程生效，重启仍需通过环境变量或挂载文件提供。
+
+本地性能复测可运行 `uv run python scripts/benchmark_protocol_streams.py` 和 `uv run python scripts/benchmark_response_cache.py`。结果分别衡量协议流转换和同键缓存消费，不代表真实模型或网络吞吐。
+
+[请求头专项审查](docs/REQUEST_HEADERS_REVIEW_2026-10-26.md) 记录各上游认证、SDK 版本标识、真假流式 Accept 和 CORS 的实际验证。Google REST 请求使用与已安装 SDK 一致的版本头，不再随机模拟 Chrome/curl；这不代表浏览器 TLS 指纹模拟。可运行 `uv run pytest -q tests/test_upstream_headers.py` 检查真实 SDK 合并后的最终 HTTP 请求头，无需生产密钥。
 
 ## 项目采用动态更新，随时会有一些小更新同步到主仓库且会自动构建镜像，如果反馈的bug开发者说修了但是版本号没变是正常现象，~~记得勤更新镜像哦~~
 

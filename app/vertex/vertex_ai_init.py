@@ -1,9 +1,9 @@
-"""Vertex 启动初始化与 genai.Client 池（按 project_id 键控，TTL 50min）。"""
-import json
-import time
+"""Vertex 启动初始化与按项目、位置、凭证隔离的 SDK 客户端池。"""
 from google import genai
 from app.vertex.credentials_manager import (
     CredentialManager,
+    credential_identity,
+    clear_token_cache,
     parse_multiple_json_credentials,
 )
 import app.vertex.config as app_config
@@ -16,47 +16,25 @@ from app.utils.logging import vertex_log
 # The constant VERTEX_EXPRESS_MODELS previously defined here is removed.
 # Consumers should use get_vertex_express_models() from model_loader.
 
-# 全局客户端池：按 project_id 缓存 genai.Client（原 global_fallback_client
-# 单例随死代码 get_vertex_ai_client 一并移除，统一走池）
-
-# Hardened: client pool keyed by project_id, so we don't re-create the
-# genai.Client (and re-negotiate TLS) on every request.  TTL is 50
-# minutes — tokens last 1h, so we refresh well before expiry.
-_client_pool: dict[str, tuple] = {}  # {project_id: (client, created_at)}
-_CLIENT_TTL_SECONDS = 50 * 60
+from app.vertex import client_pool
 
 
 def _get_client_from_pool(project_id: str, creds, location: str = "global"):
-    """Get or create a cached genai.Client for a given project_id.
-
-    Returns the cached client if it's still fresh (< TTL old), otherwise
-    creates and caches a new one.  This dramatically reduces both CPU
-    (RSA key parsing) and the number of distinct TLS sessions we open
-    against Vertex — both of which are anti-fingerprint improvements.
-    """
-    now = time.time()
-    cached = _client_pool.get(project_id)
-    if cached is not None:
-        client, created_at = cached
-        if now - created_at < _CLIENT_TTL_SECONDS:
-            return client
+    # Projects may have multiple service accounts with different permissions.
+    identity = credential_identity(creds)
     try:
-        client = genai.Client(
-            vertexai=True,
-            credentials=creds,
-            project=project_id,
-            location=location,
-        )
-        _client_pool[project_id] = (client, now)
-        return client
-    except Exception as e:
-        vertex_log("error", f"为项目 {project_id} 创建 Vertex 客户端失败：{e}")
+        return client_pool.get_client(("sa", project_id, location, identity), lambda: genai.Client(
+            vertexai=True, credentials=creds, project=project_id, location=location,
+        ))
+    except Exception as exc:
+        vertex_log("error", f"为项目 {project_id} 创建 Vertex 客户端失败：{exc}")
         return None
 
 
 def reset_client_pool():
-    """清空全局客户端池（凭证更新后由 dashboard 调用）。"""
-    _client_pool.clear()
+    """Retire old credentials; ongoing responses retain their client until closed."""
+    clear_token_cache()
+    client_pool.reset()
     vertex_log("info", "Vertex 客户端池已重置")
 
 
@@ -78,91 +56,12 @@ async def init_vertex_ai(credential_manager=None) -> bool:  # Made async
 
     try:
         credentials_json_str = app_config.GOOGLE_CREDENTIALS_JSON
-        env_creds_loaded_into_manager = False
-
-        # 更严格的检查：确保不为None、不为空字符串、且去除空白后不为空
         if credentials_json_str and credentials_json_str.strip():
-            vertex_log(
-                "info",
-                f"检测到 GOOGLE_CREDENTIALS_JSON，正在加载到凭证管理器",
-            )
-            try:
-                # Attempt 1: Parse as multiple JSON objects
-                json_objects = parse_multiple_json_credentials(credentials_json_str)
-                if json_objects:
-                    vertex_log(
-                        "debug",
-                        f"已从 GOOGLE_CREDENTIALS_JSON 解析 {len(json_objects)} 个候选凭证",
-                    )
-                    success_count = credential_manager.load_credentials_from_json_list(
-                        json_objects
-                    )
-                    if success_count > 0:
-                        vertex_log(
-                            "info",
-                            f"已从 GOOGLE_CREDENTIALS_JSON 加载 {success_count} 个凭证",
-                        )
-                        env_creds_loaded_into_manager = True
-
-                # Attempt 2: If multiple parsing/loading didn't add any, try parsing/loading as a single JSON object
-                if not env_creds_loaded_into_manager:
-                    vertex_log(
-                        "debug",
-                        f"多个 JSON 凭证加载为空或未成功，尝试按单个 JSON 凭证加载",
-                    )
-                    try:
-                        credentials_info = json.loads(credentials_json_str)
-                        # Basic validation (CredentialManager's add_credential_from_json does more thorough validation)
-
-                        if isinstance(credentials_info, dict) and all(
-                            field in credentials_info
-                            for field in [
-                                "type",
-                                "project_id",
-                                "private_key_id",
-                                "private_key",
-                                "client_email",
-                            ]
-                        ):
-                            if credential_manager.add_credential_from_json(
-                                credentials_info
-                            ):
-                                vertex_log(
-                                    "info",
-                                    f"已将单个 JSON 凭证加载到管理器",
-                                )
-                                # env_creds_loaded_into_manager = True # Redundant, as this block is conditional on it being False
-                            else:
-                                vertex_log(
-                                    "warning",
-                                    f"通过管理器添加单个 JSON 凭证失败",
-                                )
-                        else:
-                            vertex_log(
-                                "warning",
-                                f"单个 JSON 凭证不是有效对象，或缺少必填字段",
-                            )
-                    except json.JSONDecodeError as single_json_err:
-                        vertex_log(
-                            "warning",
-                            f"GOOGLE_CREDENTIALS_JSON 无法解析为单个 JSON 对象：{single_json_err}",
-                        )
-                    except Exception as single_load_err:
-                        vertex_log(
-                            "warning",
-                            f"向管理器加载单个 JSON 凭证失败：{single_load_err}",
-                        )
-            except Exception as e_json_env:
-                # This catches errors from parse_multiple_json_credentials or load_credentials_from_json_list
-                vertex_log(
-                    "warning",
-                    f"处理 GOOGLE_CREDENTIALS_JSON 配置失败：{e_json_env}",
-                )
+            json_objects = parse_multiple_json_credentials(credentials_json_str)
+            success_count = credential_manager.load_credentials_from_json_list(json_objects)
+            vertex_log("info", f"从 GOOGLE_CREDENTIALS_JSON 新增 {success_count} 个凭证")
         else:
-            vertex_log(
-                "info",
-                f"GOOGLE_CREDENTIALS_JSON 未配置或为空",
-            )
+            vertex_log("info", "GOOGLE_CREDENTIALS_JSON 未配置或为空")
 
         # Attempt to pre-warm the model configuration cache
         vertex_log(

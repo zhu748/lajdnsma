@@ -156,22 +156,12 @@ class GeminiSchemaTestCase(unittest.TestCase):
 
         self.assertEqual(history[0]["role"], "model")
         self.assertEqual(history[0]["parts"][0], {"text": "我来查看当前目录。"})
-        # Hardening: previously the dummy thoughtSignature was the
-        # literal string "skip_thought_signature_validator" (a strong
-        # proxy fingerprint).  Now it's a strong-random base64-style
-        # signature generated per call.  We assert on shape, not value.
+        # Imported tool history uses Google's documented fallback, never random bytes.
         tool_part = history[0]["parts"][1]
-        self.assertEqual(
-            tool_part["functionCall"],
-            {"name": "Bash", "args": {"command": "pwd"}},
-        )
-        self.assertIn("thoughtSignature", tool_part)
-        self.assertGreater(len(tool_part["thoughtSignature"]), 100)
-        # Ensure it is NOT the old literal — that would indicate a
-        # regression to the proxy fingerprint.
-        self.assertNotEqual(
-            tool_part["thoughtSignature"], "skip_thought_signature_validator"
-        )
+        self.assertEqual(tool_part["functionCall"], {
+            "name": "Bash", "args": {"command": "pwd"}, "id": "toolu_1",
+        })
+        self.assertEqual(tool_part["thoughtSignature"], "skip_thought_signature_validator")
 
     def test_convert_messages_promotes_leading_system_instruction(self):
         module = load_gemini_module()
@@ -323,7 +313,7 @@ class GeminiSchemaTestCase(unittest.TestCase):
                 _, data = client._convert_openAI_request(request, [], None, None)
                 self.assertEqual(
                     data["tool_config"]["function_calling_config"],
-                    dict(expected, parallel_function_calls=False),
+                    expected,
                 )
 
     def test_convert_messages_preserves_tool_call_thought_signature(self):
@@ -355,7 +345,7 @@ class GeminiSchemaTestCase(unittest.TestCase):
         self.assertEqual(
             history[0]["parts"][0],
             {
-                "functionCall": {"name": "Bash", "args": {"command": "pwd"}},
+                "functionCall": {"name": "Bash", "args": {"command": "pwd"}, "id": "toolu_1"},
                 "thoughtSignature": "real-signature",
             },
         )

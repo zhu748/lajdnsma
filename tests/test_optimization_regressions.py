@@ -153,6 +153,7 @@ class StatsWorkerBatchDrainTestCase(unittest.TestCase):
 
         async def fill():
             for i in range(150):
+                mgr.record_outbound_attempt("k", "m")
                 await mgr.update_stats("k", "m", 1)
 
         asyncio.run(fill())

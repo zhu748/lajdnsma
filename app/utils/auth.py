@@ -5,6 +5,23 @@ from fastapi import HTTPException, Header, Query
 import app.config.settings as settings
 
 
+def password_matches(candidate, expected) -> bool:
+    """Fail closed and compare UTF-8 bytes, including non-ASCII web passwords."""
+    if not isinstance(candidate, str) or not isinstance(expected, str) or not candidate or not expected:
+        return False
+    try:
+        return hmac.compare_digest(candidate.encode("utf-8"), expected.encode("utf-8"))
+    except UnicodeError:
+        return False
+
+
+def extract_bearer_token(authorization) -> Optional[str]:
+    if not isinstance(authorization, str):
+        return None
+    scheme, separator, token = authorization.partition(" ")
+    return token.lstrip(" ") if separator and scheme.lower() == "bearer" else None
+
+
 # 自定义密码校验依赖函数
 async def custom_verify_password(
     authorization: Optional[str] = Header(
@@ -21,11 +38,7 @@ async def custom_verify_password(
     ),
     alt: Optional[str] = None,
 ):
-    """
-    @@ -15,22 +18,79 @@
-        2. 根据类型，与项目配置的密钥进行比对。
-        3. 如果 Key 无效、缺失或不匹配，则抛出 HTTPException。
-    """
+    """Accept protocol-specific keys or a Bearer token, then verify PASSWORD."""
     client_provided_api_key: Optional[str] = None
 
     # 提取客户端提供的 Key
@@ -35,23 +48,17 @@ async def custom_verify_password(
         client_provided_api_key = x_goog_api_key
     elif key:
         client_provided_api_key = key
-    elif authorization and authorization.startswith("Bearer "):
-        token = authorization.split(" ", 1)[1]
-        client_provided_api_key = token
+    else:
+        client_provided_api_key = extract_bearer_token(authorization)
 
     # 进行校验和比对
     # Hardening: 改用常量时间比较（hmac.compare_digest），防止通过响应
     # 时间差异逐字节猜测密码的时序侧信道攻击。
-    if (not client_provided_api_key) or not hmac.compare_digest(
+    if not password_matches(
         client_provided_api_key, settings.PASSWORD
     ):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid token")
 
 
 def verify_web_password(password: str):
-    # 常量时间比较，同上
-    if not isinstance(password, str) or not hmac.compare_digest(
-        password, settings.WEB_PASSWORD
-    ):
-        return False
-    return True
+    return password_matches(password, settings.WEB_PASSWORD)

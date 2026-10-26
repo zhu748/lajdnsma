@@ -27,6 +27,8 @@ def _normalize_protocol_request(payload, converter):
         # 客户端请求错误，交给统一的 422 日志处理器，而非全局 500。
         errors = [dict(error, loc=("body", *error["loc"])) for error in exc.errors()]
         raise RequestValidationError(errors, body=payload) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _adapt_json_keepalive(response, converter):
@@ -52,6 +54,21 @@ def _adapt_json_keepalive(response, converter):
     )
 
 
+def _adapt_json_response(response, converter):
+    """Handlers may return JSONResponse for upstream errors; preserve HTTP status."""
+    if isinstance(response, JSONResponse):
+        data = json.loads(response.body)
+        if isinstance(data.get("error"), dict):
+            data["error"]["code"] = response.status_code
+        return JSONResponse(
+            converter(data), status_code=response.status_code,
+            headers={k: v for k, v in response.headers.items()
+                     if k.lower() not in {"content-length", "content-type"}},
+            background=response.background,
+        )
+    return converter(response)
+
+
 def _map_to_available_model(request, aliases_attr: str, default_attr: str, log_message: str):
     """把客户端协议的模型名解析为可用 Gemini 模型（两级回退 + 白名单兑底）。
 
@@ -66,6 +83,18 @@ def _map_to_available_model(request, aliases_attr: str, default_attr: str, log_m
         from app.services import GeminiClient
         from app.utils.logging import log
     except ImportError:
+        return
+
+    if getattr(settings, "ENABLE_VERTEX", False):
+        # Vertex has its own model catalog (and suffix variants). Never rewrite
+        # a native model just because it is absent from AI Studio's catalog.
+        from app.vertex.model_names import parse_model_request
+        aliases = getattr(settings, aliases_attr, {}) or {}
+        mapped = select_alias_model(request.model, aliases)
+        if not mapped and not parse_model_request(request.model).base_model_name.startswith("gemini-"):
+            mapped = getattr(settings, default_attr, "")
+        if mapped:
+            request.model = mapped
         return
 
     if request.model in GeminiClient.AVAILABLE_MODELS:
@@ -120,9 +149,9 @@ def _resolve_responses_model_alias(request):
 
 
 async def handle_responses_request(payload: dict, http_request, auth_dep, user_agent_dep, chat_handler):
-    normalized_request = _normalize_protocol_request(payload, response_request_to_chat_request)
-    _resolve_responses_model_alias(normalized_request)
     try:
+        normalized_request = _normalize_protocol_request(payload, response_request_to_chat_request)
+        _resolve_responses_model_alias(normalized_request)
         response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
     except HTTPException as exc:
         return JSONResponse(
@@ -140,15 +169,17 @@ async def handle_responses_request(payload: dict, http_request, auth_dep, user_a
                 response.body_iterator, normalized_request.model
             ),
             media_type="text/event-stream",
+            status_code=response.status_code,
+            background=response.background,
         )
 
-    return openai_chat_to_response_api(response, payload)
+    return _adapt_json_response(response, lambda data: openai_chat_to_response_api(data, payload))
 
 
 async def handle_claude_messages_request(payload: dict, http_request, auth_dep, user_agent_dep, chat_handler):
-    normalized_request = _normalize_protocol_request(payload, claude_request_to_chat_request)
-    _resolve_claude_model_alias(normalized_request)
     try:
+        normalized_request = _normalize_protocol_request(payload, claude_request_to_chat_request)
+        _resolve_claude_model_alias(normalized_request)
         response = await chat_handler(normalized_request, http_request, auth_dep, user_agent_dep)
     except HTTPException as exc:
         return JSONResponse(
@@ -164,6 +195,8 @@ async def handle_claude_messages_request(payload: dict, http_request, auth_dep, 
                 response.body_iterator, normalized_request.model
             ),
             media_type="text/event-stream",
+            status_code=response.status_code,
+            background=response.background,
         )
 
-    return openai_chat_to_claude_response(response)
+    return _adapt_json_response(response, openai_chat_to_claude_response)

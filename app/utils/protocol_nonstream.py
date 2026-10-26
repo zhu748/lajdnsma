@@ -1,32 +1,52 @@
 """非流式协议转换：chat 响应 → Responses / Claude 响应。"""
 import json
+from uuid import uuid4
 from typing import Any, Dict, List
 
-# Cleanup: responses_error_response 导入未使用，已删除。
 from app.utils.protocol_common import (
     _ensure_list,
     _extract_openai_usage,
     _now_ts,
     _openai_finish_reason_to_claude_stop_reason,
-    _gen_anthropic_thinking_signature,
     _responses_completion_status,
 )
 from app.utils.stealth import (
     gen_anthropic_message_id,
     gen_openai_message_id,
     gen_openai_response_id,
+    gen_responses_function_call_id,
 )
+
+
+def _error_status(error):
+    try:
+        return int(error.get("code", 502))
+    except (TypeError, ValueError):
+        return 429 if "rate_limit" in str(error.get("type", "")) else 502
 
 
 def openai_chat_to_response_api(
     chat_response: Dict[str, Any], request_payload: Dict[str, Any] | None = None
 ) -> Dict[str, Any]:
     request_payload = request_payload or {}
+    if chat_response.get("error"):
+        from app.utils.errors import responses_error_response
+        error = chat_response["error"]
+        return responses_error_response(
+            error.get("message", "Upstream service error"), _error_status(error),
+            code=str(error.get("code") or "upstream_error"),
+        )
     choice = (chat_response.get("choices") or [{}])[0]
     status, incomplete_details = _responses_completion_status(choice.get("finish_reason"))
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
     output_items: List[Dict[str, Any]] = []
+
+    if message.get("reasoning_content"):
+        output_items.append({
+            "id": "rs_" + uuid4().hex, "type": "reasoning", "status": status,
+            "summary": [{"type": "summary_text", "text": message["reasoning_content"]}],
+        })
 
     text_content = message.get("content")
     if text_content:
@@ -46,14 +66,16 @@ def openai_chat_to_response_api(
         if not isinstance(tool_call, dict):
             continue
         function_data = tool_call.get("function", {})
+        call_id = tool_call.get("id") or gen_responses_function_call_id()
         output_items.append(
             {
                 "type": "function_call",
-                "id": tool_call.get("id", f"fc_{_now_ts()}"),
-                "call_id": tool_call.get("id", f"fc_{_now_ts()}"),
+                "id": gen_responses_function_call_id(),
+                "call_id": call_id,
                 "name": function_data.get("name"),
                 "arguments": function_data.get("arguments", "{}"),
                 "status": status,
+                **({"extra_content": tool_call["extra_content"]} if tool_call.get("extra_content") else {}),
             }
         )
 
@@ -92,6 +114,10 @@ def openai_chat_to_response_api(
 
 
 def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, Any]:
+    if chat_response.get("error"):
+        from app.utils.errors import anthropic_error_response
+        error = chat_response["error"]
+        return anthropic_error_response(error.get("message", "Upstream service error"), status_code=_error_status(error))
     choice = (chat_response.get("choices") or [{}])[0]
     message = choice.get("message", {})
     usage = chat_response.get("usage", {})
@@ -99,14 +125,7 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
     content: List[Dict[str, Any]] = []
 
     if message.get("reasoning_content"):
-        # Anthropic API requires a non-empty `signature` on every
-        # thinking block; an empty string causes the next-turn
-        # tool_use round-trip to fail Anthropic's signature validator.
-        # If the upstream OpenAI/Gemini response carried a real
-        # thoughtSignature, surface it; otherwise emit a strong-random
-        # base64-style signature of realistic length (replaces the
-        # previous `""` which was both a fingerprint and a
-        # functional breakage).
+        # Preserve available provider signatures. Never manufacture signatures.
         signature_payload = ""
         extra_content = message.get("extra_content") or {}
         google_extra = extra_content.get("google", {}) if isinstance(extra_content, dict) else {}
@@ -116,8 +135,6 @@ def openai_chat_to_claude_response(chat_response: Dict[str, Any]) -> Dict[str, A
                 or google_extra.get("thoughtSignature")
                 or ""
             )
-        if not signature_payload:
-            signature_payload = _gen_anthropic_thinking_signature()
         content.append(
             {
                 "type": "thinking",

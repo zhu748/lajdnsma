@@ -2,6 +2,7 @@
 from typing import Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse
 
 import app.config.settings as settings
 from app.api import route_runtime
@@ -15,10 +16,19 @@ from app.api.vertex_request_adapter import build_vertex_openai_request
 from app.models.schemas import AIRequest, ChatCompletionRequest, ChatCompletionResponse
 from app.services import GeminiClient
 from app.utils.auth import custom_verify_password
+from app.utils.chat_requests import normalize_chat_messages
 from app.vertex.routes import chat_api
 
 
 router = APIRouter()
+
+
+def _normalize_chat_input(request):
+    if isinstance(request, ChatCompletionRequest):
+        try:
+            request.messages = normalize_chat_messages(request.messages)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/aistudio/chat/completions", response_model=ChatCompletionResponse)
@@ -28,7 +38,10 @@ async def aistudio_chat_completions(
     _=Depends(custom_verify_password),
     _2=Depends(route_runtime.verify_user_agent),
 ):
-    return await handle_aistudio_chat_completion(
+    _normalize_chat_input(request)
+    if isinstance(request, ChatCompletionRequest) and request.n != 1:
+        raise HTTPException(status_code=400, detail="AI Studio conversion currently supports n=1 only")
+    response = await handle_aistudio_chat_completion(
         request=request,
         http_request=http_request,
         runtime=route_runtime,
@@ -37,6 +50,9 @@ async def aistudio_chat_completions(
         process_nonstream_with_keepalive_stream=process_nonstream_with_keepalive_stream,
         process_request=process_request,
     )
+    if isinstance(response, dict) and response.get("error"):
+        return JSONResponse(response, status_code=503)
+    return response
 
 
 @router.post("/vertex/chat/completions", response_model=ChatCompletionResponse)
@@ -46,6 +62,7 @@ async def vertex_chat_completions(
     _dp=Depends(custom_verify_password),
     _du=Depends(route_runtime.verify_user_agent),
 ):
+    _normalize_chat_input(request)
     vertex_request = build_vertex_openai_request(request)
     # Hardening: was `assert` (see model_routes.vertex_list_models).
     if route_runtime.current_api_key is None:

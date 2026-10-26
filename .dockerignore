@@ -50,3 +50,7 @@ venv/
 Dockerfile
 .dockerignore
 docker-compose*
+
+# 审查资料与本地验证脚本不进入镜像上下文
+docs/
+scripts/

@@ -1,38 +1,21 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
+import { createConfigDraft } from '../../../composables/configDraft'
+import { useConfigSaveGuard } from '../../../composables/configSaveGuard'
 import { ref, reactive, watch } from 'vue'
 
 const dashboardStore = useDashboardStore()
-
+const beginSave = useConfigSaveGuard(dashboardStore)
 const localConfig = reactive({
-  fakeStreaming: false,
-  enableVertexExpress: false,
-  vertexExpressApiKey: '',
-  googleCredentialsJson: '',
+  fakeStreaming: false, enableVertexExpress: false,
+  vertexExpressApiKey: '', googleCredentialsJson: '',
 })
-
-const populated = ref(false)
-// 快照式脏检查基线：Vertex 凭证字段（vertexExpressApiKey /
-// googleCredentialsJson）后端只回传「是否已配置」的布尔值，回填到
-// 输入框会把字面量 "true" 写进 v-model——一旦用户碰过输入框就会把
-// 字符串 "true" POST 成新凭证。现在凭证字段恒初始化为 ''（占位符
-// 风格），脏检查改为对比「填充时快照」而非 store 值，避免空输入框
-// 被误判为已修改而在每次 Save 时把已存凭证清空。
-let initialConfig = null
-watch(
-  () => dashboardStore.isConfigLoaded,
-  (loaded) => {
-    if (loaded && !populated.value) {
-      localConfig.fakeStreaming = dashboardStore.config.fakeStreaming
-      localConfig.enableVertexExpress = dashboardStore.config.enableVertexExpress
-      localConfig.vertexExpressApiKey = ''
-      localConfig.googleCredentialsJson = ''
-      initialConfig = { ...localConfig }
-      populated.value = true
-    }
-  },
-  { immediate: true }
-)
+const secretKeys = ['vertexExpressApiKey', 'googleCredentialsJson']
+const syncDraft = createConfigDraft(localConfig)
+watch(() => [dashboardStore.isConfigLoaded, dashboardStore.config.fakeStreaming, dashboardStore.config.enableVertexExpress],
+  ([loaded, fakeStreaming, enableVertexExpress]) => {
+    if (loaded) syncDraft({ fakeStreaming, enableVertexExpress })
+  }, { immediate: true })
 
 const password = ref('')
 const errorMsg = ref('')
@@ -40,23 +23,32 @@ const successMsg = ref('')
 const isSaving = ref(false)
 
 async function saveAll() {
-  if (!password.value) {
-    errorMsg.value = '请输入管理密码'
-    return
-  }
+  if (isSaving.value) return
+  if (!dashboardStore.isConfigLoaded) { errorMsg.value = '配置尚未加载，请稍后重试'; return }
+  if (!password.value) { errorMsg.value = '请输入管理密码'; return }
+  const submitted = { ...localConfig }
+  const submittedPassword = password.value
+  const assertCurrent = beginSave()
   isSaving.value = true
   errorMsg.value = ''
   successMsg.value = ''
   try {
-    for (const key of Object.keys(localConfig)) {
-      if (localConfig[key] !== initialConfig[key]) {
-        await dashboardStore.updateConfig(key, localConfig[key], password.value)
-        initialConfig[key] = localConfig[key]
-      }
+    // Save credentials before enabling the corresponding backend mode.
+    for (const key of [...secretKeys, 'fakeStreaming', 'enableVertexExpress']) {
+      const secret = secretKeys.includes(key)
+      if (secret ? !submitted[key].trim() : submitted[key] === dashboardStore.config[key]) continue
+      assertCurrent()
+      await dashboardStore.updateConfig(key, submitted[key], submittedPassword)
+      assertCurrent()
+      if (!secret) syncDraft.acknowledge(key, submitted[key])
+      dashboardStore.config[key] = secret ? true : submitted[key]
+      // Preserve newer edits made while this exact snapshot was being saved.
+      if (secret && localConfig[key] === submitted[key]) localConfig[key] = ''
     }
-    successMsg.value = '已保存'
     await dashboardStore.fetchDashboardData()
-    setTimeout(() => (successMsg.value = ''), 2000)
+    assertCurrent()
+    successMsg.value = '本次提交已保存；保存期间的新修改仍保留在表单中'
+    if (password.value === submittedPassword) password.value = ''
   } catch (e) {
     errorMsg.value = e.message || '保存失败'
   } finally {
@@ -79,6 +71,7 @@ async function saveAll() {
             <button
               class="toggle"
               :class="{ 'toggle--on': localConfig.fakeStreaming }"
+              role="switch" :aria-checked="localConfig.fakeStreaming" aria-label="伪流式"
               @click="localConfig.fakeStreaming = !localConfig.fakeStreaming"
             >
               <span class="toggle__thumb"></span>
@@ -92,6 +85,7 @@ async function saveAll() {
             <button
               class="toggle"
               :class="{ 'toggle--on': localConfig.enableVertexExpress }"
+              role="switch" :aria-checked="localConfig.enableVertexExpress" aria-label="Vertex Express"
               @click="localConfig.enableVertexExpress = !localConfig.enableVertexExpress"
             >
               <span class="toggle__thumb"></span>
@@ -101,34 +95,37 @@ async function saveAll() {
       </div>
 
       <div class="field">
-        <label class="field__label">Vertex Express API 密钥</label>
+        <label class="field__label" for="vertex-key">Vertex Express API 密钥</label>
         <input
+          id="vertex-key"
           v-model="localConfig.vertexExpressApiKey"
           type="password"
           class="input"
-          placeholder="粘贴 Vertex Express API 密钥"
+          :placeholder="dashboardStore.config.vertexExpressApiKey ? '已配置，留空保留现有密钥' : '粘贴 Vertex Express API 密钥'"
           autocomplete="off"
         >
       </div>
 
       <div class="field">
-        <label class="field__label">Google 凭证 JSON</label>
+        <label class="field__label" for="vertex-credentials">Google 凭证 JSON</label>
         <textarea
+          id="vertex-credentials"
           v-model="localConfig.googleCredentialsJson"
           class="textarea"
           rows="6"
-          placeholder='{ "type": "service_account", ... }'
+          :placeholder="dashboardStore.config.googleCredentialsJson ? '已配置，留空保留现有凭证' : '粘贴服务账号 JSON 凭证'"
         ></textarea>
-        <div class="field__hint">粘贴一个或多个连续拼接的 JSON 凭证对象。</div>
+        <div class="field__hint">支持一个或多个 JSON 凭证对象。留空保留已有凭证，保存成功后清空已提交的凭证输入。</div>
       </div>
 
-      <div v-if="errorMsg" class="banner banner--danger">{{ errorMsg }}</div>
-      <div v-if="successMsg" class="banner banner--success">{{ successMsg }}</div>
+      <div v-if="errorMsg" role="alert" class="banner banner--danger">{{ errorMsg }}</div>
+      <div v-if="successMsg" role="status" class="banner banner--success">{{ successMsg }}</div>
 
       <div class="save-row">
         <div class="field save-row__pw">
-          <label class="field__label">管理密码</label>
+          <label class="field__label" for="vertex-password">管理密码</label>
           <input
+            id="vertex-password"
             v-model="password"
             type="password"
             class="input"

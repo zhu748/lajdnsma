@@ -1,19 +1,19 @@
 """protocol 系列共享底座：时间戳、usage 归一化、SSE 解析。"""
 import codecs
+from contextlib import aclosing
 import io
 import json
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Dict, List
 
-from app.utils.sse import sse_data
+from app.utils.tool_deltas import ToolDeltaNormalizer
 from app.utils.stealth import (
     gen_openai_response_id,
     gen_openai_message_id,
     gen_responses_function_call_id,
     gen_anthropic_message_id,
     gen_anthropic_tool_use_id,
-    gen_anthropic_thinking_signature,
 )
 
 
@@ -37,7 +37,6 @@ _gen_message_id = gen_openai_message_id
 _gen_function_call_id = gen_responses_function_call_id
 _gen_anthropic_message_id = gen_anthropic_message_id
 _gen_anthropic_tool_use_id = gen_anthropic_tool_use_id
-_gen_anthropic_thinking_signature = gen_anthropic_thinking_signature
 
 
 def _extract_openai_usage(usage: Dict[str, Any]) -> Dict[str, int]:
@@ -135,10 +134,6 @@ def _ensure_list(value: Any) -> List[Any]:
     return [value]
 
 
-def _sse_data(payload: Dict[str, Any]) -> str:
-    return sse_data(payload)
-
-
 async def _iter_sse_json_events(body_iterator) -> AsyncIterator[Dict[str, Any]]:
     """Decode UTF-8 and frame SSE events independently of transport chunks."""
     decoder = io.IncrementalNewlineDecoder(
@@ -155,9 +150,16 @@ async def _iter_sse_json_events(body_iterator) -> AsyncIterator[Dict[str, Any]]:
             if any(line.startswith("data:") and line[5:].strip() == "[DONE]" for line in event.splitlines()):
                 finished = True
                 return
-            for parsed in _parse_sse_json_events(event):
-                if isinstance(parsed, dict):
-                    yield parsed
+            if len(event) > 4 * 1024 * 1024:
+                raise ValueError("SSE event exceeds the size limit")
+            data = "\n".join(line[5:].lstrip(" ") for line in event.splitlines() if line.startswith("data:"))
+            if data:
+                parsed = json.loads(data)
+                if not isinstance(parsed, dict):
+                    raise ValueError("SSE data must be an object")
+                yield parsed
+        if len(buffer) > 4 * 1024 * 1024:
+            raise ValueError("SSE event exceeds the size limit")
 
     try:
         async for chunk in body_iterator:
@@ -175,34 +177,48 @@ async def _iter_sse_json_events(body_iterator) -> AsyncIterator[Dict[str, Any]]:
             await close()
 
 
-def _parse_sse_json_events(chunk: str) -> List[Dict[str, Any]]:
-    """Parse one transport chunk that may contain one or more SSE events."""
-    events: List[Dict[str, Any]] = []
-    data_lines: List[str] = []
+async def _iter_chat_stream_events(body_iterator):
+    """Emit one terminal choice after trailing usage; never turn a broken stream into success.
 
-    def flush_event() -> None:
-        if not data_lines:
-            return
-
-        payload = "\n".join(data_lines).strip()
-        data_lines.clear()
-        if not payload or payload == "[DONE]":
-            return
-
-        try:
-            events.append(json.loads(payload))
-        except json.JSONDecodeError:
-            return
-
-    for line in chunk.splitlines():
-        line = line.strip()
-        if not line:
-            flush_event()
-            continue
-        if line.startswith("event:"):
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line[5:].strip())
-
-    flush_event()
-    return events
+    Chat Completions may send a choices=[] usage chunk after finish_reason.
+    Both protocol adapters consume this normalized lifecycle.
+    """
+    usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+    finish_reason = None
+    tools = ToolDeltaNormalizer()
+    try:
+        async with aclosing(_iter_sse_json_events(body_iterator)) as events:
+            async for parsed in events:
+                if parsed.get("error"):
+                    yield parsed
+                    return
+                usage = _merge_stream_usage(usage, parsed.get("usage") or {})
+                choices = parsed.get("choices") or []
+                if choices:
+                    choice = choices[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = dict(choice.get("delta") or {})
+                    for field in ("content", "reasoning_content"):
+                        if delta.get(field) is not None and not isinstance(delta[field], str):
+                            raise ValueError(f"Invalid {field} delta")
+                    extra = delta.get("extra_content")
+                    if extra is not None and (not isinstance(extra, dict) or
+                                              not isinstance(extra.get("google", {}), dict)):
+                        raise ValueError("Invalid reasoning metadata")
+                    # SDKs may explicitly serialize an absent optional tool array as null.
+                    if delta.get("tool_calls") is not None:
+                        delta["tool_calls"] = tools.feed(delta["tool_calls"])
+                    yield {**parsed, "choices": [{**choice, "delta": delta, "finish_reason": None}]}
+                else:
+                    yield parsed
+            pending = tools.finish()
+            if pending:
+                yield {"choices": [{"delta": {"tool_calls": pending}, "finish_reason": None}]}
+    except Exception:
+        yield {"error": {"message": "Upstream stream interrupted.", "type": "server_error", "code": "stream_error"}}
+        return
+    if finish_reason is None:
+        yield {"error": {"message": "Upstream stream ended without a finish reason.", "type": "server_error", "code": "incomplete_stream"}}
+        return
+    yield {"choices": [{"delta": {}, "finish_reason": finish_reason}], "usage": usage}

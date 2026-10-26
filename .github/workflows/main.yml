@@ -4,11 +4,39 @@ on:
   push:
     # Fix: the original value "ain]" is invalid YAML — the entire workflow fails to parse,
     # the CI has never actually run (GHCR image does not exist), and it silently failed without anyone noticing.
-    branches: main
+    branches: [main]
   workflow_dispatch:
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: hajimiUI/package-lock.json
+    - name: Install locked Python dependencies
+      run: |
+        python -m pip install uv
+        uv sync --frozen
+    - name: Verify Python contracts
+      run: uv run pytest -q
+    - name: Verify frontend and build
+      working-directory: hajimiUI
+      run: |
+        npm ci
+        npm test
+        npm run build
+
   build-and-push:
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read

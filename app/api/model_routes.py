@@ -48,9 +48,14 @@ async def vertex_list_models(
 async def claude_list_models(
     _=Depends(custom_verify_password),
     _2=Depends(route_runtime.verify_user_agent),
+    request: Request = None,
 ):
+    available = GeminiClient.AVAILABLE_MODELS
+    if settings.ENABLE_VERTEX:
+        vertex_models = await vertex_list_models(request, _, _2)
+        available = [model["id"] for model in vertex_models.get("data", [])]
     return build_claude_model_list(
-        GeminiClient.AVAILABLE_MODELS,
+        available,
         settings.WHITELIST_MODELS,
         settings.BLOCKED_MODELS,
         settings.CLAUDE_MODEL_ALIASES,
@@ -69,13 +74,7 @@ async def list_models(
         return await gemini_list_models(request, _, _2)
 
     if is_claude_model_request(request):
-        return build_claude_model_list(
-            GeminiClient.AVAILABLE_MODELS,
-            settings.WHITELIST_MODELS,
-            settings.BLOCKED_MODELS,
-            settings.CLAUDE_MODEL_ALIASES,
-            settings.CLAUDE_DEFAULT_MODEL,
-        )
+        return await claude_list_models(_, _2, request)
 
     if settings.ENABLE_VERTEX:
         return await vertex_list_models(request, _, _2)

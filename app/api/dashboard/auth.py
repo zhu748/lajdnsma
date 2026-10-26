@@ -16,14 +16,14 @@ from typing import Optional
 
 from fastapi import Header, HTTPException, Query
 
-from app.utils.auth import verify_web_password
+from app.utils.auth import verify_web_password, extract_bearer_token
 
 
 def _extract_token(authorization: Optional[str], password: Optional[str]) -> Optional[str]:
     """从 Bearer 头或查询参数中提取面板口令。"""
     token = None
     if authorization:
-        token = authorization[7:] if authorization.startswith("Bearer ") else authorization
+        token = extract_bearer_token(authorization) or authorization
     if not token and password:
         token = password
     return token

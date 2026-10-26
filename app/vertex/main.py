@@ -2,6 +2,9 @@
 from fastapi import FastAPI, Depends, APIRouter, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+from app.vertex import client_pool
+from app.utils.http_client import close_async_client
 # from fastapi.responses import JSONResponse # Not used
 # import os # Not used
 
@@ -18,14 +21,25 @@ from app.config import settings
 from app.vertex.routes import models_api
 from app.vertex.routes import chat_api
 
-app = FastAPI(title="API")
+@asynccontextmanager
+async def lifespan(app):
+    await startup_event()
+    try:
+        yield
+    finally:
+        await client_pool.shutdown()
+        await close_async_client()
+
+
+app = FastAPI(title="API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS if hasattr(settings, "ALLOWED_ORIGINS") and settings.ALLOWED_ORIGINS else [],
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    # Match the main app: permit browser SDK metadata for configured origins.
+    allow_headers=["*"],
 )
 
 credential_manager = CredentialManager()
@@ -45,7 +59,6 @@ security = HTTPBearer()
 app.include_router(vertex_router)
 
 
-@app.on_event("startup")
 async def startup_event():
     try:
         # 检查是否有Google Credentials JSON

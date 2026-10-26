@@ -165,6 +165,33 @@ def test_consumed_entries_do_not_accumulate_heap_metadata(modules):
     asyncio.run(run())
 
 
+def test_cache_fifo_skips_expiry_and_returns_cached_null_as_hit(modules):
+    async def run():
+        manager = modules.cache.ResponseCacheManager(600, 100)
+        for value in ['expired', None, 'later-expired', 'last']:
+            await manager.store('hot', value)
+        manager.cache['hot'][0]['expiry_time'] = 0
+        manager.cache['hot'][2]['expiry_time'] = 0
+        assert await manager.get_and_remove('hot') == (None, True)
+        assert manager.cur_cache_num == 2
+        assert await manager.get_and_remove('hot') == ('last', True)
+        assert manager.cur_cache_num == 0
+        assert manager.cache == {} and manager._evict_heap == []
+    asyncio.run(run())
+
+
+def test_parallel_cache_consumers_receive_each_response_once(modules):
+    async def run():
+        manager = modules.cache.ResponseCacheManager(600, 2000)
+        for value in range(1000):
+            await manager.store('hot', value)
+        results = await asyncio.gather(*(manager.get_and_remove('hot') for _ in range(1100)))
+        assert [value for value, hit in results if hit] == list(range(1000))
+        assert sum(not hit for _, hit in results) == 100
+        assert manager.cur_cache_num == 0 and not manager._evict_heap
+    asyncio.run(run())
+
+
 def test_existing_cache_is_counted_and_can_be_evicted(modules):
     import time
     async def run():

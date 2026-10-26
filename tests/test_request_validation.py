@@ -40,9 +40,16 @@ def api():
         utils = types.ModuleType("app.utils")
         utils.__path__ = [str(ROOT / "app/utils")]
         with patch.dict(sys.modules, {"app.models.schemas": schemas, "app.utils": utils}):
-            adapters = load_file("validation_protocols", "app/utils/protocol_requests.py")
-            with patch.dict(sys.modules, {"app.utils.protocol_requests": adapters}):
-                protocols = load_file("validation_protocol_handlers", "app/api/protocol_handlers.py")
+            # Legacy unit suites install fake schema classes at collection time.
+            # Reload both implementations under the real schema, not just the facade.
+            requests = {
+                f"app.utils.{name}": load_file(f"validation_{name}", f"app/utils/{name}.py")
+                for name in ("responses_requests", "anthropic_requests")
+            }
+            with patch.dict(sys.modules, requests):
+                adapters = load_file("validation_protocols", "app/utils/protocol_requests.py")
+                with patch.dict(sys.modules, {"app.utils.protocol_requests": adapters}):
+                    protocols = load_file("validation_protocol_handlers", "app/api/protocol_handlers.py")
 
         @app.post("/v1/responses")
         async def responses(payload: dict):
@@ -155,3 +162,82 @@ def test_native_tool_config_is_preserved(api, field):
     })
     assert response.status_code == 200, response.text
     assert response.json()["toolConfig"] == config
+
+
+@pytest.mark.parametrize("option", [
+    {"input": {"role": "user", "content": "bad"}},
+    {"input": [{"role": "user", "content": [7]}]},
+    {"input": [{"role": "user", "content": [{"type": [], "text": "bad"}]}]},
+    {"input": [{"role": "user", "content": [{"type": "input_text", "text": 7}]}]},
+    {"input": [{"type": "function_call", "call_id": [], "name": "f"}]},
+    {"input": [{"type": "function_call", "call_id": "a", "name": "f", "arguments": "[1]"}]},
+    {"input": [{"type": "function_call", "call_id": "a", "name": "f", "arguments": "{bad}"}]},
+    {"input": [{"type": "function_call", "call_id": "a", "name": "f", "arguments": '{"x":NaN}'}]},
+    {"input": [{"type": "function_call_output", "call_id": "missing", "output": "ok"}]},
+    {"input": [{"type": "function_call", "call_id": "a", "name": "f", "extra_content": {"google": []}}]},
+    {"input": [{"type": "function_call", "call_id": "a", "name": "f"}] * 2},
+    {"tool_choice": {"type": []}},
+    {"tool_choice": False},
+    {"tools": [{"type": "function", "name": "f", "async": True}]},
+    {"instructions": ["not a string"]},
+])
+def test_responses_rejects_malformed_nested_input_before_dispatch(api, option):
+    client, _ = api
+    response = client.post('/v1/responses', json={"model": "test", "input": "hi", **option})
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.parametrize("option", [
+    {"messages": [7]},
+    {"messages": [{"role": [], "content": "bad"}]},
+    {"messages": [{"role": "user", "content": 7}]},
+    {"messages": [{"role": "user", "content": [7]}]},
+    {"messages": [{"role": "user", "content": [{"type": [], "text": "bad"}]}]},
+    {"messages": [{"role": "user", "content": [{"type": "text", "text": []}]}]},
+    {"messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "file", "id": "image"}}]}]},
+    {"messages": [{"role": "user", "content": [{"type": "document"}]}]},
+    {"messages": [{"role": "user", "content": [{"type": "tool_use", "id": "a", "name": "f", "input": {}}]}]},
+    {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "id": "a", "name": "f", "input": []}]}]},
+    {"messages": [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "missing"}]}]},
+    {"tool_choice": {"type": "invalid"}},
+    {"tool_choice": {"type": "auto", "disable_parallel_tool_use": "false"}},
+    {"tools": [None]},
+    {"tools": [{"name": "f", "input_schema": []}]},
+    {"thinking": {"type": "enabled", "budget_tokens": "bad"}},
+    {"system": [{"type": "text", "text": 7}]},
+])
+def test_messages_rejects_malformed_nested_input_before_dispatch(api, option):
+    client, _ = api
+    response = client.post('/v1/messages', json={"model": "test", "messages": [{"role": "user", "content": "hi"}], **option})
+    assert response.status_code == 400, response.text
+
+
+def test_responses_parallel_tools_remain_in_one_assistant_turn(api):
+    client, _ = api
+    response = client.post('/v1/responses', json={"model": "test", "input": [
+        {"role": "assistant", "content": "Checking"},
+        {"type": "function_call", "call_id": "a", "name": "lookup", "arguments": '{"q":1}'},
+        {"role": "assistant", "content": "both"},
+        {"type": "function_call", "call_id": "b", "name": "lookup", "arguments": '{"q":2}'},
+        {"type": "function_call_output", "call_id": "b", "output": "second"},
+        {"type": "function_call_output", "call_id": "a", "output": "first"},
+    ]})
+    assert response.status_code == 200, response.text
+    messages = response.json()['messages']
+    assert [m['role'] for m in messages] == ['assistant', 'tool', 'tool']
+    assert messages[0]['content'] == 'Checking\nboth'
+    assert [c['id'] for c in messages[0]['tool_calls']] == ['a', 'b']
+    assert [m['tool_call_id'] for m in messages[1:]] == ['b', 'a']
+
+
+def test_messages_preserves_system_whitespace_and_parallel_results(api):
+    client, _ = api
+    response = client.post('/v1/messages', json={"model": "test", "system": "  rules\n", "messages": [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": key, "name": "f", "input": {}} for key in ['a', 'b']]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": key, "content": "ok"} for key in ['b', 'a']] + [{"type": "text", "text": "continue"}]},
+    ]})
+    assert response.status_code == 200, response.text
+    messages = response.json()['messages']
+    assert messages[0]['content'] == '  rules\n'
+    assert [m['role'] for m in messages] == ['system', 'assistant', 'tool', 'tool', 'user']
+    assert [m['name'] for m in messages[2:4]] == ['f', 'f']

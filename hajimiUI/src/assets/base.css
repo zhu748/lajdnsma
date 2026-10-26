@@ -5,7 +5,7 @@
 
 :root {
   /* ---------- Neutral palette (light) ---------- */
-  --bg: #FAFAFA;
+  --bg: #F5F7F7;
   --bg-elevated: #FFFFFF;
   --bg-subtle: #F4F4F5;
   --bg-muted: #E4E4E7;
@@ -18,14 +18,14 @@
   --text: #18181B;
   --text-strong: #09090B;
   --text-muted: #71717A;
-  --text-subtle: #A1A1AA;
+  --text-subtle: #697780;
   --text-inverse: #FAFAFA;
 
   /* ---------- Accent (indigo) ---------- */
-  --accent: #6366F1;
-  --accent-strong: #4F46E5;
-  --accent-subtle: #EEF2FF;
-  --accent-hover: #4338CA;
+  --accent: #0F766E;
+  --accent-strong: #0B655E;
+  --accent-subtle: #E7F3F0;
+  --accent-hover: #09564F;
 
   /* ---------- Status colors ---------- */
   --success: #10B981;
@@ -48,7 +48,7 @@
     'Helvetica Neue', Arial, 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', Menlo, Monaco,
-    Consolas, 'Liberation Mono', monospace;
+    Consolas, 'Liberation Mono', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', monospace;
 
   --fs-xs: 11px;
   --fs-sm: 12px;
@@ -122,13 +122,13 @@
   --text: #FAFAFA;
   --text-strong: #FFFFFF;
   --text-muted: #A1A1AA;
-  --text-subtle: #71717A;
+  --text-subtle: #9AA5AF;
   --text-inverse: #18181B;
 
-  --accent: #818CF8;
-  --accent-strong: #6366F1;
-  --accent-subtle: #1E1B4B;
-  --accent-hover: #A5B4FC;
+  --accent: #5EEAD4;
+  --accent-strong: #79E9D8;
+  --accent-subtle: #123A35;
+  --accent-hover: #99F6E4;
 
   --success: #34D399;
   --success-subtle: #052E1B;
@@ -166,13 +166,13 @@
     --text: #FAFAFA;
     --text-strong: #FFFFFF;
     --text-muted: #A1A1AA;
-    --text-subtle: #71717A;
+    --text-subtle: #9AA5AF;
     --text-inverse: #18181B;
 
-    --accent: #818CF8;
-    --accent-strong: #6366F1;
-    --accent-subtle: #1E1B4B;
-    --accent-hover: #A5B4FC;
+    --accent: #5EEAD4;
+    --accent-strong: #79E9D8;
+    --accent-subtle: #123A35;
+    --accent-hover: #99F6E4;
 
     --success: #34D399;
     --success-subtle: #052E1B;
@@ -292,5 +292,14 @@ a:hover {
   }
   ::-webkit-scrollbar-thumb {
     border: 1px solid var(--bg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

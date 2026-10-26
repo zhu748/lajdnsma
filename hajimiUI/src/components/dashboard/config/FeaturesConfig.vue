@@ -1,8 +1,12 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
-import { reactive, ref, watch, computed } from 'vue'
+import { reactive, watch } from 'vue'
+import { createConfigDraft } from '../../../composables/configDraft'
+import { useConfigSaveGuard } from '../../../composables/configSaveGuard'
+import { validateNumericChanges } from '../../../composables/configValidation'
 
 const dashboardStore = useDashboardStore()
+const beginSave = useConfigSaveGuard(dashboardStore)
 
 const localConfig = reactive({
   searchMode: false,
@@ -28,7 +32,7 @@ const localConfig = reactive({
   claudeModelAliases: [],
 })
 
-const populatedFromStore = ref(false)
+const syncDraft = createConfigDraft(localConfig)
 
 function aliasesToRows(aliases) {
   return Object.entries(aliases || {}).map(([alias, model]) => ({ alias, model }))
@@ -44,17 +48,21 @@ function thinkingLevelsToRows(levels) {
 // 思考等级合法值：等级 / off / dynamic / 数字 budget
 const THINKING_LEVEL_RE = /^(minimal|low|medium|high|off|none|disable|disabled|dynamic|auto|-?\d+)$/i
 
-function buildThinkingLevelMap() {
-  const result = {}
-  for (const row of localConfig.maxThinkingLevels) {
+function buildThinkingLevelMap(draft = localConfig) {
+  const result = Object.create(null)
+  for (const row of draft.maxThinkingLevels) {
     const model = (row.model || '').trim()
     const level = String(row.level == null ? '' : row.level).trim()
     if (!model && !level) continue
     if (!model || !level) {
-      throw new Error(`思考等级表第 ${localConfig.maxThinkingLevels.indexOf(row) + 1} 行未填写完整`)
+      throw new Error(`思考等级表第 ${draft.maxThinkingLevels.indexOf(row) + 1} 行未填写完整`)
     }
     if (!THINKING_LEVEL_RE.test(level)) {
       throw new Error(`模型 ${model} 的思考等级值无效：${level}（支持 minimal/low/medium/high、off、dynamic 或数字）`)
+    }
+    if (Object.hasOwn(result, model)) throw new Error(`思考等级表存在重复模型：${model}`)
+    if (/^-?\d+$/.test(level) && (!Number.isSafeInteger(Number(level)) || Number(level) < -1)) {
+      throw new Error(`模型 ${model} 的数字 budget 必须为不小于 -1 的整数`)
     }
     result[model] = level
   }
@@ -67,8 +75,8 @@ watch(
     isLoaded: dashboardStore.isConfigLoaded,
   }),
   (v) => {
-    if (!v.isLoaded || populatedFromStore.value) return
-    Object.assign(localConfig, {
+    if (!v.isLoaded) return
+    syncDraft({
       searchMode: v.searchMode,
       searchPrompt: v.searchPrompt,
       enableThinking: v.enableThinking,
@@ -91,36 +99,21 @@ watch(
       claudeDefaultModel: v.claudeDefaultModel || '',
       claudeModelAliases: aliasesToRows(v.claudeModelAliases),
     })
-    populatedFromStore.value = true
   },
   { deep: true, immediate: true }
 )
 
 function buildAliasMap(rows) {
-  const result = {}
+  const result = Object.create(null)
   for (const item of rows) {
     const alias = (item.alias || '').trim()
     const model = (item.model || '').trim()
-    if (alias && model) result[alias] = model
+    if (!alias && !model) continue
+    if (!alias || !model) throw new Error('模型别名与目标模型必须同时填写')
+    if (Object.hasOwn(result, alias)) throw new Error(`模型别名重复：${alias}`)
+    result[alias] = model
   }
   return result
-}
-
-async function saveModelMapping(endpoint, defaultModel, aliases, password) {
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      default_model: defaultModel,
-      aliases,
-      password,
-    }),
-  })
-  if (!response.ok) {
-    const e = await response.json().catch(() => ({}))
-    throw new Error(e.detail || e.error?.message || '保存模型映射失败')
-  }
-  return response.json()
 }
 
 function addResponseAlias() {
@@ -148,10 +141,34 @@ function removeThinkingLevel(i) {
   localConfig.maxThinkingLevels.splice(i, 1)
 }
 
+function validateDraft(draft = localConfig) {
+  validateNumericChanges(draft, dashboardStore.config, [
+    ['maxRetryNum', '最大重试次数', 1],
+    ['fakeStreamingInterval', '伪流式间隔', 0.1, false],
+    ['randomStringLength', '随机字符串长度', 1],
+    ['concurrentRequests', '并发请求数', 1],
+    ['increaseConcurrentOnFailure', '失败调整值', 0],
+    ['maxConcurrentRequests', '最大并发', 1],
+    ['maxEmptyResponses', '最大空响应次数', 0],
+    ['pvpMaxRetries', 'PVP 最大重试次数', 1],
+  ])
+  return {
+    levels: buildThinkingLevelMap(draft),
+    responses: buildAliasMap(draft.responsesModelAliases),
+    claude: buildAliasMap(draft.claudeModelAliases),
+  }
+}
+
 async function saveComponentConfigs(passwordFromParent) {
   if (!passwordFromParent) {
     return { success: false, message: '功能配置：缺少密码' }
   }
+  const submitted = JSON.parse(JSON.stringify(localConfig))
+  let validated
+  try { validated = validateDraft(submitted) } catch (e) {
+    return { success: false, message: `功能配置：${e.message}` }
+  }
+  const assertCurrent = beginSave()
   let allSucceeded = true
   const messages = []
   const labelMap = {
@@ -179,63 +196,65 @@ async function saveComponentConfigs(passwordFromParent) {
     'claudeModelAliases',
     'maxThinkingLevels',
   ]
-  for (const key of Object.keys(localConfig).filter((k) => !mappingKeys.includes(k))) {
-    if (localConfig[key] !== dashboardStore.config[key]) {
+  for (const key of Object.keys(submitted).filter((k) => !mappingKeys.includes(k))) {
+    if (submitted[key] !== dashboardStore.config[key]) {
       try {
-        await dashboardStore.updateConfig(key, localConfig[key], passwordFromParent)
-        dashboardStore.config[key] = localConfig[key]
+        assertCurrent()
+        await dashboardStore.updateConfig(key, submitted[key], passwordFromParent)
+        assertCurrent()
+        syncDraft.acknowledge(key, submitted[key])
+        dashboardStore.config[key] = submitted[key]
         messages.push(`${labelMap[key] || key}成功`)
       } catch (e) {
+        assertCurrent()
         allSucceeded = false
         messages.push(`${labelMap[key] || key}失败：${e.message}`)
       }
     }
   }
   // 按模型思考等级（对象类型，需 JSON 对比 + 服务端校验）
-  let levelMap = {}
-  try {
-    levelMap = buildThinkingLevelMap()
-  } catch (e) {
-    allSucceeded = false
-    messages.push('思考等级表：' + e.message)
-  }
+  const levelMap = validated.levels
   if (
     allSucceeded &&
     JSON.stringify(levelMap) !== JSON.stringify(dashboardStore.config.maxThinkingModelLevels || {})
   ) {
     try {
+      assertCurrent()
       await dashboardStore.updateConfig('maxThinkingModelLevels', levelMap, passwordFromParent)
+      assertCurrent()
+      syncDraft.acknowledge('maxThinkingLevels', submitted.maxThinkingLevels)
       dashboardStore.config.maxThinkingModelLevels = levelMap
       messages.push(`按模型思考等级成功（共 ${Object.keys(levelMap).length} 项）`)
     } catch (e) {
+      assertCurrent()
       allSucceeded = false
       messages.push('按模型思考等级失败：' + (e.message || '未知错误'))
     }
   }
 
-  try {
-    await saveModelMapping(
-      '/api/update-responses-model-mapping',
-      localConfig.responsesDefaultModel,
-      buildAliasMap(localConfig.responsesModelAliases),
-      passwordFromParent
-    )
-    messages.push('Responses 模型映射成功')
-  } catch (e) {
-    allSucceeded = false
-    messages.push('Responses 模型映射失败：' + e.message)
-  }
-  try {
-    await saveModelMapping(
-      '/api/update-claude-model-mapping',
-      localConfig.claudeDefaultModel,
-      buildAliasMap(localConfig.claudeModelAliases),
-      passwordFromParent
-    )
-    messages.push('Claude 模型映射成功')
-  } catch (e) {
-    allSucceeded = false
-    messages.push('Claude 模型映射失败：' + e.message)
+  for (const [protocol, label] of [['responses', 'Responses'], ['claude', 'Claude']]) {
+    const modelKey = `${protocol}DefaultModel`
+    const aliasesKey = `${protocol}ModelAliases`
+    const defaultModel = submitted[modelKey]
+    const aliases = validated[protocol]
+    if (defaultModel === dashboardStore.config[modelKey] &&
+        JSON.stringify(aliases) === JSON.stringify(dashboardStore.config[aliasesKey])) continue
+    try {
+      assertCurrent()
+      await dashboardStore.postConfig(`/api/update-${protocol}-model-mapping`, {
+        default_model: defaultModel, aliases,
+      }, passwordFromParent)
+      assertCurrent()
+      syncDraft.acknowledge(modelKey, submitted[modelKey])
+      syncDraft.acknowledge(aliasesKey, submitted[aliasesKey])
+      dashboardStore.config[modelKey] = defaultModel
+      dashboardStore.config[aliasesKey] = aliases
+      messages.push(`${label} 模型映射成功`)
+    } catch (e) {
+      assertCurrent()
+      allSucceeded = false
+      messages.push(`${label} 模型映射失败：${e.message}`)
+    }
   }
   if (allSucceeded && !messages.length) {
     return { success: true, message: '功能配置：无变更' }
@@ -243,7 +262,7 @@ async function saveComponentConfigs(passwordFromParent) {
   return { success: allSucceeded, message: `功能配置：${messages.join('；')}` }
 }
 
-defineExpose({ saveComponentConfigs, localConfig })
+defineExpose({ saveComponentConfigs, localConfig, validateDraft })
 </script>
 
 <template>
@@ -330,7 +349,7 @@ defineExpose({ saveComponentConfigs, localConfig })
     <div v-if="localConfig.fakeStreaming" class="grid grid--2">
       <div class="field">
         <label class="field__label">伪流式间隔（秒）</label>
-        <input v-model.number="localConfig.fakeStreamingInterval" type="number" min="0" step="0.1" class="input">
+        <input v-model.number="localConfig.fakeStreamingInterval" type="number" min="0.1" step="0.1" class="input">
       </div>
     </div>
 
@@ -386,7 +405,7 @@ defineExpose({ saveComponentConfigs, localConfig })
     <div class="grid grid--3">
       <div class="field">
         <label class="field__label">最大重试次数</label>
-        <input v-model.number="localConfig.maxRetryNum" type="number" min="0" class="input">
+        <input v-model.number="localConfig.maxRetryNum" type="number" min="1" class="input">
       </div>
       <div class="field">
         <label class="field__label">最大空响应次数</label>
@@ -394,7 +413,7 @@ defineExpose({ saveComponentConfigs, localConfig })
       </div>
       <div class="field">
         <label class="field__label">随机字符串长度</label>
-        <input v-model.number="localConfig.randomStringLength" type="number" min="0" class="input" :disabled="!localConfig.randomString">
+        <input v-model.number="localConfig.randomStringLength" type="number" min="1" class="input" :disabled="!localConfig.randomString">
       </div>
     </div>
 

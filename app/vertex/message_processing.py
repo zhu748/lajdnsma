@@ -24,86 +24,53 @@ SUPPORTED_ROLES = ["user", "model"]
 def create_gemini_prompt(
     messages: List[OpenAIMessage],
 ) -> Union[types.Content, List[types.Content]]:
-    """
-    Convert OpenAI messages to Gemini format.
-    Returns a Content object or list of Content objects as required by the Gemini API.
-    """
-    vertex_log("debug", f"正在将 OpenAI 消息转换为 Gemini 格式")
+    """Convert text, image and tool history, preserving call IDs and signatures."""
+    from app.vertex.native_tools import NativeRequestError, function_call_parts, function_response_part
 
+    call_names = {}
     gemini_messages = []
-
-    for idx, message in enumerate(messages):
-        if not message.content:
-            vertex_log(
-                "warning",
-                f"第 {idx} 条消息内容为空，已跳过；角色={message.role}",
-            )
-            continue
-
-        role = message.role
-        if role == "system":
+    for message in messages:
+        calls = getattr(message, "tool_calls", None) or []
+        if message.role == "tool":
+            parts = [function_response_part(message, call_names)]
             role = "user"
-        elif role == "assistant":
-            role = "model"
-
-        if role not in SUPPORTED_ROLES:
-            if role == "tool":
-                role = "user"
-            else:
-                if idx == len(messages) - 1:
-                    role = "user"
-                else:
-                    role = "model"
-
-        parts = []
-        if isinstance(message.content, str):
-            parts.append(types.Part(text=message.content))
-        elif isinstance(message.content, list):
-            for (
-                part_item
-            ) in message.content:  # Renamed part to part_item to avoid conflict
-                if isinstance(part_item, dict):
-                    if part_item.get("type") == "text":
-                        vertex_log("warning", f"检测到空消息，已自动补全")
-                        parts.append(types.Part(text=part_item.get("text", "\n")))
-                    elif part_item.get("type") == "image_url":
-                        image_url = part_item.get("image_url", {}).get("url", "")
-                        if image_url.startswith("data:"):
-                            mime_match = re.match(
-                                r"data:([^;]+);base64,(.+)", image_url
-                            )
-                            if mime_match:
-                                mime_type, b64_data = mime_match.groups()
-                                image_bytes = base64.b64decode(b64_data)
-                                parts.append(
-                                    types.Part.from_bytes(
-                                        data=image_bytes, mime_type=mime_type
-                                    )
-                                )
-                elif isinstance(part_item, ContentPartText):
-                    parts.append(types.Part(text=part_item.text))
-                elif isinstance(part_item, ContentPartImage):
-                    image_url = part_item.image_url.url
-                    if image_url.startswith("data:"):
-                        mime_match = re.match(r"data:([^;]+);base64,(.+)", image_url)
-                        if mime_match:
-                            mime_type, b64_data = mime_match.groups()
-                            image_bytes = base64.b64decode(b64_data)
-                            parts.append(
-                                types.Part.from_bytes(
-                                    data=image_bytes, mime_type=mime_type
-                                )
-                            )
         else:
-            parts.append(types.Part(text=str(message.content)))
-
-        content = types.Content(role=role, parts=parts)
-        gemini_messages.append(content)
-
-    vertex_log("debug", f"消息转换完成，共 {len(gemini_messages)} 条 Gemini 消息")
-    if len(gemini_messages) == 1:
-        return gemini_messages[0]
-    return gemini_messages
+            role = "model" if message.role == "assistant" else "user"
+            if message.role not in {"system", "developer", "user", "assistant"}:
+                raise NativeRequestError(f"Unsupported message role: {message.role}")
+            parts = []
+            if isinstance(message.content, str) and message.content:
+                parts.append(types.Part(text=message.content))
+            elif isinstance(message.content, list):
+                for item in message.content:
+                    item = item.model_dump() if hasattr(item, "model_dump") else item
+                    if item.get("type") == "text":
+                        parts.append(types.Part(text=item["text"]))
+                    elif item.get("type") == "image_url":
+                        url = item.get("image_url", {}).get("url", "")
+                        match = re.fullmatch(r"data:([^;]+);base64,(.+)", url, re.DOTALL)
+                        if not match:
+                            raise NativeRequestError("Native Vertex images require a base64 data URL")
+                        try:
+                            data = base64.b64decode(match[2], validate=True)
+                        except ValueError as exc:
+                            raise NativeRequestError("Invalid base64 image") from exc
+                        parts.append(types.Part.from_bytes(data=data, mime_type=match[1]))
+                    else:
+                        raise NativeRequestError("Unsupported message content type")
+            if calls:
+                parts.extend(function_call_parts(calls))
+                for call in calls:
+                    if call.get("id"):
+                        call_names[call["id"]] = call["function"]["name"]
+        if not parts:
+            continue
+        # Adjacent model calls and parallel results must remain in one turn.
+        if gemini_messages and gemini_messages[-1].role == role:
+            gemini_messages[-1].parts.extend(parts)
+        else:
+            gemini_messages.append(types.Content(role=role, parts=parts))
+    return gemini_messages[0] if len(gemini_messages) == 1 else gemini_messages
 
 
 def create_encrypted_gemini_prompt(
@@ -547,6 +514,8 @@ def convert_to_openai_format(
     剥离（一次性 final=True 过滤：完整回显剥为空串 / 部分匹配原样
     保留）；reasoning_content 不受影响。
     """
+    from app.vertex.native_tools import candidate_tool_calls
+
     is_encrypt_full = model.endswith("-encrypt-full")
     echo_filter = PrefillEchoStreamFilter(prefill_echo) if prefill_echo else None
     choices = []
@@ -572,10 +541,16 @@ def convert_to_openai_format(
             if final_reasoning_content_str:
                 message_payload["reasoning_content"] = final_reasoning_content_str
 
+            tool_calls = candidate_tool_calls(candidate)
+            if tool_calls:
+                message_payload["tool_calls"] = tool_calls
+                if not final_normal_content_str:
+                    message_payload["content"] = None
+
             choice_item = {
                 "index": i,
                 "message": message_payload,
-                "finish_reason": _openai_finish_reason(getattr(candidate, "finish_reason", None)),
+                "finish_reason": ("tool_calls" if tool_calls and _openai_finish_reason(getattr(candidate, "finish_reason", None)) == "stop" else _openai_finish_reason(getattr(candidate, "finish_reason", None))),
             }
             if hasattr(candidate, "logprobs"):
                 choice_item["logprobs"] = getattr(candidate, "logprobs", None)
@@ -622,6 +597,7 @@ def convert_chunk_to_openai(
     candidate_index: int = 0,
     created_ts: int | None = None,
     echo_filter=None,
+    tool_index_offset: int = 0,
 ) -> str:
     """Converts Gemini stream chunk to OpenAI format, applying deobfuscation if needed.
 
@@ -635,6 +611,8 @@ def convert_chunk_to_openai(
     循环外以 finalize_text 处理）；被暂存的 chunk 退化为合法的空
     增量（无 content 字段）心跳形态。
     """
+    from app.vertex.native_tools import candidate_tool_calls
+
     is_encrypt_full = model.endswith("-encrypt-full")
     delta_payload = {}
     finish_reason = None
@@ -658,6 +636,9 @@ def convert_chunk_to_openai(
             delta_payload["reasoning_content"] = reasoning_text
         if normal_text:
             delta_payload["content"] = normal_text
+        tool_calls = candidate_tool_calls(candidate, index_offset=tool_index_offset)
+        if tool_calls:
+            delta_payload["tool_calls"] = tool_calls
         # Hardening: previously, when both reasoning_text and
         # normal_text were empty, we forced `delta_payload["content"] =
         # ""` and emitted `delta: {"content": ""}` — real OpenAI never

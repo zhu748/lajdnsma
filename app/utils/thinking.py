@@ -473,3 +473,18 @@ def apply_thinking_override_genai(model: str, generation_config: dict) -> None:
     if isinstance(existing, dict) and existing.get("include_thoughts"):
         merged["include_thoughts"] = True
     generation_config["thinking_config"] = merged
+
+
+def sanitize_thinking_genai(model: str, generation_config: dict) -> None:
+    """Apply the same model-specific budget conversion to the native SDK path."""
+    thinking = generation_config.get("thinking_config")
+    if not isinstance(thinking, dict):
+        return
+    aliases = {"thinking_budget": "thinkingBudget", "thinking_level": "thinkingLevel", "include_thoughts": "includeThoughts"}
+    wire = {"generationConfig": {"thinkingConfig": {aliases.get(k, k): v for k, v in thinking.items()}}}
+    sanitize_thinking_for_model(model, wire)
+    normalized = wire["generationConfig"].get("thinkingConfig")
+    if normalized:
+        generation_config["thinking_config"] = {_camel_to_snake(k): v for k, v in normalized.items()}
+    else:
+        generation_config.pop("thinking_config", None)

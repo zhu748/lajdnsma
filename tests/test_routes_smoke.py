@@ -65,6 +65,9 @@ def load_routes_module():
             self.media_type = media_type
 
     fake_fastapi_responses.StreamingResponse = StreamingResponse
+    fake_fastapi_responses.JSONResponse = type("JSONResponse", (), {
+        "__init__": lambda self, content, status_code=200: self.__dict__.update(content=content, status_code=status_code),
+    })
 
     fake_services = types.ModuleType("app.services")
 
@@ -78,6 +81,8 @@ def load_routes_module():
     fake_services.GeminiClient = GeminiClient
 
     fake_utils = types.ModuleType("app.utils")
+    # Keep pure boundary validators real while stubbing service initialization.
+    fake_utils.__path__ = [str(ROOT / "app/utils")]
 
     async def protect_from_abuse(*args, **kwargs):
         return None

@@ -1,27 +1,10 @@
-"""Gemini / OpenAI 双形态错误响应构建。"""
-from app.utils.response import gemini_from_text, openAI_from_text
+"""Terminal upstream failures must remain protocol errors, never assistant text."""
+import json
 
 
 def build_error_response(is_gemini: bool, model: str, content: str, stream: bool):
-    """统一构造 Gemini / OpenAI 兼容错误响应。
-
-    Hardening: previously used `role="error"` for the OpenAI branch —
-    `error` is not a valid `role` value in the OpenAI Chat Completions
-    spec (only `system`, `user`, `assistant`, `tool` are allowed) and
-    was therefore a non-standard fingerprint.  We now use the
-    canonical `assistant` role.
-    """
     if is_gemini:
-        return gemini_from_text(
-            content=content,
-            finish_reason="STOP",
-            stream=stream,
-        )
-
-    return openAI_from_text(
-        model=model,
-        content=content,
-        finish_reason="stop",
-        stream=stream,
-        role="assistant",
-    )
+        payload = {"error": {"code": 503, "message": content, "status": "UNAVAILABLE"}}
+    else:
+        payload = {"error": {"message": content, "type": "server_error", "code": "503", "param": None}}
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n" if stream else payload

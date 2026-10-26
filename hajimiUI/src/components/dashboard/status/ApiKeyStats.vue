@@ -1,7 +1,9 @@
 <script setup>
+import AppDialog from '../../ui/AppDialog.vue'
+import { errorMessage } from '../../../services/http'
 import { useDashboardStore } from '../../../stores/dashboard'
-import { computed, ref, onUnmounted, watch } from 'vue'
-import ApiCallsChart from './ApiCallsChart.vue'
+import { computed, ref, onUnmounted, watch, defineAsyncComponent } from 'vue'
+const ApiCallsChart = defineAsyncComponent(() => import('./ApiCallsChart.vue'))
 
 const dashboardStore = useDashboardStore()
 
@@ -21,9 +23,6 @@ function openDialog(name) {
   Object.keys(dialogState.value).forEach((k) => (dialogState.value[k] = false))
   dialogState.value[name] = true
 }
-function closeDialog(name) {
-  dialogState.value[name] = false
-}
 
 // ---------- Add keys ----------
 const newApiKeys = ref('')
@@ -32,6 +31,7 @@ const addSuccess = ref('')
 const isAdding = ref(false)
 
 async function submitAdd() {
+  if (isAdding.value) return
   addError.value = ''
   addSuccess.value = ''
   if (!newApiKeys.value.trim()) {
@@ -52,7 +52,6 @@ async function submitAdd() {
     addSuccess.value = `已添加 ${keys.length} 个密钥`
     newApiKeys.value = ''
     await dashboardStore.fetchDashboardData()
-    setTimeout(() => closeDialog('add'), 1500)
   } catch (e) {
     addError.value = e.message || '添加密钥失败'
   } finally {
@@ -66,21 +65,27 @@ const testError = ref('')
 const testProgress = ref({ completed: 0, total: 0, valid: 0, invalid: 0, is_completed: false })
 const isTesting = ref(false)
 let testPollTimer = null
+let pollController = null
+let pollVersion = 0
+let disposed = false
 // 连续失败计数：后端重启/任务丢失时 is_completed 永不到达，
 // 轮询必须自己设上限，否则每 1.5s 永久打接口。
 const MAX_POLL_FAILURES = 10
 let pollFailures = 0
 
 function stopPolling() {
+  pollVersion += 1
+  pollController?.abort()
+  pollController = null
   if (testPollTimer) {
-    clearInterval(testPollTimer)
+    clearTimeout(testPollTimer)
     testPollTimer = null
   }
 }
 
 // 卸载清理：切换页面/组件销毁时停掉轮询定时器（此前无清理，
 // 离开控制台后仍每 1.5s 请求一次）。
-onUnmounted(stopPolling)
+onUnmounted(() => { disposed = true; stopPolling() })
 
 async function startTest() {
   testError.value = ''
@@ -88,6 +93,10 @@ async function startTest() {
     testError.value = '请输入密码'
     return
   }
+  if (isTesting.value) return
+  stopPolling()
+  pollFailures = 0
+  const version = pollVersion
   isTesting.value = true
   testProgress.value = { completed: 0, total: 0, valid: 0, invalid: 0, is_completed: false }
   try {
@@ -98,9 +107,10 @@ async function startTest() {
     })
     if (!response.ok) {
       const err = await response.json().catch(() => ({}))
-      throw new Error(err.detail || `HTTP ${response.status}`)
+      throw new Error(errorMessage(err, `HTTP ${response.status}`))
     }
-    testPollTimer = setInterval(pollTestProgress, 1500)
+    if (disposed || version !== pollVersion) return
+    testPollTimer = setTimeout(pollTestProgress, 1500)
   } catch (e) {
     testError.value = e.message || '启动测试失败'
     isTesting.value = false
@@ -108,23 +118,26 @@ async function startTest() {
 }
 
 async function pollTestProgress() {
+  const version = pollVersion
+  const controller = new AbortController()
+  pollController = controller
+  const timeout = setTimeout(() => controller.abort(), 10000)
   try {
-    // 凭证只走 Authorization 头，不再拼 URL 查询串（查询串会进
-    // uvicorn access log 与反代日志）。
     const r = await fetch('/api/test-api-keys/progress', {
       headers: dashboardStore.authHeaders(),
+      signal: controller.signal,
     })
-    if (!r.ok) {
-      // 非 200：连续 N 次后放弃轮询，避免后端重启后永久空转
-      if (++pollFailures >= MAX_POLL_FAILURES) {
-        stopPolling()
-        isTesting.value = false
-        testError.value = '进度轮询多次失败，测试可能已被中断'
-      }
+    if (disposed || version !== pollVersion) return
+    if (!r.ok) throw new Error(`HTTP ${r.status}`)
+    const data = await r.json()
+    if (disposed || version !== pollVersion) return
+    if (data.is_running === false && !data.is_completed) {
+      stopPolling()
+      isTesting.value = false
+      testError.value = '测试任务已丢失，请重新启动测试'
       return
     }
     pollFailures = 0
-    const data = await r.json()
     testProgress.value = data
     if (data.is_completed) {
       stopPolling()
@@ -132,11 +145,17 @@ async function pollTestProgress() {
       await dashboardStore.fetchDashboardData()
     }
   } catch (e) {
-    // 网络错误同样计入失败上限
+    if (disposed || version !== pollVersion) return
     if (++pollFailures >= MAX_POLL_FAILURES) {
       stopPolling()
       isTesting.value = false
       testError.value = '进度轮询多次失败，测试可能已被中断'
+    }
+  } finally {
+    clearTimeout(timeout)
+    if (pollController === controller) pollController = null
+    if (!disposed && version === pollVersion && isTesting.value) {
+      testPollTimer = setTimeout(pollTestProgress, 1500)
     }
   }
 }
@@ -148,6 +167,7 @@ const clearSuccess = ref('')
 const isClearing = ref(false)
 
 async function submitClear() {
+  if (isClearing.value) return
   clearError.value = ''
   clearSuccess.value = ''
   if (!clearPassword.value) {
@@ -166,7 +186,6 @@ async function submitClear() {
     clearSuccess.value = data.message || '已清除'
     clearPassword.value = ''
     await dashboardStore.fetchDashboardData()
-    setTimeout(() => closeDialog('clear'), 1500)
   } catch (e) {
     clearError.value = e.message || '操作失败'
   } finally {
@@ -181,6 +200,7 @@ const exportedKeys = ref([])
 const isExporting = ref(false)
 
 async function submitExport() {
+  if (isExporting.value) return
   exportError.value = ''
   exportedKeys.value = []
   if (!exportPassword.value) {
@@ -287,7 +307,7 @@ function toggleModels(keyId) {
         <div class="card__title">API 密钥</div>
         <div class="card__subtitle">
           {{ dashboardStore.apiKeyStats.length }} 个密钥 ·
-          调用 {{ fmt(totalCalls) }} 次 · 令牌 {{ fmt(totalTokens) }}（24小时）
+          调用 {{ fmt(totalCalls) }} 次 · 令牌 {{ fmt(totalTokens) }}（本统计周期）
         </div>
       </div>
       <div class="row card__actions">
@@ -305,15 +325,16 @@ function toggleModels(keyId) {
 
     <!-- ============== Chart ============== -->
     <div v-if="showTable" class="card__body" style="padding:0;">
-      <ApiCallsChart />
+      <ApiCallsChart v-if="dashboardStore.timeSeriesData.calls.length || dashboardStore.timeSeriesData.tokens.length" />
 
       <!-- ============== Table ============== -->
-      <div style="overflow-x:auto;">
-        <table class="table">
+      <p v-if="pageRows.length" class="table-scroll-hint">左右滑动查看完整密钥用量 →</p>
+      <div v-if="pageRows.length" class="key-table-scroll" role="region" aria-label="密钥用量，可左右滚动查看更多" tabindex="0">
+        <table class="table key-table">
           <thead>
             <tr>
               <th>密钥</th>
-              <th style="text-align:right;">24h 调用</th>
+              <th style="text-align:right;">本周期调用</th>
               <th style="text-align:right;">令牌</th>
               <th style="width:130px;">日额度</th>
               <th>模型</th>
@@ -367,17 +388,14 @@ function toggleModels(keyId) {
                 </td>
               </tr>
             </template>
-            <tr v-if="!pageRows.length">
-              <td colspan="5">
-                <div class="empty-state" style="padding:var(--sp-8);">
-                  <div class="empty-state__icon">∅</div>
-                  <div class="empty-state__title">密钥池为空</div>
-                  <div class="empty-state__desc">点击「+ 添加」导入密钥。</div>
-                </div>
-              </td>
-            </tr>
           </tbody>
         </table>
+      </div>
+
+      <div v-else class="empty-state" style="padding:var(--sp-8);">
+        <div class="empty-state__icon">∅</div>
+        <div class="empty-state__title">密钥池为空</div>
+        <div class="empty-state__desc">点击「+ 添加」导入密钥。</div>
       </div>
 
       <!-- ============== Pagination ============== -->
@@ -394,11 +412,10 @@ function toggleModels(keyId) {
   </div>
 
   <!-- ============== Add dialog ============== -->
-  <div v-if="dialogState.add" class="modal-overlay" @click.self="closeDialog('add')">
-    <div class="modal">
+  <AppDialog v-model="dialogState.add" title="添加 API 密钥" :busy="isAdding" v-slot="{ close }">
       <div class="modal__header">
         <div class="modal__title">添加 API 密钥</div>
-        <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('add')">✕</button>
+        <button class="btn btn--ghost btn--icon btn--sm" @click="close" :disabled="isAdding" aria-label="关闭添加密钥窗口">✕</button>
       </div>
       <div class="modal__body">
         <div class="field mb-4">
@@ -409,20 +426,18 @@ function toggleModels(keyId) {
         <div v-if="addSuccess" class="banner banner--success">{{ addSuccess }}</div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('add')">取消</button>
+        <button class="btn btn--secondary btn--sm" @click="close" :disabled="isAdding">取消</button>
         <button class="btn btn--primary btn--sm" @click="submitAdd" :disabled="isAdding">
           {{ isAdding ? '添加中…' : '添加密钥' }}
         </button>
       </div>
-    </div>
-  </div>
+    </AppDialog>
 
   <!-- ============== Test dialog ============== -->
-  <div v-if="dialogState.test" class="modal-overlay" @click.self="!isTesting && closeDialog('test')">
-    <div class="modal">
+  <AppDialog v-model="dialogState.test" title="测试密钥" :busy="isTesting" v-slot="{ close }">
       <div class="modal__header">
         <div class="modal__title">测试密钥</div>
-        <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('test')" :disabled="isTesting">✕</button>
+        <button class="btn btn--ghost btn--icon btn--sm" @click="close" :disabled="isTesting" aria-label="关闭测试密钥窗口">✕</button>
       </div>
       <div class="modal__body">
         <p class="text-muted mb-4" style="font-size:var(--fs-sm);">
@@ -451,20 +466,18 @@ function toggleModels(keyId) {
         </div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('test')" :disabled="isTesting">取消</button>
+        <button class="btn btn--secondary btn--sm" @click="close" :disabled="isTesting">取消</button>
         <button class="btn btn--primary btn--sm" @click="startTest" :disabled="isTesting">
           {{ isTesting ? '测试中…' : '开始测试' }}
         </button>
       </div>
-    </div>
-  </div>
+    </AppDialog>
 
   <!-- ============== Clear invalid dialog ============== -->
-  <div v-if="dialogState.clear" class="modal-overlay" @click.self="closeDialog('clear')">
-    <div class="modal">
+  <AppDialog v-model="dialogState.clear" title="清除无效密钥" :busy="isClearing" v-slot="{ close }">
       <div class="modal__header">
         <div class="modal__title">清除无效密钥</div>
-        <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('clear')">✕</button>
+        <button class="btn btn--ghost btn--icon btn--sm" @click="close" :disabled="isClearing" aria-label="关闭清除密钥窗口">✕</button>
       </div>
       <div class="modal__body">
         <p class="text-muted mb-4" style="font-size:var(--fs-sm);">
@@ -478,20 +491,18 @@ function toggleModels(keyId) {
         <div v-if="clearSuccess" class="banner banner--success mt-4">{{ clearSuccess }}</div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('clear')">取消</button>
+        <button class="btn btn--secondary btn--sm" @click="close" :disabled="isClearing">取消</button>
         <button class="btn btn--primary btn--sm" @click="submitClear" :disabled="isClearing">
           {{ isClearing ? '清除中…' : '确认清除' }}
         </button>
       </div>
-    </div>
-  </div>
+    </AppDialog>
 
   <!-- ============== Export dialog ============== -->
-  <div v-if="dialogState.export" class="modal-overlay" @click.self="closeDialog('export')">
-    <div class="modal" style="max-width:560px;">
+  <AppDialog v-model="dialogState.export" title="导出有效密钥" :busy="isExporting" v-slot="{ close }">
       <div class="modal__header">
         <div class="modal__title">导出有效密钥</div>
-        <button class="btn btn--ghost btn--icon btn--sm" @click="closeDialog('export')">✕</button>
+        <button class="btn btn--ghost btn--icon btn--sm" @click="close" :disabled="isExporting" aria-label="关闭导出密钥窗口">✕</button>
       </div>
       <div class="modal__body">
         <div class="field mb-4">
@@ -514,13 +525,12 @@ function toggleModels(keyId) {
         </div>
       </div>
       <div class="modal__footer">
-        <button class="btn btn--secondary btn--sm" @click="closeDialog('export')">关闭</button>
+        <button class="btn btn--secondary btn--sm" @click="close" :disabled="isExporting">关闭</button>
         <button class="btn btn--primary btn--sm" @click="submitExport" :disabled="isExporting">
           {{ isExporting ? '导出中…' : '导出' }}
         </button>
       </div>
-    </div>
-  </div>
+    </AppDialog>
 
   <!-- ============== Copy toast ============== -->
   <Transition name="toast-fade">
@@ -529,6 +539,13 @@ function toggleModels(keyId) {
 </template>
 
 <style scoped>
+.key-table-scroll { overflow-x: auto; }
+.key-table { min-width: 600px; }
+.key-table > thead th, .key-table > tbody > tr > td { white-space: nowrap; }
+.table-scroll-hint { display: none; }
+@media (max-width: 640px) {
+  .table-scroll-hint { display: block; padding: 0 16px 10px; color: var(--text-muted); font-size: 11px; }
+}
 /* 卡片操作按钮行：允许换行，窄屏不溢出 */
 .card__actions {
   flex-wrap: wrap;
