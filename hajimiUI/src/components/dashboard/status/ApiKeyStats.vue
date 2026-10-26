@@ -1,11 +1,14 @@
 <script setup>
+import { exact } from '../../../services/format'
 import AppDialog from '../../ui/AppDialog.vue'
-import { errorMessage } from '../../../services/http'
+import { managementRequest } from '../../../services/http'
 import { useDashboardStore } from '../../../stores/dashboard'
 import { computed, ref, onUnmounted, watch, defineAsyncComponent } from 'vue'
 const ApiCallsChart = defineAsyncComponent(() => import('./ApiCallsChart.vue'))
 
 const dashboardStore = useDashboardStore()
+const actionController = new AbortController()
+onUnmounted(() => actionController.abort())
 
 // ---------- UI state ----------
 const showTable = ref(true)
@@ -100,15 +103,7 @@ async function startTest() {
   isTesting.value = true
   testProgress.value = { completed: 0, total: 0, valid: 0, invalid: 0, is_completed: false }
   try {
-    const response = await fetch('/api/test-api-keys', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: testPassword.value }),
-    })
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}))
-      throw new Error(errorMessage(err, `HTTP ${response.status}`))
-    }
+    await managementRequest('/api/test-api-keys', { password: testPassword.value }, { signal: actionController.signal })
     if (disposed || version !== pollVersion) return
     testPollTimer = setTimeout(pollTestProgress, 1500)
   } catch (e) {
@@ -174,15 +169,12 @@ async function submitClear() {
     clearError.value = '请输入密码'
     return
   }
+  const assertCurrent = dashboardStore.captureSession()
   isClearing.value = true
   try {
-    const r = await fetch('/api/clear-invalid-api-keys', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: clearPassword.value }),
-    })
-    const data = await r.json()
-    if (!r.ok) throw new Error(data.detail || '操作失败')
+    const data = await managementRequest('/api/clear-invalid-api-keys', { password: clearPassword.value }, { signal: actionController.signal })
+    if (disposed) return
+    assertCurrent()
     clearSuccess.value = data.message || '已清除'
     clearPassword.value = ''
     await dashboardStore.fetchDashboardData()
@@ -207,15 +199,12 @@ async function submitExport() {
     exportError.value = '请输入密码'
     return
   }
+  const assertCurrent = dashboardStore.captureSession()
   isExporting.value = true
   try {
-    const r = await fetch('/api/export-valid-api-keys', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: exportPassword.value }),
-    })
-    const data = await r.json()
-    if (!r.ok) throw new Error(data.detail || '操作失败')
+    const data = await managementRequest('/api/export-valid-api-keys', { password: exportPassword.value }, { signal: actionController.signal })
+    if (disposed) return
+    assertCurrent()
     exportedKeys.value = data.keys || []
     exportPassword.value = ''
   } catch (e) {
@@ -246,8 +235,9 @@ async function copyText(text) {
 const currentPage = ref(1)
 const pageSize = 10
 
+const filteredKeys = computed(() => dashboardStore.apiKeyStats.filter(stat => dashboardStore.selectedModel === 'all' || stat.model_stats?.[dashboardStore.selectedModel]))
 const totalPages = computed(() =>
-  Math.max(1, Math.ceil(dashboardStore.apiKeyStats.length / pageSize))
+  Math.max(1, Math.ceil(filteredKeys.value.length / pageSize))
 )
 
 // 数据缩减（如 Clear invalid 删除无效 key）后钳制当前页码，
@@ -258,7 +248,7 @@ watch(totalPages, (tp) => {
 
 const pageRows = computed(() => {
   const start = (currentPage.value - 1) * pageSize
-  return dashboardStore.apiKeyStats.slice(start, start + pageSize)
+  return filteredKeys.value.slice(start, start + pageSize)
 })
 
 const totalCalls = computed(() =>
@@ -307,7 +297,7 @@ function toggleModels(keyId) {
         <div class="card__title">API 密钥</div>
         <div class="card__subtitle">
           {{ dashboardStore.apiKeyStats.length }} 个密钥 ·
-          调用 {{ fmt(totalCalls) }} 次 · 令牌 {{ fmt(totalTokens) }}（本统计周期）
+          调用 <span :title="exact(totalCalls)">{{ fmt(totalCalls) }}</span> 次 · 令牌 <span :title="exact(totalTokens)">{{ fmt(totalTokens) }}</span>（本统计周期）
         </div>
       </div>
       <div class="row card__actions">
@@ -323,6 +313,7 @@ function toggleModels(keyId) {
       </div>
     </div>
 
+    <div class="card__body" style="padding-bottom:0"><label for="key-model-filter" class="text-muted">按模型筛选密钥</label> <select id="key-model-filter" class="input" style="max-width:280px;display:inline-block" v-model="dashboardStore.selectedModel" @change="currentPage = 1"><option value="all">全部模型</option><option v-for="m in dashboardStore.availableModels.filter(m => m !== 'all')" :key="m">{{ m }}</option></select><p class="section-description">额度根据本地周期内成功调用与配置上限估算，重置会改变比例；上游实际剩余额度请以提供方为准。</p></div>
     <!-- ============== Chart ============== -->
     <div v-if="showTable" class="card__body" style="padding:0;">
       <ApiCallsChart v-if="dashboardStore.timeSeriesData.calls.length || dashboardStore.timeSeriesData.tokens.length" />
@@ -336,7 +327,7 @@ function toggleModels(keyId) {
               <th>密钥</th>
               <th style="text-align:right;">本周期调用</th>
               <th style="text-align:right;">令牌</th>
-              <th style="width:130px;">日额度</th>
+              <th style="width:130px;">本地额度估算</th>
               <th>模型</th>
             </tr>
           </thead>
@@ -344,11 +335,11 @@ function toggleModels(keyId) {
             <template v-for="stat in pageRows" :key="stat.api_key">
               <tr>
                 <td class="mono">{{ stat.api_key }}</td>
-                <td style="text-align:right;" class="mono">{{ fmt(stat.calls_24h) }}</td>
-                <td style="text-align:right;" class="mono">{{ fmt(stat.total_tokens) }}</td>
+                <td style="text-align:right;" class="mono" :title="exact(stat.calls_24h)">{{ fmt(stat.calls_24h) }}</td>
+                <td style="text-align:right;" class="mono" :title="exact(stat.total_tokens)">{{ fmt(stat.total_tokens) }}</td>
                 <td>
                   <div class="usage-cell">
-                    <div class="usage-bar" :title="`${stat.calls_24h}/${stat.limit || 0} 次日额度`">
+                    <div class="usage-bar" :title="`${stat.calls_24h}/${stat.limit || 0} 次本地额度估算`">
                       <div class="usage-bar__fill" :class="usageClass(stat)" :style="{ width: Math.min(100, stat.usage_percent || 0) + '%' }"></div>
                     </div>
                     <span class="usage-cell__label mono">{{ usageLabel(stat) }}</span>
@@ -379,8 +370,8 @@ function toggleModels(keyId) {
                       <tbody>
                         <tr v-for="m in modelList(stat)" :key="m.m">
                           <td class="mono">{{ m.m }}</td>
-                          <td class="mono" style="text-align:right;">{{ fmt(m.calls) }}</td>
-                          <td class="mono" style="text-align:right;">{{ fmt(m.tokens) }}</td>
+                          <td class="mono" style="text-align:right;" :title="exact(m.calls)">{{ fmt(m.calls) }}</td>
+                          <td class="mono" style="text-align:right;" :title="exact(m.tokens)">{{ fmt(m.tokens) }}</td>
                         </tr>
                       </tbody>
                     </table>
@@ -404,8 +395,8 @@ function toggleModels(keyId) {
           第 {{ currentPage }} / {{ totalPages }} 页
         </span>
         <div class="row">
-          <button class="btn btn--secondary btn--sm" @click="currentPage--" :disabled="currentPage === 1">‹</button>
-          <button class="btn btn--secondary btn--sm" @click="currentPage++" :disabled="currentPage === totalPages">›</button>
+          <button class="btn btn--secondary btn--sm" aria-label="上一页密钥" @click="currentPage--" :disabled="currentPage === 1">‹</button>
+          <button class="btn btn--secondary btn--sm" aria-label="下一页密钥" @click="currentPage++" :disabled="currentPage === totalPages">›</button>
         </div>
       </div>
     </div>
@@ -561,7 +552,7 @@ function toggleModels(keyId) {
   font-size: var(--fs-xs);
 }
 
-/* 日额度用量单元格：细进度条 + 百分比标签，水位一目了然 */
+/* 本地额度估算用量单元格：细进度条 + 百分比标签，水位一目了然 */
 .usage-cell {
   display: flex;
   align-items: center;

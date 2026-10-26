@@ -1,7 +1,9 @@
 """面板统计聚合端点：GET /dashboard-data 与 POST /reset-stats。"""
 from datetime import datetime
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Query
+from app.utils.request_registry import request_registry
+from app.utils.logging import get_log_feed
 
 from app.api.dashboard import runtime
 from app.api.dashboard.auth import require_body_password, require_dashboard_token
@@ -14,7 +16,7 @@ import app.config.settings as settings
 
 
 @runtime.dashboard_router.get("/dashboard-data")
-async def get_dashboard_data(_: None = Depends(require_dashboard_token)):
+async def get_dashboard_data(summary: bool = Query(False), _: None = Depends(require_dashboard_token)):
     """聚合返回统计 / 日志 / 配置 / 模型列表（面板主数据源）。"""
     # 先清理过期数据，确保统计数据是最新的
     await api_stats_manager.maybe_cleanup()
@@ -36,7 +38,7 @@ async def get_dashboard_data(_: None = Depends(require_dashboard_token)):
     api_key_stats = api_stats_manager.get_api_key_stats(runtime.key_manager.api_keys)
 
     # 网关校验/请求摘要与 Vertex 运行日志同时可见，切换模式不能隐藏错误。
-    recent_logs = sorted(
+    recent_logs = [] if summary else sorted(
         log_manager.get_recent_logs(500) + vertex_log_manager.get_recent_logs(500),
         key=lambda entry: (entry.get("timestamp", ""), entry.get("created_ns", 0)),
     )[-500:]
@@ -54,7 +56,9 @@ async def get_dashboard_data(_: None = Depends(require_dashboard_token)):
     if runtime.credential_manager is not None:
         credentials_count = runtime.credential_manager.get_total_credentials()
 
-    return {
+    data = {
+        "monitor": None if summary else request_registry.snapshot(),
+        "stats_period_started_at": api_stats_manager.period_started_at,
         "key_count": len(runtime.key_manager.api_keys),
         "model_count": len(GeminiClient.AVAILABLE_MODELS),
         "available_models": GeminiClient.AVAILABLE_MODELS,
@@ -126,6 +130,13 @@ async def get_dashboard_data(_: None = Depends(require_dashboard_token)):
         "pvp_key": sanitize_pvp_selector(getattr(settings, "PVP_KEY", "")),
         "pvp_max_retries": getattr(settings, "PVP_MAX_RETRIES", 50),
     }
+    if summary:
+        fields = {'key_count', 'model_count', 'available_models', 'credentials_count',
+                  'last_24h_calls', 'hourly_calls', 'minute_calls', 'last_24h_tokens', 'hourly_tokens', 'minute_tokens',
+                  'calls_time_series', 'tokens_time_series', 'api_key_stats', 'enable_vertex', 'cache_entries', 'stats_period_started_at'}
+        return {key: value for key, value in data.items() if key in fields}
+    return data
+
 
 
 @runtime.dashboard_router.post("/reset-stats")
@@ -133,8 +144,21 @@ async def reset_stats(password_data: dict = Depends(require_body_password)):
     """重置 API 调用统计数据。"""
     try:
         await api_stats_manager.reset()
+        request_registry.reset()
         return {"status": "success", "message": "API调用统计数据已重置"}
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重置失败：{str(e)}")
+
+
+@runtime.dashboard_router.get("/runtime-data")
+async def get_runtime_data(after: int = Query(0, ge=0), _: None = Depends(require_dashboard_token)):
+    """Lightweight per-process request snapshot; no config or key aggregation."""
+    return request_registry.snapshot(after)
+
+
+@runtime.dashboard_router.get("/logs")
+async def get_logs(after: int = Query(0, ge=0), _: None = Depends(require_dashboard_token)):
+    """Bounded incremental feed with restart and eviction detection."""
+    return get_log_feed(after)

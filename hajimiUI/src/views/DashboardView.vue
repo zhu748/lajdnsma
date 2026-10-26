@@ -1,5 +1,8 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import TrafficTrends from '../components/dashboard/TrafficTrends.vue'
+import RuntimeOverview from '../components/dashboard/RuntimeOverview.vue'
+import RequestActivity from '../components/dashboard/RequestActivity.vue'
 import StatusSection from '../components/dashboard/StatusSection.vue'
 import ConfigSection from '../components/dashboard/ConfigSection.vue'
 import ProtocolEndpoints from '../components/dashboard/ProtocolEndpoints.vue'
@@ -8,6 +11,10 @@ import { useDashboardStore } from '../stores/dashboard'
 
 const dashboardStore = useDashboardStore()
 const refreshTimer = ref(null)
+let liveTimer = null
+let summaryTicks = 0
+const activeSection = ref('overview')
+let sectionObserver = null
 const pw = ref('')
 const pwError = ref('')
 const pwLoading = ref(false)
@@ -15,9 +22,9 @@ const modeError = ref('')
 const modeSaving = ref(false)
 const navigation = [
   { id: 'overview', number: '01', label: '运行概览' },
-  { id: 'connections', number: '02', label: '协议接入' },
-  { id: 'configuration', number: '03', label: '服务配置' },
-  { id: 'activity', number: '04', label: '请求日志' },
+  { id: 'activity', number: '02', label: '请求与日志' },
+  { id: 'connections', number: '03', label: '协议接入' },
+  { id: 'configuration', number: '04', label: '服务配置' },
 ]
 
 const isUnlocked = computed(() => dashboardStore.isUnlocked)
@@ -37,6 +44,7 @@ onMounted(() => {
 onUnmounted(() => {
   stopPolling()
   document.removeEventListener('visibilitychange', handleVisibilityChange)
+  sectionObserver?.disconnect()
 })
 
 function handleVisibilityChange() {
@@ -57,12 +65,25 @@ watch(isUnlocked, (unlocked) => {
 function startPolling() {
   if (refreshTimer.value || document.hidden || !isUnlocked.value) return
   refreshTimer.value = setInterval(() => {
-    dashboardStore.fetchDashboardData()
+    summaryTicks += 1
+    dashboardStore.fetchDashboardData(summaryTicks % 6 !== 0)
   }, 5000) // 5s — was 1s, but with auth in the loop the lower frequency is enough
   dashboardStore.fetchDashboardData()
+  liveTimer = setInterval(() => dashboardStore.fetchLiveData(), 2000)
+  dashboardStore.fetchLiveData()
+  if (typeof IntersectionObserver !== 'undefined') {
+    sectionObserver?.disconnect()
+    sectionObserver = new IntersectionObserver(entries => {
+      for (const entry of entries) if (entry.isIntersecting) activeSection.value = entry.target.id
+    }, { rootMargin: '-10% 0px -65% 0px' })
+    setTimeout(() => document.querySelectorAll('.console-section[id]').forEach(el => sectionObserver?.observe(el)), 0)
+  }
 }
 
 function stopPolling() {
+  clearInterval(liveTimer)
+  liveTimer = null
+  dashboardStore.stopLiveData()
   if (refreshTimer.value) {
     clearInterval(refreshTimer.value)
     refreshTimer.value = null
@@ -101,6 +122,7 @@ function lock() {
 
 function handleRefresh() {
   dashboardStore.fetchDashboardData()
+  dashboardStore.fetchLiveData()
 }
 
 function toggleDarkMode() {
@@ -249,11 +271,11 @@ function formatTime(t) {
           <aside class="console-sidebar">
             <div class="sidebar-caption">工作空间</div>
             <nav aria-label="控制台导航" class="console-nav">
-              <a v-for="item in navigation" :key="item.id" :href="`#${item.id}`">
+              <a v-for="item in navigation" :key="item.id" :href="`#${item.id}`" :aria-current="activeSection === item.id ? 'location' : undefined" :class="{ 'nav-active': activeSection === item.id }" @click="activeSection = item.id">
                 <span class="nav-number mono">{{ item.number }}</span>{{ item.label }}<span class="nav-arrow" aria-hidden="true">↗</span>
               </a>
             </nav>
-            <div class="sidebar-note"><span class="pill__dot" :class="lastError ? 'connection-warning' : 'connection-ok'" /><span>{{ lastError ? '连接异常' : '每 5 秒同步状态' }}</span></div>
+            <div class="sidebar-note"><span class="pill__dot" :class="lastError ? 'connection-warning' : 'connection-ok'" /><span>{{ lastError ? '连接异常' : '运行状态每 2 秒同步' }}</span></div>
           </aside>
           <div class="console-content">
             <div class="console-heading">
@@ -261,10 +283,12 @@ function formatTime(t) {
               <div class="backend-indicator"><span class="backend-indicator__icon" aria-hidden="true">↗</span><div><span>当前后端</span><strong>{{ enableVertex ? 'Vertex AI' : 'AI Studio' }}</strong></div></div>
             </div>
             <div v-if="lastError" class="banner banner--warning" role="alert">数据暂时无法更新：{{ lastError }}。当前显示上次成功同步的结果。<button class="btn btn--ghost btn--sm" @click="handleRefresh">重试</button></div>
-            <div id="overview" class="console-section"><StatusSection /></div>
-            <div id="connections" class="console-section"><ProtocolEndpoints /></div>
+            <div id="overview" class="console-section"><RuntimeOverview /></div>
+            <div id="activity" class="console-section"><RequestActivity /><LogSection /></div>
+            <div class="console-section"><TrafficTrends /><StatusSection /></div>
+            <div id="connections" class="console-section"><details class="connection-details"><summary>协议接入 · 地址与客户端配置</summary><ProtocolEndpoints /></details></div>
             <div id="configuration" class="console-section"><ConfigSection /></div>
-            <div id="activity" class="console-section"><LogSection /></div>
+
             <footer class="console-footer"><span>Hajimi Gateway</span><span>{{ dashboardStore.lastUpdated ? `最后同步 ${formatTime(dashboardStore.lastUpdated)}` : '等待数据同步' }}</span></footer>
           </div>
         </div>
@@ -349,6 +373,7 @@ function formatTime(t) {
 </style>
 
 <style scoped>
+.connection-details > summary { cursor: pointer; padding: 16px 0; color: var(--text-muted); font-size: 13px; }
 .brand-divider { color: var(--border-strong); margin: 0 10px; font-weight: 400; }
 .brand-caption { color: var(--text-muted); font-size: 12px; font-weight: 400; }
 .console-layout { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 40px; }
@@ -356,7 +381,7 @@ function formatTime(t) {
 .sidebar-caption { font-size: 11px; letter-spacing: .1em; color: var(--text-subtle); padding: 0 12px; margin-bottom: 16px; }
 .console-nav { display: flex; flex-direction: column; gap: 7px; }
 .console-nav a { display: flex; align-items: center; gap: 12px; color: var(--text-muted); padding: 12px; border-radius: 9px; font-size: 13px; text-decoration: none; transition: background .15s, color .15s; }
-.console-nav a:hover, .console-nav a:focus-visible { background: var(--accent-subtle); color: var(--accent-strong); }
+.console-nav a.nav-active, .console-nav a:hover, .console-nav a:focus-visible { background: var(--accent-subtle); color: var(--accent-strong); }
 .nav-number { font-size: 10px; opacity: .6; }
 .nav-arrow { margin-left: auto; opacity: .5; }
 .sidebar-note { margin: 36px 12px 0; padding-top: 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-muted); }

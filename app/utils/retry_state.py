@@ -50,12 +50,19 @@ async def elevate_pvp_backoff(base: float) -> float:
     """
     if base <= 0:
         return base
+    delay = base
     try:
         from app.utils.pvp import elevate_backoff
-
-        return await elevate_backoff(base)
+        delay = await elevate_backoff(base)
     except Exception:
-        return base
+        pass
+    # Record normal and PVP waits, including the optional-PVP fallback path.
+    try:
+        from app.utils.logging import log
+        log('info', f'重试退避 {delay:.3f} 秒', extra={'event': 'retry_wait', 'retry_delay': delay})
+    except Exception:
+        pass
+    return delay
 
 
 def next_batch_size(current_try_num: int, max_retry_num: int, current_concurrent: int) -> int:

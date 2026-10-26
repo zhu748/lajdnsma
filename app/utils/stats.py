@@ -63,6 +63,7 @@ class ApiStatsManager:
         # 后台处理相关
         self.enable_background = enable_background
         self.batch_interval = batch_interval
+        self.period_started_at = datetime.now().astimezone().isoformat()
         self._generation = 0
         self._update_queue = queue.Queue(maxsize=4096)
         self._worker_thread = None
@@ -363,6 +364,7 @@ class ApiStatsManager:
         """重置所有统计数据"""
         with self._counters_lock:
             self._generation += 1
+            self.period_started_at = datetime.now().astimezone().isoformat()
             self.api_key_counts.clear()
             self.model_counts.clear()
             self.api_model_counts.clear()

@@ -58,7 +58,7 @@ def test_json_summary_is_chinese_and_does_not_change_response(reporting):
 
     asyncio.run(module.RequestReportingMiddleware(app)(scope(), None, send))
     assert b"".join(m.get("body", b"") for m in sent) == body
-    entry, = logs.log_manager.get_recent_logs()
+    entry, = [e for e in logs.log_manager.get_recent_logs() if e.get("event") == "request_completed"]
     assert entry["event"] == "request_completed"
     assert entry["level_label"] == "信息"
     assert entry["request_type_label"] == "非流式"
@@ -82,7 +82,7 @@ def test_preview_is_optional_and_bounded(reporting, monkeypatch, limit):
     report.observe(completion())
     report.status, report.complete = 200, True
     report.emit()
-    entry, = logs.log_manager.get_recent_logs()
+    entry, = [e for e in logs.log_manager.get_recent_logs() if e.get("event") == "request_completed"]
     expected = 200 if limit == "invalid" else int(limit)
     assert len(entry["response_preview"]) <= expected
     assert entry["response_chars"] == 5
@@ -153,7 +153,7 @@ def test_cancellation_is_propagated_and_reported_once(reporting):
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(module.RequestReportingMiddleware(app)(scope(), None, None))
-    entry, = logs.log_manager.get_recent_logs()
+    entry, = [e for e in logs.log_manager.get_recent_logs() if e.get("event") == "request_completed"]
     assert entry["outcome"] in {"中断", "失败"}
     assert logs._current_request_report.get() is None
 
@@ -166,7 +166,7 @@ def test_large_capture_is_bounded_and_unknown_usage_is_not_zero(reporting):
     assert report.capture_truncated
     report.status, report.complete = 200, True
     report.emit()
-    entry, = logs.log_manager.get_recent_logs()
+    entry, = [e for e in logs.log_manager.get_recent_logs() if e.get("event") == "request_completed"]
     assert entry["usage"]["total_tokens"] is None
 
 
@@ -192,3 +192,199 @@ def test_only_api_requests_are_reported(reporting):
     assert module.should_report(scope("/v1beta/models/gemini:generateContent"))
     assert not module.should_report(scope("/api/update-config"))
     assert not module.should_report({**scope(), "method": "GET"})
+
+
+def test_responses_reasoning_survives_terminal_replay(reporting):
+    module, _ = reporting
+    report = module.RequestReport(scope('/v1/responses'))
+    report.observe({'type': 'response.reasoning_summary_text.delta', 'delta': '思考摘要'}, stream=True)
+    payload = {'object': 'response', 'status': 'completed', 'output': [
+        {'type': 'reasoning', 'summary': [{'type': 'summary_text', 'text': '思考摘要'}]},
+        {'type': 'message', 'content': [{'type': 'output_text', 'text': '结果'}]},
+    ]}
+    report.observe({'type': 'response.completed', 'response': payload}, stream=True)
+    assert report.thinking_chars == 4
+    assert report.thinking_preview == '思考摘要'
+    other = module.RequestReport(scope())
+    other.observe(payload)
+    assert other.thinking_preview == '思考摘要'
+
+
+def test_attempts_do_not_count_heartbeat_as_first_output(reporting):
+    module, _ = reporting
+    report = module.RequestReport(scope())
+    attempt = report.begin_attempt('AI Studio', 'test', 'private-key', True)
+    report.observe_attempt(attempt, {'choices': [{'delta': {}, 'finish_reason': None}]})
+    assert report.upstream_first_output_ms is None
+    report.observe_attempt(attempt, {'choices': [{'delta': {'reasoning_content': 'thinking'}}]})
+    assert report.upstream_first_output_ms is not None
+    assert report.upstream_first_text_ms is None
+    report.observe_attempt(attempt, completion())
+    report.end_attempt(attempt)
+    report.end_attempt(attempt)
+    assert report.upstream_active == 0
+    assert report.snapshot()['upstream_usage']['total_tokens'] == 18
+    assert 'private-key' not in str(report.snapshot())
+
+
+def test_registry_counts_all_http_requests_and_survives_reset(reporting):
+    module, _ = reporting
+    registry = module.request_registry
+    registry.reset()
+    report = module.RequestReport(scope())
+    registry.start(report)
+    assert report.request_id in registry.active
+    registry.reset()
+    report.status, report.complete = 200, True
+    report.emit()
+    assert report.request_id not in registry.active
+    assert registry.counts['completed'] == 0
+
+
+def test_raw_unknown_usage_is_not_replaced_by_adapter_zero(reporting):
+    module, _ = reporting
+    report = module.RequestReport(scope())
+    attempt = report.begin_attempt('Vertex AI', 'test', '', False)
+    report.observe_attempt(attempt, {'candidates': [{'content': {'parts': [{'text': 'x'}]}}]})
+    report.end_attempt(attempt)
+    report.observe({'usage': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}})
+    assert report.snapshot()['usage']['total_tokens'] is None
+    assert report.snapshot()['usage_source'] == '未知'
+
+
+def test_nonstream_first_output_is_not_invented_and_usage_is_derived(reporting):
+    module, _ = reporting
+    report = module.RequestReport(scope())
+    attempt = report.begin_attempt('Vertex AI', 'test', '', False)
+    report.observe_attempt(attempt, {'usage': {'input_tokens': 4, 'output_tokens': 6}, 'choices': [{'message': {'content': 'x'}}]})
+    report.end_attempt(attempt)
+    assert report.upstream_first_output_ms is None
+    assert report.snapshot()['usage']['total_tokens'] == 10
+    assert report.snapshot()['usage_source'] == '推导'
+
+
+def test_log_cursor_gap_and_request_correlation(reporting):
+    module, logs = reporting
+    report = module.RequestReport(scope())
+    token = logs._current_request_report.set(report)
+    try:
+        logs.log('info', 'attempt')
+        logs.vertex_log('info', 'vertex attempt')
+    finally:
+        logs._current_request_report.reset(token)
+    feed = logs.get_log_feed()
+    assert all(e['request_id'] == report.request_id for e in feed['logs'])
+    cursor = feed['cursor']
+    assert logs.get_log_feed(cursor)['logs'] == []
+    for i in range(1001):
+        logs.log_manager.add_log({'timestamp': 'test', 'message': str(i)})
+    assert logs.get_log_feed(cursor)['gap']
+    assert logs.get_log_feed(cursor)['capacity'] == 1000
+
+
+def test_upstream_remains_visible_while_http_request_is_already_closed(reporting):
+    module, _ = reporting
+    report = module.RequestReport(scope())
+    attempt = report.begin_attempt('Vertex AI', 'model', '', True)
+    report.status, report.complete = 200, True
+    report.emit()
+    assert report.request_id not in module.request_registry.active
+    assert module.request_registry.snapshot()['upstream_active'] >= 1
+    report.end_attempt(attempt, asyncio.CancelledError())
+    assert report.request_id not in module.request_registry.upstream_reports
+
+
+def test_retry_wait_and_key_switch_have_reason_status_and_attempt_numbers(reporting):
+    from types import SimpleNamespace
+    module, logs = reporting
+    report = module.RequestReport(scope())
+    first = report.begin_attempt('AI Studio', 'model', 'private-key-a', False)
+    error = RuntimeError('must not expose Bearer private-credential')
+    error.response = SimpleNamespace(status_code=429)
+    report.end_attempt(first, error)
+    token = logs._current_request_report.set(report)
+    try:
+        logs.log('info', '等待重试', extra={'event': 'retry_wait', 'retry_delay': .25})
+        logs.log('info', '选择密钥', extra={'event': 'key_decision', 'key': first['key'], 'decision': 'skip', 'reason': '密钥处于冷却'})
+    finally:
+        logs._current_request_report.reset(token)
+    second = report.begin_attempt('AI Studio', 'model', 'private-key-b', False)
+    report.observe_attempt(second, completion())
+    report.end_attempt(second)
+    wait = next(e for e in report.timeline if e['label'] == '重试退避')
+    switch = next(e for e in report.timeline if e['label'] == '切换密钥')
+    assert wait['retry_delay'] == .25 and wait['status_code'] == 429
+    assert wait['next_attempt_number'] == 2
+    assert switch['previous_key'] == first['key'] and switch['next_key'] == second['key']
+    assert switch['attempt_number'] == 2 and switch['reason'] == '上游限流或配额耗尽'
+    assert any(e.get('decision') == 'skip' for e in report.timeline)
+    assert 'private-key' not in str(report.snapshot())
+    assert 'private-credential' not in str(report.snapshot())
+
+
+def test_transient_same_key_retry_is_distinct_from_model_fallback(reporting):
+    module, _ = reporting
+    report = module.RequestReport(scope())
+    first = report.begin_attempt('Vertex AI', 'model-a', 'same-key', False)
+    error = RuntimeError('sdk failure'); error.code = 503
+    report.end_attempt(first, error)
+    second = report.begin_attempt('Vertex AI', 'model-a', 'same-key', False)
+    assert any(e['label'] == '再次请求上游' and e['status_code'] == 503 for e in report.timeline)
+    report.end_attempt(second, error)
+    third = report.begin_attempt('Vertex AI', 'model-b', 'same-key', False)
+    assert any(e['label'] == '切换模型或后端' and e['next_model'] == 'model-b' for e in report.timeline)
+    report.end_attempt(third, asyncio.CancelledError())
+
+
+@pytest.mark.parametrize('payload,expected', [
+    ({'choices': [{'delta': {}}]}, '空响应'),
+    ({'choices': [{'delta': {'content': 'partial'}}]}, '响应不完整'),
+    ({'error': {'message': 'failure'}}, '失败'),
+])
+def test_attempts_distinguish_empty_truncated_and_error_results(reporting, payload, expected):
+    module, _ = reporting
+    report = module.RequestReport(scope())
+    attempt = report.begin_attempt('Vertex AI', 'model', '', True)
+    report.observe_attempt(attempt, payload)
+    report.end_attempt(attempt)
+    assert attempt['outcome'] == expected
+    assert attempt['reason']
+    assert report.upstream_active == 0
+
+
+def test_retry_wait_is_recorded_when_optional_pvp_is_unavailable(reporting):
+    module, logs = reporting
+    retry = load_file('retry_observation_test', 'app/utils/retry_state.py')
+    report = module.RequestReport(scope())
+    token = logs._current_request_report.set(report)
+    try:
+        with patch.dict(sys.modules, {'app.utils.pvp': None, 'app.utils.logging': logs}):
+            assert asyncio.run(retry.elevate_pvp_backoff(.2)) == .2
+    finally:
+        logs._current_request_report.reset(token)
+    assert report.timeline[-1]['label'] == '重试退避'
+    assert report.timeline[-1]['retry_delay'] == .2
+
+
+def test_upstream_observer_failure_cannot_replace_a_valid_response(reporting):
+    module, logs = reporting
+    upstream = load_file('upstream_observation_test', 'app/utils/upstream_reporting.py')
+    report = module.RequestReport(scope())
+    token = logs._current_request_report.set(report)
+    class UnserializableResponse:
+        def model_dump(self, **kwargs):
+            raise ValueError('custom SDK serializer failed')
+    value = UnserializableResponse()
+    class Client:
+        @upstream.observe_upstream('Vertex AI')
+        async def complete(self, request):
+            return value
+    from types import SimpleNamespace
+    try:
+        with patch.dict(sys.modules, {'app.utils.logging': logs}):
+            result = asyncio.run(Client().complete(SimpleNamespace(model='test')))
+    finally:
+        logs._current_request_report.reset(token)
+    assert result is value
+    assert report.attempts[0]['observation_incomplete']
+    assert report.upstream_active == 0

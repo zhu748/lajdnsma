@@ -206,7 +206,7 @@ async def _handle_auto_model(
         },
     ]
     last_err = None
-    for attempt in attempts:
+    for attempt_index, attempt in enumerate(attempts):
         vertex_log(
             "info",
             f"自动路由尝试：{attempt['name']}，模型={attempt['model']}",
@@ -228,7 +228,15 @@ async def _handle_auto_model(
                 "info",
                 f"自动路由尝试 {attempt['name']} 失败，模型={attempt['model']}，错误={e_auto}",
             )
-            await asyncio.sleep(random.uniform(0.5, 2.0))
+            if attempt_index + 1 < len(attempts):
+                delay = random.uniform(0.5, 2.0)
+                vertex_log('info', '自动路由回退', extra={
+                    'event': 'model_fallback', 'previous_model': attempt['model'],
+                    'next_model': attempts[attempt_index + 1]['model'],
+                    'reason': '当前路由失败，尝试下一种请求格式：' + attempts[attempt_index + 1]['name'],
+                })
+                vertex_log('info', f'重试退避 {delay:.3f} 秒', extra={'event': 'retry_wait', 'retry_delay': delay})
+                await asyncio.sleep(delay)
 
     vertex_log("info", f"自动路由的所有尝试均失败")
     # Hardening: previously returned `str(last_err)` directly to

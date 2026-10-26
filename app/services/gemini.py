@@ -1,3 +1,4 @@
+from app.utils.upstream_reporting import observe_upstream
 """Gemini 上游客户端：请求转换（OpenAI→Gemini）、流式 / 非流式调用、
 响应包装（GeminiResponseWrapper）。"""
 import json
@@ -511,6 +512,7 @@ class GeminiClient:
         return api_version, data
 
     # 流式请求
+    @observe_upstream("AI Studio", streaming=True)
     async def stream_chat(self, request, contents, safety_settings, system_instruction):
         # 真流式请求处理逻辑
         extra_log = {
@@ -579,6 +581,7 @@ class GeminiClient:
                 log("info", "流式请求结束")
 
     # 非流式处理
+    @observe_upstream("AI Studio")
     async def complete_chat(
         self, request, contents, safety_settings, system_instruction
     ):

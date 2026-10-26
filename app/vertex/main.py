@@ -33,6 +33,9 @@ async def lifespan(app):
 
 app = FastAPI(title="API", lifespan=lifespan)
 
+from app.utils.request_reporting import RequestReportingMiddleware
+app.add_middleware(RequestReportingMiddleware)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS if hasattr(settings, "ALLOWED_ORIGINS") and settings.ALLOWED_ORIGINS else [],
@@ -40,6 +43,7 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     # Match the main app: permit browser SDK metadata for configured origins.
     allow_headers=["*"],
+        expose_headers=["X-Request-Id"],
 )
 
 credential_manager = CredentialManager()

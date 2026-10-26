@@ -1,3 +1,4 @@
+from app.utils.upstream_reporting import observe_upstream
 """Gemini embedding 上游客户端（batchEmbedContents）。"""
 import base64
 import struct
@@ -10,6 +11,7 @@ class EmbeddingClient:
     def __init__(self, api_key: str):
         self.api_key = api_key
 
+    @observe_upstream("AI Studio")
     async def create_embeddings(self, request: EmbeddingRequest) -> EmbeddingResponse:
         model_name = request.model.removeprefix("models/")
         

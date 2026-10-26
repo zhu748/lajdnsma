@@ -50,6 +50,7 @@ async def wait_for_existing_task(active_requests_manager, pool_key: str, request
         extra={
             "request_type": "non-stream",
             "model": request.model,
+            "coalesced": True,
         },
     )
 

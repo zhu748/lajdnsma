@@ -1,4 +1,5 @@
 <script setup>
+import { managementRequest } from '../../services/http'
 import AppDialog from '../ui/AppDialog.vue'
 import { useDashboardStore } from '../../stores/dashboard'
 import { onBeforeUnmount, ref } from 'vue'
@@ -31,19 +32,19 @@ async function resetStats() {
     resetError.value = '请输入密码'
     return
   }
+  const assertCurrent = dashboardStore.captureSession()
+  dashboardStore.invalidateDashboardFetch()
+  dashboardStore.stopLiveData()
   isResetting.value = true
   resetController = new AbortController()
   resetError.value = ''
   try {
-    const response = await fetch('/api/reset-stats', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: resetPassword.value }),
-      signal: resetController.signal,
-    })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.detail || '重置失败')
+    await managementRequest('/api/reset-stats', { password: resetPassword.value }, { signal: resetController.signal })
+    assertCurrent()
+    dashboardStore.invalidateDashboardFetch()
+    dashboardStore.stopLiveData()
     await dashboardStore.fetchDashboardData()
+    await dashboardStore.fetchLiveData()
     closeResetDialog()
   } catch (e) {
     resetError.value = e.message || '重置失败'

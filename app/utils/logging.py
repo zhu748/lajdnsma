@@ -4,6 +4,8 @@ import json
 import os
 import re
 import time
+import uuid
+import sys
 from contextvars import ContextVar
 from datetime import datetime
 from collections import deque
@@ -16,7 +18,9 @@ TYPE_LABELS = {"stream": "流式", "non-stream": "非流式", "fake-stream": "�
 REPORT_FIELDS = (
     "event", "request_id", "path", "outcome", "source", "duration_ms", "usage",
     "response_chars", "reasoning_chars", "response_preview", "reasoning_preview",
-    "tool_calls", "finish_reason", "capture_truncated",
+    "tool_calls", "finish_reason", "capture_truncated", "attempt_id", "stage", "backend", "retry_delay",
+    "reason", "decision", "attempt_number", "previous_attempt_id", "previous_key", "next_key",
+    "previous_model", "next_model",
 )
 try:
     LOG_TIMEZONE = ZoneInfo(os.environ.get("TZ", "Asia/Shanghai"))
@@ -55,6 +59,21 @@ logger.addHandler(console_handler)
 
 
 # 日志缓存，用于在网页上显示最近的日志
+_feed = deque(maxlen=1000)
+_feed_lock = Lock()
+_feed_seq = 0
+_feed_instance = uuid.uuid4().hex[:12]
+
+def get_log_feed(after=0):
+    with _feed_lock:
+        if after > _feed_seq:
+            after = 0
+        oldest = _feed[0]["seq"] if _feed else _feed_seq + 1
+        return {"instance_id": _feed_instance, "cursor": _feed_seq,
+                "gap": bool(after and after < oldest - 1), "capacity": _feed.maxlen,
+                "oldest_timestamp": _feed[0]["timestamp"] if _feed else None,
+                "logs": [dict(entry) for entry in _feed if entry["seq"] > after]}
+
 class LogManager:
     """环形缓冲日志管理器。
 
@@ -68,6 +87,11 @@ class LogManager:
         self.lock = Lock()
 
     def add_log(self, log_entry):
+        global _feed_seq
+        with _feed_lock:
+            _feed_seq += 1
+            log_entry.update(seq=_feed_seq, log_id=f"{_feed_instance}-{_feed_seq}")
+            _feed.append(log_entry)
         with self.lock:
             self.logs.append(log_entry)
 
@@ -89,7 +113,7 @@ def format_log_message(level, message, extra=None):
     extra = extra or {}
     message = redact_log_text(message)
     extra = dict(extra)
-    for name in ("key", "model", "error_message", "response_preview", "reasoning_preview"):
+    for name in ("key", "model", "error_message", "response_preview", "reasoning_preview", "reason"):
         if name in extra and isinstance(extra[name], str):
             extra[name] = redact_log_text(extra[name])
     # Perf: 时间戳只计算一次（旧实现每条日志调用两次
@@ -111,6 +135,10 @@ def format_log_message(level, message, extra=None):
         formatted_log += f"｜错误详情：{extra['error_message']}"
     if extra.get("request_id"):
         formatted_log += f"｜请求编号 {extra['request_id']}｜路径 {extra.get('path', '')}"
+    if extra.get('attempt_id'):
+        formatted_log += f"｜上游尝试 {extra['attempt_id']}"
+    if extra.get('reason'):
+        formatted_log += f"｜原因 {extra['reason']}"
     for field, label in (("response_preview", "返回预览"), ("reasoning_preview", "思考预览")):
         if extra.get(field):
             formatted_log += f"\n  {label}：{json.dumps(extra[field], ensure_ascii=False)}"
@@ -140,8 +168,9 @@ def vertex_format_log_message(level, message, extra=None):
     extra = extra or {}
     message = redact_log_text(message)
     extra = dict(extra)
-    if extra.get("error_message"):
-        extra["error_message"] = redact_log_text(extra["error_message"])
+    for name in ('error_message', 'reason', 'model'):
+        if isinstance(extra.get(name), str):
+            extra[name] = redact_log_text(extra[name])
     now_str = datetime.now(LOG_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
     log_values = {
         "asctime": now_str,
@@ -156,6 +185,11 @@ def vertex_format_log_message(level, message, extra=None):
     formatted_log = log_format % log_values
     if extra.get("error_message") and not DEBUG:
         formatted_log += f"｜错误详情：{extra['error_message']}"
+
+    if extra.get('request_id'):
+        formatted_log += f"｜请求编号 {extra['request_id']}"
+    if extra.get('attempt_id'):
+        formatted_log += f"｜上游尝试 {extra['attempt_id']}"
 
     # 将格式化后的Vertex日志添加到Vertex日志管理器
     log_entry = {
@@ -174,6 +208,7 @@ def vertex_format_log_message(level, message, extra=None):
         "error_message": extra.get("error_message", ""),
         "formatted": formatted_log,
     }
+    log_entry.update({name: extra[name] for name in REPORT_FIELDS if name in extra})
     vertex_log_manager.add_log(log_entry)
 
     return formatted_log
@@ -188,12 +223,23 @@ def _merge_extra(extra: dict = None, **kwargs) -> dict:
     if extra is not None and isinstance(extra, dict):
         final_extra.update(extra)
     final_extra.update(kwargs)
+    report = _current_request_report.get()
+    if report is not None:
+        final_extra.setdefault('request_id', report.request_id)
+        final_extra.setdefault('path', report.path)
+        final_extra.setdefault('model', report.model)
+    module = sys.modules.get('app.utils.upstream_reporting')
+    attempt = module._current_attempt.get() if module else None
+    if attempt:
+        final_extra.setdefault('attempt_id', attempt['attempt_id'])
     return final_extra
 
 
 def record_response_usage(usage_metadata):
     """只向当前请求补充用量；不额外输出日志，也不记录原始响应正文。"""
     report = _current_request_report.get()
+    if report is not None and usage_metadata is None:
+        report.authoritative_usage = dict.fromkeys(report.tokens)
     if report is not None and isinstance(usage_metadata, dict):
         try:
             report.update_event({"usage_metadata": usage_metadata})
@@ -212,5 +258,8 @@ def log(level: str, message: str, extra: dict = None, **kwargs):
 
 def vertex_log(level: str, message: str, extra: dict = None, **kwargs):
     final_extra = _merge_extra(extra, **kwargs)
+    report = _current_request_report.get()
+    if report is not None:
+        report.update_event(final_extra)
     msg = vertex_format_log_message(level.upper(), message, extra=final_extra)
     getattr(logger, level.lower())(msg)

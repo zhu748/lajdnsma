@@ -16,6 +16,9 @@ const sharedPassword = ref('')
 const overallError = ref('')
 const overallSuccess = ref('')
 const isOverallSaving = ref(false)
+const draftVersion = ref(0)
+const dirty = computed(() => Boolean(basicConfigRef.value?.isDirty || featuresConfigRef.value?.isDirty))
+function discardDraft() { draftVersion.value += 1; overallError.value = ''; overallSuccess.value = ''; sharedPassword.value = '' }
 
 const enableVertex = computed(() => dashboardStore.status.enableVertex)
 
@@ -27,7 +30,7 @@ function toggleExpand() {
   }
 }
 
-async function handleSaveAll() {
+async function handleSaveAll(group = 'all') {
   if (isOverallSaving.value) return
   if (!sharedPassword.value) {
     overallError.value = '请输入管理密码'
@@ -42,15 +45,15 @@ async function handleSaveAll() {
   const assertCurrent = beginSave()
   const submittedPassword = sharedPassword.value
   try {
-    basicConfigRef.value?.validateDraft()
-    featuresConfigRef.value?.validateDraft()
-    if (basicConfigRef.value?.saveComponentConfigs) {
+    if (group !== 'features') basicConfigRef.value?.validateDraft()
+    if (group !== 'basic') featuresConfigRef.value?.validateDraft()
+    if (group !== 'features' && basicConfigRef.value?.saveComponentConfigs) {
       const r = await basicConfigRef.value.saveComponentConfigs(submittedPassword)
       if (r.success) successes.push(r.message)
       else errors.push(r.message)
     }
     assertCurrent()
-    if (featuresConfigRef.value?.saveComponentConfigs) {
+    if (group !== 'basic' && featuresConfigRef.value?.saveComponentConfigs) {
       const r = await featuresConfigRef.value.saveComponentConfigs(submittedPassword)
       if (r.success) successes.push(r.message)
       else errors.push(r.message)
@@ -63,6 +66,7 @@ async function handleSaveAll() {
     overallError.value = e.message || '保存失败'
   } finally {
     isOverallSaving.value = false
+    sharedPassword.value = ''
   }
 }
 </script>
@@ -70,7 +74,7 @@ async function handleSaveAll() {
 <template>
   <section class="section">
     <div class="section__header">
-      <div class="section__title">服务配置</div>
+      <div class="section__title">服务配置 <span v-if="dirty" class="pill pill--warning">有未保存修改</span></div>
       <button
         v-if="!enableVertex"
         class="btn btn--secondary btn--sm"
@@ -98,7 +102,7 @@ async function handleSaveAll() {
               <div class="kpi-mini__value mono">{{ dashboardStore.config.maxRequestsPerMinute }}</div>
             </div>
             <div class="kpi-mini">
-              <div class="kpi-mini__label">并发数</div>
+              <div class="kpi-mini__label">单请求初始上游并发</div>
               <div class="kpi-mini__value mono">{{ dashboardStore.config.concurrentRequests }}</div>
             </div>
             <div class="kpi-mini">
@@ -110,18 +114,21 @@ async function handleSaveAll() {
       </div>
 
       <!-- 展开后的编辑器 -->
-      <div v-else class="card">
+      <div v-show="isExpanded" class="card" :key="draftVersion">
         <div class="card__body" style="display:flex;flex-direction:column;gap:var(--sp-5);">
           <BasicConfig ref="basicConfigRef" />
+          <button class="btn btn--secondary btn--sm" @click="handleSaveAll('basic')" :disabled="isOverallSaving">保存基础设置</button>
           <FeaturesConfig ref="featuresConfigRef" />
+          <button class="btn btn--secondary btn--sm" @click="handleSaveAll('features')" :disabled="isOverallSaving">保存功能设置</button>
 
           <div v-if="overallError" class="banner banner--danger">{{ overallError }}</div>
           <div v-if="overallSuccess" class="banner banner--success">{{ overallSuccess }}</div>
 
           <div class="save-row">
             <div class="field save-row__pw">
-              <label class="field__label">管理密码</label>
+              <label class="field__label" for="config-password">管理密码</label>
               <input
+                id="config-password"
                 v-model="sharedPassword"
                 type="password"
                 class="input"
@@ -130,10 +137,10 @@ async function handleSaveAll() {
               >
             </div>
             <div class="row save-row__btns">
-              <button class="btn btn--secondary btn--sm" @click="isExpanded = false" :disabled="isOverallSaving">取消</button>
+              <button class="btn btn--secondary btn--sm" @click="discardDraft" :disabled="isOverallSaving || !dirty">取消修改</button>
               <button
                 class="btn btn--primary btn--sm"
-                @click="handleSaveAll"
+                @click="handleSaveAll('all')"
                 :disabled="isOverallSaving"
               >
                 {{ isOverallSaving ? '保存中…' : '全部保存' }}

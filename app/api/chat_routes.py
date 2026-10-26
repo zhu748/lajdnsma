@@ -1,5 +1,6 @@
 """OpenAI 风格 /v1/chat/completions 的 HTTP 入口（aistudio / vertex 分派）。"""
 from typing import Union
+from app.utils.upstream_reporting import route_request
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -38,6 +39,7 @@ async def aistudio_chat_completions(
     _=Depends(custom_verify_password),
     _2=Depends(route_runtime.verify_user_agent),
 ):
+    route_request("AI Studio", request)
     _normalize_chat_input(request)
     if isinstance(request, ChatCompletionRequest) and request.n != 1:
         raise HTTPException(status_code=400, detail="AI Studio conversion currently supports n=1 only")
@@ -62,6 +64,7 @@ async def vertex_chat_completions(
     _dp=Depends(custom_verify_password),
     _du=Depends(route_runtime.verify_user_agent),
 ):
+    route_request("Vertex AI", request)
     _normalize_chat_input(request)
     vertex_request = build_vertex_openai_request(request)
     # Hardening: was `assert` (see model_routes.vertex_list_models).

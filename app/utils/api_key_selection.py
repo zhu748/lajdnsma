@@ -45,6 +45,11 @@ def _key_hash(api_key: str) -> str:
     return f"key#{hash(api_key) & 0xFFFFFF:06x}"
 
 
+def _record_key_decision(api_key, reason, decision, request_type, model):
+    log("info", reason, extra={"event": "key_decision", "key": "key#" + str(hash(api_key) & 0xFFFFFF),
+                              "reason": reason, "decision": decision, "request_type": request_type, "model": model})
+
+
 async def select_valid_api_keys(
     key_manager,
     batch_num: int,
@@ -106,6 +111,7 @@ async def select_valid_api_keys(
             if pvp.is_pvp_key_dead(pinned):
                 pvp.log_dead_key_abort(pinned)
                 return []
+            _record_key_decision(pinned, 'PVP 指定密钥，保持当前密钥重试', 'pinned', request_type, model)
             return [pinned]
         # 解析失败：resolve_pvp_key 内部已 warn-once，此处回落到
         # 亲和 + 轮换的既有路径，绝不因 PVP 配置问题拒绝服务。
@@ -133,6 +139,7 @@ async def select_valid_api_keys(
             # RPM 达阈值（分钟级配额耗尽）、日额度耗尽 → 都属于
             # "配额耗尽"，放弃亲和、正常轮换。
             if await is_key_cooled_down(api_key):
+                _record_key_decision(api_key, '上一批密钥已进入冷却，重新选择可用密钥', 'skip', request_type, model)
                 continue
             try:
                 last_minute = get_calls_last_minute_for_key(api_key)
@@ -144,6 +151,7 @@ async def select_valid_api_keys(
                     f"密钥 {_key_hash(api_key)} 每分钟已请求 {last_minute}/{MAX_OUTBOUND_RPM} 次，亲和重试让位于限流保护",
                     extra={
                         "key": "key#" + str(hash(api_key) & 0xFFFFFF),
+                        "event": "key_decision", "decision": "skip", "reason": "密钥 RPM 达到保护阈值，重新选择可用密钥",
                         "request_type": request_type,
                         "model": model,
                     },
@@ -151,11 +159,14 @@ async def select_valid_api_keys(
                 continue
             usage = await get_api_key_usage(settings.api_call_stats, api_key)
             if usage >= settings.API_KEY_DAILY_LIMIT:
+                _record_key_decision(api_key, '上一批密钥已达本地周期额度，重新选择可用密钥', 'skip', request_type, model)
                 continue
             valid_keys.append(api_key)
             selected_keys.add(api_key)
 
         if valid_keys:
+            for api_key in valid_keys:
+                _record_key_decision(api_key, '暂时性故障或空响应，继续使用原密钥', 'reuse', request_type, model)
             log(
                 "info",
                 f"密钥亲和重试：继续使用 {', '.join(_key_hash(k) for k in valid_keys)}（暂时性错误，配额尚未耗尽）",
@@ -188,6 +199,7 @@ async def select_valid_api_keys(
             # 冷却中的 key 在 fill 模式下会被 get_available_key 内部
             # 自行 pop（见 _get_available_key_fill），此处 continue 后
             # 下一轮拿到的是新栈顶，无需额外处理。
+            _record_key_decision(api_key, '密钥处于冷却，跳过并重新选择', 'skip', request_type, model)
             continue
 
         # Skip keys whose last-minute call count is at or above the RPM
@@ -202,6 +214,7 @@ async def select_valid_api_keys(
                 f"密钥 key#{hash(api_key) & 0xFFFFFF:06x} 最近 60 秒已请求 {last_minute}/{MAX_OUTBOUND_RPM} 次，暂时跳过",
                 extra={
                     "key": "key#" + str(hash(api_key) & 0xFFFFFF),
+                    "event": "key_decision", "decision": "skip", "reason": "密钥 RPM 达到保护阈值，重新选择可用密钥",
                     "request_type": request_type,
                     "model": model,
                 },
@@ -216,6 +229,7 @@ async def select_valid_api_keys(
 
         usage = await get_api_key_usage(settings.api_call_stats, api_key)
         if usage < settings.API_KEY_DAILY_LIMIT:
+            _record_key_decision(api_key, '按当前轮换策略选取可用密钥', 'select', request_type, model)
             valid_keys.append(api_key)
             continue
 
@@ -228,6 +242,7 @@ async def select_valid_api_keys(
                 "model": model,
             },
         )
+        _record_key_decision(api_key, '密钥已达本地周期额度，跳过并重新选择', 'skip', request_type, model)
         # 日额度已满的 key 同样让出粘滞位（fill 模式下 get_available_key
         # 的下一次调用也会 pop 它，这里显式 advance 保证本轮立即生效）。
         advance = getattr(key_manager, "advance_sticky_key", None)

@@ -1,4 +1,5 @@
 <script setup>
+import { exact } from '../../../services/format'
 import AppDialog from '../../ui/AppDialog.vue'
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useDashboardStore } from '../../../stores/dashboard'
@@ -71,8 +72,8 @@ function fmt(n) {
             </span>
             <div class="kpi__label">密钥数</div>
           </div>
-          <div class="kpi__value">{{ dashboardStore.status.keyCount }}</div>
-          <div class="kpi__hint">池内有效</div>
+          <div class="kpi__value" :title="exact(dashboardStore.status.keyCount)">{{ dashboardStore.status.keyCount }}</div>
+          <div class="kpi__hint">池内配置</div>
         </div>
         <button type="button" class="kpi kpi--clickable kpi--accent-2" @click="showModelsModal = true" aria-label="查看可用模型">
           <span class="kpi__accent kpi__accent--accent" aria-hidden="true"></span>
@@ -85,7 +86,7 @@ function fmt(n) {
             </span>
             <div class="kpi__label">模型</div>
           </div>
-          <div class="kpi__value">{{ dashboardStore.status.modelCount }}</div>
+          <div class="kpi__value" :title="exact(dashboardStore.status.modelCount)">{{ dashboardStore.status.modelCount }}</div>
           <div class="kpi__hint">点击查看列表 →</div>
         </button>
         <div class="kpi kpi--success">
@@ -96,10 +97,10 @@ function fmt(n) {
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
               </svg>
             </span>
-            <div class="kpi__label">调用 · 本统计周期</div>
+            <div class="kpi__label">上游完成 · 本地周期</div>
           </div>
-          <div class="kpi__value">{{ fmt(dashboardStore.status.last24hCalls) }}</div>
-          <div class="kpi__hint">每小时 {{ fmt(dashboardStore.status.hourlyCalls) }} · 每分钟 {{ fmt(dashboardStore.status.minuteCalls) }}</div>
+          <div class="kpi__value" :title="exact(dashboardStore.status.last24hCalls)">{{ fmt(dashboardStore.status.last24hCalls) }}</div>
+          <div class="kpi__hint">近 1 小时 <span :title="exact(dashboardStore.status.hourlyCalls)">{{ fmt(dashboardStore.status.hourlyCalls) }}</span> · 近 1 分钟 <span :title="exact(dashboardStore.status.minuteCalls)">{{ fmt(dashboardStore.status.minuteCalls) }}</span></div>
         </div>
         <div class="kpi kpi--warning">
           <span class="kpi__accent kpi__accent--warning" aria-hidden="true"></span>
@@ -113,8 +114,8 @@ function fmt(n) {
             </span>
             <div class="kpi__label">令牌 · 本统计周期</div>
           </div>
-          <div class="kpi__value">{{ fmt(dashboardStore.status.last24hTokens) }}</div>
-          <div class="kpi__hint">每小时 {{ fmt(dashboardStore.status.hourlyTokens) }} · 每分钟 {{ fmt(dashboardStore.status.minuteTokens) }}</div>
+          <div class="kpi__value" :title="exact(dashboardStore.status.last24hTokens)">{{ fmt(dashboardStore.status.last24hTokens) }}</div>
+          <div class="kpi__hint">近 1 小时 <span :title="exact(dashboardStore.status.hourlyTokens)">{{ fmt(dashboardStore.status.hourlyTokens) }}</span> · 近 1 分钟 <span :title="exact(dashboardStore.status.minuteTokens)">{{ fmt(dashboardStore.status.minuteTokens) }}</span></div>
         </div>
       </div>
 
@@ -129,6 +130,7 @@ function fmt(n) {
         </div>
       </div>
 
+      <p class="section-description" style="padding:0 20px">本地密钥统计周期开始：{{ dashboardStore.statsPeriodStartedAt ? new Date(dashboardStore.statsPeriodStartedAt).toLocaleString('zh-CN', { hour12: false }) : '等待同步' }}；网关请求总数见上方实时运行。</p>
       <!-- 数据新鲜度指示器：显示距离上次成功拉取的时间，
            服务离线/后端卡顿时运维能第一时间发现数据不新鲜 -->
       <div v-if="!dashboardStore.status.enableVertex && lastUpdatedText" class="freshness-bar">

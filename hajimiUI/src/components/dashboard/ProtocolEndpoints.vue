@@ -10,10 +10,10 @@ const protocols = [
   { name: 'Claude Messages', path: '/v1/messages', label: '消息与内容块', symbol: '03' },
   { name: 'Gemini 原生', path: '/v1beta/models/{model}:generateContent', label: '原生生成请求', symbol: '04', native: true },
 ]
-async function copy(protocol) {
+async function copy(protocol, base = false) {
   try {
-    await navigator.clipboard.writeText(`${window.location.origin}${protocol.path}`)
-    feedback.value = `${protocol.name} 地址已复制`
+    await navigator.clipboard.writeText(`${window.location.origin}${base ? protocol.native ? '/v1beta' : '/v1' : protocol.path}`)
+    feedback.value = `${protocol.name} ${base ? 'Base URL' : '接口地址'}已复制`
   } catch {
     feedback.value = '复制失败，请选择下方地址手动复制'
   }
@@ -33,10 +33,11 @@ async function copy(protocol) {
         <p>{{ protocol.label }}</p>
         <code>{{ protocol.path }}</code>
         <button class="btn btn--ghost btn--sm" @click="copy(protocol)" :aria-label="`复制 ${protocol.name} 接口地址`">复制接口地址 <span aria-hidden="true">↗</span></button>
+        <button class="btn btn--ghost btn--sm" @click="copy(protocol, true)" :aria-label="`复制 ${protocol.name} Base URL`">复制 Base URL</button>
       </article>
     </div>
     <p v-if="feedback" class="section-description" role="status">{{ feedback }}</p>
-    <p class="section-description protocol-note">Responses 需传完整会话历史；Gemini 原生入口始终使用 AI Studio。具体能力以项目文档为准。</p>
+    <p class="section-description protocol-note">客户端要求 Base URL 时使用基础地址；Gemini 完整接口中的 {model} 需替换为实际模型。Responses 需传完整会话历史；Gemini 原生入口始终使用 AI Studio。具体能力以项目文档为准。</p>
   </section>
 </template>
 

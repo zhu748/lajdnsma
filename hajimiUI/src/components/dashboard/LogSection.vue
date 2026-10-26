@@ -4,6 +4,10 @@ import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue'
 
 const dashboardStore = useDashboardStore()
 const currentFilter = ref('ALL')
+const query = ref('')
+const paused = ref(false)
+const frozenLogs = ref([])
+const unseen = ref(0)
 const logContainer = ref(null)
 const isFirstLoad = ref(true)
 // 自动滚动开关：翻看历史日志时自动暂停跟随，回到底部自动恢复
@@ -34,10 +38,15 @@ function scrollToBottom() {
   }
 }
 
-const filteredLogs = computed(() => {
-  if (currentFilter.value === 'ALL') return dashboardStore.logs
-  return dashboardStore.logs.filter((l) => l.level === currentFilter.value)
-})
+const visibleLogs = computed(() => paused.value ? frozenLogs.value : dashboardStore.logs)
+const filteredLogs = computed(() => visibleLogs.value.filter(l =>
+  (currentFilter.value === 'ALL' || l.level === currentFilter.value) &&
+  (!query.value || [l.request_id, l.attempt_id, l.model, l.message, l.path, l.error_message].join(' ').toLowerCase().includes(query.value.toLowerCase()))))
+function togglePause() {
+  if (!paused.value) frozenLogs.value = [...dashboardStore.logs]
+  paused.value = !paused.value
+  if (!paused.value) { unseen.value = 0; autoScroll.value = true; nextTick(scrollToBottom) }
+}
 
 const levelCounts = computed(() => {
   const counts = { INFO: 0, WARNING: 0, ERROR: 0 }
@@ -102,15 +111,20 @@ onUnmounted(() => clearTimeout(copyToastTimer))
 
 watch(
   () => dashboardStore.logs,
-  async () => {
+  async (next, previous = []) => {
+    const ids = new Set(previous.map(l => l.log_id || l.created_ns || l.message))
+    const added = next.filter(l => !ids.has(l.log_id || l.created_ns || l.message)).length
+    const follow = autoScroll.value && !paused.value
+    if (paused.value || !autoScroll.value) unseen.value += added
     await nextTick()
     if (isFirstLoad.value) {
       scrollToBottom()
       isFirstLoad.value = false
-    } else if (autoScroll.value && isAtBottom()) {
+    } else if (follow) {
       scrollToBottom()
     }
   }
+  , { flush: 'pre' }
   // Perf(round4): 移除 deep: true —— store 每次轮询都是 logs.value = data.logs
   // 整体替换引用，浅层 watch 已能触发回调；deep 模式还要递归遍历数百条
   // 日志对象的全部字段（每 5s 一次），属于纯浪费。若未来变为原地修改
@@ -139,14 +153,16 @@ onMounted(() => {
 <template>
   <section class="section">
     <div class="section__header">
-      <div class="section__title">日志 · {{ dashboardStore.logs.length }}</div>
+      <div class="section__title">系统日志 · {{ dashboardStore.logs.length }}</div>
       <div class="row log-toolbar">
+        <input class="input log-search" v-model="query" placeholder="搜索编号、模型或内容" aria-label="搜索系统日志">
         <div class="row log-filters">
           <button
             v-for="level in filters"
             :key="level"
             class="filter-chip"
             :class="{ 'filter-chip--active': currentFilter === level }"
+            :aria-pressed="currentFilter === level"
             @click="setFilter(level)"
           >
             {{ filterLabels[level] || level }}
@@ -154,12 +170,13 @@ onMounted(() => {
           </button>
         </div>
         <div class="row log-actions">
+          <button class="btn btn--ghost btn--sm" @click="togglePause" :aria-pressed="paused">{{ paused ? '恢复实时' : '暂停更新' }}</button>
           <button
             class="btn btn--ghost btn--sm log-action-btn"
             title="滚动到底部并恢复自动跟随"
-            @click="autoScroll = true; nextTick(scrollToBottom)"
+            @click="autoScroll = true; unseen = 0; nextTick(scrollToBottom)"
           >
-            ↓ 跟随
+            ↓ {{ unseen ? `${unseen} 条新记录 · ` : '' }}跟随
           </button>
           <button
             class="btn btn--ghost btn--sm log-action-btn"
@@ -181,6 +198,8 @@ onMounted(() => {
       </div>
     </div>
 
+    <p class="section-description">仅保留当前进程最近 {{ dashboardStore.logRetention.capacity }} 条日志；复制和下载包含当前筛选的保留内容。{{ paused ? '已暂停更新。' : '' }}</p>
+    <p v-if="dashboardStore.logRetention.gap" role="status" class="text-muted">服务重启或缓冲区淘汰造成历史缺口，完整记录请查看服务端输出。</p>
     <div class="card">
       <div class="log-container" ref="logContainer" @scroll.passive="handleScroll">
         <div v-if="!filteredLogs.length" class="empty-state" style="padding:var(--sp-8);">
@@ -190,7 +209,7 @@ onMounted(() => {
         </div>
         <div
           v-for="(log, index) in filteredLogs"
-          :key="index"
+          :key="log.log_id || log.created_ns || `${log.timestamp}-${log.message}-${index}`"
           class="log-entry"
           :class="'log-entry--' + (log.level || 'info').toLowerCase()"
         >
@@ -199,6 +218,7 @@ onMounted(() => {
             {{ log.level_label || filterLabels[log.level] || log.level || '信息' }}
           </span>
           <span class="log-entry__body">
+            <span v-if="log.request_id" class="mono text-subtle">#{{ log.request_id }} {{ log.attempt_id }}</span>
             <template v-if="log.key !== 'N/A' && log.key">
               <span class="mono text-subtle">[{{ log.key }}]</span>
             </template>
@@ -243,6 +263,7 @@ onMounted(() => {
 
 <style scoped>
 /* 日志工具行：筛选 chips + 复制/下载按钮，窄屏允许换行 */
+.log-search { max-width: 260px; height: 30px; }
 .log-toolbar {
   flex-wrap: wrap;
   gap: var(--sp-2);

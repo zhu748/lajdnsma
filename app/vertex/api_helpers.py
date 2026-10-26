@@ -1,3 +1,4 @@
+from app.utils.upstream_reporting import tracked_sdk_call
 """Vertex 执行层：generation config 构建、真假流式引擎、
 prefill 修复与 execute_gemini_call 汇聚点。"""
 import json
@@ -347,7 +348,7 @@ async def gemini_fake_stream_generator(
 
     # 1. Create and await the API call task
     api_call_task = asyncio.create_task(
-        gemini_client_instance.aio.models.generate_content(
+        tracked_sdk_call(gemini_client_instance.aio.models.generate_content,
             model=model_for_api_call,
             contents=prompt_for_api_call,
             config=gen_config_for_api_call,
@@ -682,7 +683,7 @@ async def execute_gemini_call(
                 _echo_filter = PrefillEchoStreamFilter(_prefill_echo)
                 final_reason = None
                 tool_count = 0
-                upstream = await current_client.aio.models.generate_content_stream(
+                upstream = await tracked_sdk_call(current_client.aio.models.generate_content_stream,
                     model=model_to_call,
                     contents=actual_prompt_for_call,
                     config=gen_config_for_call,
@@ -752,7 +753,7 @@ async def execute_gemini_call(
             _gemini_real_stream_generator_inner(), media_type="text/event-stream"
         )
     else:
-        response_obj_call = await current_client.aio.models.generate_content(
+        response_obj_call = await tracked_sdk_call(current_client.aio.models.generate_content,
             model=model_to_call,
             contents=actual_prompt_for_call,
             config=gen_config_for_call,

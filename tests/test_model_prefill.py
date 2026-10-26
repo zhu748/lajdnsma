@@ -91,7 +91,7 @@ def load_gemini_module(fake_settings_attrs=None):
     sys.modules["app"] = fake_app
 
     fake_utils = types.ModuleType("app.utils")
-    fake_utils.__path__ = []
+    fake_utils.__path__ = [str(ROOT / "app/utils")]
     sys.modules["app.utils"] = fake_utils
 
     fake_config_pkg = types.ModuleType("app.config")

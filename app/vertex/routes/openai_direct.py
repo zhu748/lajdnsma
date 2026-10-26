@@ -1,3 +1,4 @@
+from app.utils.upstream_reporting import tracked_sdk_call
 """Vertex OpenAI Direct 路径的实现（从 routes/chat_api.py 拆出）。
 
 包含该路径的完整链路：
@@ -120,7 +121,7 @@ async def openai_true_stream_generator(
             **openai_params, "stream": True,
             "stream_options": {**(openai_params.get("stream_options") or {}), "include_usage": True},
         }
-        stream_response = await openai_client.chat.completions.create(
+        stream_response = await tracked_sdk_call(openai_client.chat.completions.create,
             **openai_params_for_true_stream, extra_body=openai_extra_body,
             extra_headers={"Accept": "text/event-stream"},
         )
@@ -380,7 +381,7 @@ async def openai_fake_stream_generator(
         params_for_non_stream_call["stream"] = False
 
         _api_call_task = asyncio.create_task(
-            openai_client.chat.completions.create(
+            tracked_sdk_call(openai_client.chat.completions.create,
                 **params_for_non_stream_call, extra_body=openai_extra_body,
                 extra_headers={"Accept": "application/json"},
             )
@@ -650,7 +651,7 @@ async def handle_openai_direct_request(
     try:
         # Ensure stream=False is explicitly passed for non-streaming
         openai_params_for_non_stream = {**openai_params, "stream": False}
-        response = await openai_client.chat.completions.create(
+        response = await tracked_sdk_call(openai_client.chat.completions.create,
             **openai_params_for_non_stream,
             extra_body=openai_extra_body,
             extra_headers={"Accept": "application/json"},

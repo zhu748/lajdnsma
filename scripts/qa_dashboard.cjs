@@ -21,6 +21,29 @@ const fixture = {
   tokens_time_series: Array.from({length: 18}, (_, i) => ({ time: `${String(10+Math.floor(i/6)).padStart(2,'0')}:${String(i%6*10).padStart(2,'0')}`, value: 1000 + (i*151 % 1800) })),
   logs: [{ timestamp: '12:30:04', level: 'INFO', message: '请求完成', model: 'gemini-2.5-flash', status_code: 200 }, { timestamp: '12:30:02', level: 'INFO', message: '模型列表已更新' }],
 };
+fixture.monitor = {
+  instance_id: 'qa-process', cursor: 1, scope: '当前进程', active_count: 3,
+  waiting_count: 1, streaming_count: 1, retrying_count: 1, upstream_active: 4, coalesced_count: 0,
+  period_started_at: '2026-10-26T00:00:00Z', counts: {received: 42, '成功': 36, '失败': 2, '中断': 1}, tokens: {total_tokens: 24000}, history_capacity: 300,
+  time_series: Array.from({length: 31}, (_, i) => ({timestamp: Date.now() - (30-i)*60000, calls: i%7, tokens: i*300, failures: i%5===0 ? 1 : 0})),
+  requests: ['等待上游', '正在输出', '重试等待'].map((stage,i) => ({
+    request_id: `qa-request-${i}`, received_at: new Date(Date.now()-12000-i*1000).toISOString(),
+    stage, outcome:'', model:'gemini-2.5-flash', requested_model:'gemini-2.5-flash', backend:'AI Studio',
+    path:'/v1/chat/completions', source:'上游', duration_ms:12000, request_type:'stream',
+    usage:{input_tokens:120,output_tokens:null,reasoning_tokens:null,total_tokens:null}, usage_source:'未知',
+    attempt_count:1, attempts:[], timeline:[{label:'收到请求',elapsed_ms:0},{label:'请求上游',elapsed_ms:3}],
+  })),
+};
+fixture.monitor.requests.push({
+  request_id:'qa-retry-request', received_at:new Date(Date.now()-5000).toISOString(), ended_at:new Date().toISOString(),
+  stage:'成功',outcome:'成功',model:'gemini-2.5-flash',requested_model:'gemini-2.5-flash',backend:'AI Studio',
+  path:'/v1/chat/completions',source:'上游',duration_ms:1000,request_type:'non-stream',
+  usage:{input_tokens:120,output_tokens:30,reasoning_tokens:10,total_tokens:150},usage_source:'上游报告',
+  attempt_count:2,attempts:[],timeline:[{label:'收到请求',elapsed_ms:0},
+    {label:'重试退避',elapsed_ms:20,retry_delay:.25,status_code:429,next_attempt_number:2,reason:'上游限流或配额耗尽'},
+    {label:'切换密钥',elapsed_ms:270,previous_key:'key#demo-a',next_key:'key#demo-b',reason:'上一密钥配额耗尽'},
+    {label:'请求结束：成功',elapsed_ms:1000}],
+});
 (async () => {
   fs.mkdirSync(output, { recursive: true });
   const browser = await chromium.launch({ executablePath: process.env.BROWSER_EXECUTABLE || undefined, headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'] });
@@ -48,10 +71,10 @@ const fixture = {
         if (authenticated) sessionStorage.setItem('gw_pw', 'local-preview');
       }, { dark, authenticated });
       const data = { ...fixture };
-      if (name === 'vertex') Object.assign(data, { enable_vertex: true, vertex_express_api_key: true, google_credentials_json: true });
+      if (name === 'vertex') Object.assign(data, { monitor: { ...fixture.monitor, requests: fixture.monitor.requests.map(r => ({...r, backend:'Vertex AI'})) }, enable_vertex: true, vertex_express_api_key: true, google_credentials_json: true });
       if (name === 'empty') Object.assign(data, { key_count: 0, model_count: 0,
         api_key_stats: [], available_models: [], calls_time_series: [], tokens_time_series: [],
-        last_24h_calls: 0, last_24h_tokens: 0, hourly_calls: 0, minute_calls: 0, hourly_tokens: 0, minute_tokens: 0, logs: [] });
+        monitor: {instance_id:'qa-empty',requests:[],counts:{},tokens:{},time_series:[]}, last_24h_calls: 0, last_24h_tokens: 0, hourly_calls: 0, minute_calls: 0, hourly_tokens: 0, minute_tokens: 0, logs: [] });
       const savedKeys = [];
       await page.route('**/api/**', route => {
         if (route.request().method() === 'POST' && new URL(route.request().url()).pathname === '/api/update-config') {
@@ -60,6 +83,9 @@ const fixture = {
           data[body.key] = body.value;
           return route.fulfill({ json: { status: 'success' } });
         }
+        const pathname = new URL(route.request().url()).pathname;
+        if (pathname === '/api/runtime-data') return route.fulfill({json:data.monitor});
+        if (pathname === '/api/logs') return route.fulfill({json:{instance_id:'qa-logs',cursor:2,capacity:1000,logs:data.logs.map((l,i)=>({...l,log_id:`qa-log-${i}`}))}});
         return route.fulfill({ json: data });
       });
       if (process.env.QA_FONT_DIR) {
@@ -95,16 +121,24 @@ const fixture = {
         assert.equal(await opener.evaluate(el => el === document.activeElement), true);
       }
       if (name === 'desktop') {
+        assert.equal(await page.getByText('18.4k', {exact:true}).getAttribute('title'), '18,426');
+        await page.getByRole('button', {name:/qa-retry-request/}).click();
+        assert.match(await page.locator('.timeline').innerText(), /上游限流或配额耗尽/);
+        assert.match(await page.locator('.timeline').innerText(), /计划等待 250 ms/);
+        assert.match(await page.locator('.timeline').innerText(), /key#demo-a → key#demo-b/);
+        await page.screenshot({path:path.join(output,'request-timeline.png'),fullPage:true});
+        await page.getByRole('button', {name:/qa-retry-request/}).click();
         // A failed refresh must preserve the previous data and offer recovery.
         await page.route('**/api/**', route => route.fulfill({ status: 503, json: { detail: 'test outage' } }));
         await page.getByRole('button', { name: '刷新数据', exact: true }).click();
-        await page.getByRole('alert').filter({ hasText: '上次成功同步' }).waitFor();
+        const dataAlert = page.getByRole('alert').filter({ hasText: '上次成功同步' });
+        await dataAlert.waitFor();
         await page.getByText('数据待更新', { exact: true }).waitFor();
         await page.getByText('更新失败 · 上次同步', { exact: false }).waitFor();
         await page.screenshot({ path: path.join(output, 'offline.png'), fullPage: true });
         await page.route('**/api/**', route => route.fulfill({ json: fixture }));
-        await page.getByRole('button', { name: '重试', exact: true }).click();
-        await page.getByRole('alert').waitFor({ state: 'hidden' });
+        await dataAlert.getByRole('button', { name: '重试', exact: true }).click();
+        await dataAlert.waitFor({ state: 'hidden' });
       }
       if (name === 'vertex') {
         await page.getByText('当前面板暂不汇总 Vertex 用量', { exact: false }).waitFor();

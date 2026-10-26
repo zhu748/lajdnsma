@@ -1,6 +1,6 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
-import { reactive, watch } from 'vue'
+import { reactive, watch, computed } from 'vue'
 import { createConfigDraft } from '../../../composables/configDraft'
 import { useConfigSaveGuard } from '../../../composables/configSaveGuard'
 import { validateNumericChanges } from '../../../composables/configValidation'
@@ -146,7 +146,7 @@ function validateDraft(draft = localConfig) {
     ['maxRetryNum', '最大重试次数', 1],
     ['fakeStreamingInterval', '伪流式间隔', 0.1, false],
     ['randomStringLength', '随机字符串长度', 1],
-    ['concurrentRequests', '并发请求数', 1],
+    ['concurrentRequests', '单请求初始上游并发', 1],
     ['increaseConcurrentOnFailure', '失败调整值', 0],
     ['maxConcurrentRequests', '最大并发', 1],
     ['maxEmptyResponses', '最大空响应次数', 0],
@@ -181,7 +181,7 @@ async function saveComponentConfigs(passwordFromParent) {
     fakeStreamingInterval: '伪流式间隔',
     randomString: '随机字符串',
     randomStringLength: '随机字符串长度',
-    concurrentRequests: '并发请求数',
+    concurrentRequests: '单请求初始上游并发',
     increaseConcurrentOnFailure: '失败调整值',
     maxConcurrentRequests: '最大并发',
     maxEmptyResponses: '最大空响应次数',
@@ -262,7 +262,8 @@ async function saveComponentConfigs(passwordFromParent) {
   return { success: allSucceeded, message: `功能配置：${messages.join('；')}` }
 }
 
-defineExpose({ saveComponentConfigs, localConfig, validateDraft })
+const isDirty = computed(() => syncDraft.isDirty())
+defineExpose({ saveComponentConfigs, localConfig, validateDraft, isDirty })
 </script>
 
 <template>
@@ -388,7 +389,7 @@ defineExpose({ saveComponentConfigs, localConfig, validateDraft })
 
     <div class="grid grid--3">
       <div class="field">
-        <label class="field__label">并发请求数</label>
+        <label class="field__label">单请求初始上游并发</label>
         <input v-model.number="localConfig.concurrentRequests" type="number" min="1" class="input">
       </div>
       <div class="field">

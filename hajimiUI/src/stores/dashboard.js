@@ -12,9 +12,84 @@ export const useDashboardStore = defineStore('dashboard', () => {
   let sessionVersion = 0
   let activeFetch = null
   let dataVersion = 0
+  let liveController = null
+  let liveOperation = null
+  let logCursor = 0
+  let logInstance = ''
+  let runtimeCursor = 0
+  const monitor = ref({ requests: [], counts: {}, tokens: {}, time_series: [] })
+  const liveError = ref('')
+  const logRetention = ref({ capacity: 1000, gap: false })
+  const statsPeriodStartedAt = ref('')
+
+  function applyMonitor(data) {
+    if (!data?.instance_id) return
+    const changed = monitor.value.instance_id && monitor.value.instance_id !== data.instance_id
+    const recent = changed ? [] : monitor.value.requests.filter(r => r.ended_at)
+    const incoming = data.requests || []
+    const ids = new Set(incoming.map(r => r.request_id))
+    monitor.value = { ...data, requests: [...incoming, ...recent.filter(r => !ids.has(r.request_id))]
+      .sort((a, b) => Number(Boolean(a.ended_at)) - Number(Boolean(b.ended_at)) || b.received_at.localeCompare(a.received_at))
+      .filter((r, index, rows) => !r.ended_at || rows.slice(0, index).filter(v => v.ended_at).length < (data.history_capacity || 300)) }
+    runtimeCursor = data.cursor || 0
+  }
+
+  async function fetchLiveData() {
+    if (!isUnlocked.value || liveOperation) return liveOperation
+    const version = sessionVersion
+    const controller = new AbortController()
+    liveController = controller
+    const timer = setTimeout(() => controller.abort(), 10000)
+    const operation = (async () => {
+      try {
+        const responses = await Promise.all([
+          fetch(`/api/runtime-data?after=${runtimeCursor}`, { headers: authHeaders(), signal: controller.signal }),
+          fetch(`/api/logs?after=${logCursor}`, { headers: authHeaders(), signal: controller.signal }),
+        ])
+        if (version !== sessionVersion) return
+        if (responses.some(r => r.status === 401)) { setSessionPassword(''); lastError.value = 'AUTH_FAILED'; return }
+        if (responses.some(r => !r.ok)) throw new Error('实时数据更新失败')
+        const [runtime, feed] = await Promise.all(responses.map(r => r.json()))
+        if (version !== sessionVersion) return
+        applyMonitor(runtime)
+        if (feed.instance_id) {
+          const restart = logInstance && logInstance !== feed.instance_id
+          const existing = restart ? [] : logs.value
+          const merged = new Map(existing.map(l => [l.log_id || `${l.timestamp}-${l.message}`, l]))
+          for (const entry of feed.logs || []) merged.set(entry.log_id, entry)
+          logs.value = [...merged.values()].slice(-(feed.capacity || 1000))
+          logRetention.value = { ...feed, logs: undefined, gap: logRetention.value.gap || feed.gap || Boolean(restart) }
+          logCursor = feed.cursor || 0
+          logInstance = feed.instance_id
+        }
+        liveError.value = ''
+      } catch (error) {
+        if (version === sessionVersion && liveController === controller && !controller.signal.aborted) liveError.value = error.message
+        else if (version === sessionVersion && liveController === controller) liveError.value = '实时数据请求超时'
+      } finally {
+        clearTimeout(timer)
+        if (liveController === controller) { liveController = null; liveOperation = null }
+      }
+    })()
+    liveOperation = operation
+    return operation
+  }
+
+  function stopLiveData() {
+    liveController?.abort()
+    liveController = null
+    liveOperation = null
+  }
 
   function setSessionPassword(pw) {
     sessionVersion += 1
+    stopLiveData()
+    monitor.value = { requests: [], counts: {}, tokens: {}, time_series: [] }
+    liveError.value = ''
+    logCursor = 0
+    runtimeCursor = 0
+    logInstance = ''
+    logRetention.value = { capacity: 1000, gap: false }
     activeFetch?.controller.abort()
     activeFetch = null
     isRefreshing.value = false
@@ -138,7 +213,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   }
 
   // ---------- Data fetching ----------
-  async function fetchDashboardData() {
+  async function fetchDashboardData(summary = false) {
     if (!sessionPassword.value) {
       lastError.value = 'PASSWORD_REQUIRED'
       return
@@ -153,7 +228,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     const operation = { controller, promise: null }
     activeFetch = operation
     operation.promise = (async () => { try {
-      const response = await fetch('/api/dashboard-data', {
+      const response = await fetch(summary ? '/api/dashboard-data?summary=true' : '/api/dashboard-data', {
         headers: authHeaders(),
         signal: controller.signal,
       })
@@ -200,12 +275,15 @@ export const useDashboardStore = defineStore('dashboard', () => {
       hourlyTokens: data.hourly_tokens || 0,
       minuteTokens: data.minute_tokens || 0,
       enableVertex: data.enable_vertex || false,
+      credentialsCount: data.credentials_count || 0,
+      cacheEntries: data.cache_entries || 0,
     }
 
+    if (data.enable_vertex != null) config.value.enableVertex = data.enable_vertex
     if (data.calls_time_series) timeSeriesData.value.calls = data.calls_time_series
     if (data.tokens_time_series) timeSeriesData.value.tokens = data.tokens_time_series
 
-    config.value = {
+    if (data.max_requests_per_minute != null) config.value = {
       ...config.value,
       maxRequestsPerMinute: data.max_requests_per_minute || 0,
       maxRequestsPerDayPerIp: data.max_requests_per_day_per_ip || 0,
@@ -273,7 +351,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
       }
     }
 
-    if (data.logs) logs.value = data.logs
+    if (data.logs && !logInstance) logs.value = data.logs
+    if (data.monitor && !liveOperation) applyMonitor(data.monitor)
+    statsPeriodStartedAt.value = data.stats_period_started_at || statsPeriodStartedAt.value
     isConfigLoaded.value = true
   }
 
@@ -333,6 +413,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   return {
     // state
     status,
+    monitor, liveError, logRetention, statsPeriodStartedAt, fetchLiveData, stopLiveData, invalidateDashboardFetch,
     config,
     apiKeyStats,
     logs,

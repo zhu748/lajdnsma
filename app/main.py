@@ -98,6 +98,7 @@ if settings.ALLOWED_ORIGINS:
         allow_credentials=False,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["X-Request-Id"],
     )
 
 app.add_middleware(RequestReportingMiddleware)

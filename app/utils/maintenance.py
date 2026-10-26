@@ -165,6 +165,8 @@ async def api_call_stats_clean():
 
         # 使用新的统计系统重置
         await api_stats_manager.reset()
+        from app.utils.request_registry import request_registry
+        request_registry.reset()
 
         log("info", "API调用统计数据已成功重置")
         persistence.save_settings()

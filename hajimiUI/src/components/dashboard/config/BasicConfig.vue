@@ -1,6 +1,6 @@
 <script setup>
 import { useDashboardStore } from '../../../stores/dashboard'
-import { reactive, watch } from 'vue'
+import { reactive, watch, computed } from 'vue'
 import { createConfigDraft } from '../../../composables/configDraft'
 import { useConfigSaveGuard } from '../../../composables/configSaveGuard'
 import { validateNumericChanges } from '../../../composables/configValidation'
@@ -74,7 +74,8 @@ async function saveComponentConfigs(passwordFromParent) {
   return { success: allSucceeded, message: `基础配置：${messages.join('；')}` }
 }
 
-defineExpose({ saveComponentConfigs, localConfig, validateDraft })
+const isDirty = computed(() => syncDraft.isDirty())
+defineExpose({ saveComponentConfigs, localConfig, validateDraft, isDirty })
 </script>
 
 <template>
@@ -171,9 +172,9 @@ defineExpose({ saveComponentConfigs, localConfig, validateDraft })
   flex-direction: column;
   gap: var(--sp-1);
   padding: var(--sp-3);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
   cursor: pointer;
   transition: border-color 0.18s ease, background 0.18s ease;
   position: relative;
@@ -190,7 +191,7 @@ defineExpose({ saveComponentConfigs, localConfig, validateDraft })
 
 .radio-card--active {
   border-color: var(--accent);
-  background: var(--surface-3);
+  background: var(--accent-subtle);
 }
 
 .radio-card__title {

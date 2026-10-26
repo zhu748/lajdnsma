@@ -8,6 +8,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
 
+const props = defineProps({ series: { type: Object, default: null }, caption: { type: String, default: '最近 30 分钟 · 上游完成次数与已知用量 · 分钟桶' } })
 const dashboardStore = useDashboardStore()
 const chartContainer = ref(null)
 let chart = null
@@ -35,7 +36,7 @@ function buildOption() {
     animationDurationUpdate: 400,
     animationEasing: 'cubicOut',
     animationEasingUpdate: 'cubicInOut',
-    grid: { left: 8, right: 8, top: 8, bottom: 34, containLabel: true },
+    grid: { left: 32, right: 42, top: 16, bottom: 34, containLabel: true },
     tooltip: {
       trigger: 'axis',
       backgroundColor: dark ? '#18181B' : '#FFFFFF',
@@ -48,7 +49,7 @@ function buildOption() {
       },
     },
     legend: {
-      data: ['调用次数', '令牌数'],
+      data: ['调用次数', '令牌数'], itemGap: 22,
       bottom: 0,
       icon: 'circle',
       itemWidth: 6,
@@ -66,14 +67,14 @@ function buildOption() {
     },
     yAxis: [
       {
-        type: 'value',
+        type: 'value', name: '次 / 分钟', nameLocation: 'middle', nameGap: 34,
         axisLabel: { color: textColor, fontSize: 10 },
         axisLine: { show: false },
         axisTick: { show: false },
         splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
       },
       {
-        type: 'value',
+        type: 'value', name: 'Token / 分钟', nameLocation: 'middle', nameGap: 44,
         axisLabel: { color: textColor, fontSize: 10 },
         axisLine: { show: false },
         axisTick: { show: false },
@@ -84,7 +85,7 @@ function buildOption() {
       {
         name: '调用次数',
         type: 'line',
-        smooth: true,
+        smooth: false,
         showSymbol: false,
         data: chartData.value.apiCalls,
         lineStyle: { width: 2, color: dark ? '#5EEAD4' : '#0F766E' },
@@ -99,7 +100,7 @@ function buildOption() {
         name: '令牌数',
         type: 'line',
         yAxisIndex: 1,
-        smooth: true,
+        smooth: false,
         showSymbol: false,
         data: chartData.value.tokens,
         lineStyle: { width: 2, color: '#609AC5' },
@@ -116,7 +117,7 @@ function buildOption() {
 
 function refreshChart() {
   if (!chart) return
-  const series = dashboardStore.timeSeriesData
+  const series = props.series || dashboardStore.timeSeriesData
   // Fix(round4): 后端 get_time_series_data() 返回的点结构是 {time, value}，
   // 此前这里读的是 p.count —— 永远 undefined → || 0 兜底，导致图表
   // 无论真实调用量多少都恒画 0 的平线。现在优先读 value，同时兼容
@@ -140,7 +141,7 @@ function handleResize() {
 }
 
 watch(
-  () => [dashboardStore.timeSeriesData.calls, dashboardStore.timeSeriesData.tokens],
+  () => [props.series, dashboardStore.timeSeriesData.calls, dashboardStore.timeSeriesData.tokens],
   () => {
     nextTick(refreshChart)
   }
@@ -170,7 +171,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="chartContainer" class="chart"></div>
+  <div><p class="section-description" style="padding:8px 16px 0">{{ caption }}</p><div ref="chartContainer" class="chart" role="img" aria-label="最近30分钟上游完成次数和Token趋势"></div></div>
 </template>
 
 <style scoped>
