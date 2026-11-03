@@ -286,7 +286,18 @@ function formatTime(t) {
             <div id="overview" class="console-section"><RuntimeOverview /></div>
             <div id="activity" class="console-section"><RequestActivity /><LogSection /></div>
             <div class="console-section"><TrafficTrends /><StatusSection /></div>
-            <div id="connections" class="console-section"><details class="connection-details"><summary>协议接入 · 地址与客户端配置</summary><ProtocolEndpoints /></details></div>
+            <div id="connections" class="console-section">
+              <details class="connection-details">
+                <summary>
+                  <span class="connection-details__text">
+                    <span class="connection-details__title">协议接入</span>
+                    <span class="connection-details__hint">地址与客户端配置，点击展开 / 收起</span>
+                  </span>
+                  <span class="connection-details__chevron" aria-hidden="true">▾</span>
+                </summary>
+                <div class="connection-details__body"><ProtocolEndpoints /></div>
+              </details>
+            </div>
             <div id="configuration" class="console-section"><ConfigSection /></div>
 
             <footer class="console-footer"><span>Hajimi Gateway</span><span>{{ dashboardStore.lastUpdated ? `最后同步 ${formatTime(dashboardStore.lastUpdated)}` : '等待数据同步' }}</span></footer>
@@ -373,21 +384,91 @@ function formatTime(t) {
 </style>
 
 <style scoped>
-.connection-details > summary { cursor: pointer; padding: 16px 0; color: var(--text-muted); font-size: 13px; }
+.connection-details {
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  background: var(--bg-elevated);
+  overflow: hidden;
+}
+.connection-details > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  color: var(--text);
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  list-style: none;
+  transition: background var(--dur-fast) var(--ease-out);
+  user-select: none;
+}
+.connection-details > summary::-webkit-details-marker { display: none; }
+.connection-details > summary:hover { background: var(--bg-subtle); }
+.connection-details__text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.connection-details__title { color: var(--text-strong); }
+.connection-details__hint { color: var(--text-muted); font-size: 12px; font-weight: var(--fw-regular); }
+.connection-details__chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: var(--r-full);
+  background: var(--bg-subtle);
+  color: var(--text-muted);
+  font-size: 13px;
+  transition: transform var(--dur-base) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.connection-details[open] > summary { border-bottom: 1px solid var(--border); }
+.connection-details[open] > summary .connection-details__chevron { transform: rotate(180deg); }
+.connection-details__body { padding: var(--sp-4) var(--sp-2) var(--sp-2); }
+@media (max-width: 768px) {
+  .connection-details > summary { padding: var(--sp-3) var(--sp-4); }
+  .connection-details__body { padding: var(--sp-3) var(--sp-3) var(--sp-2); }
+}
 .brand-divider { color: var(--border-strong); margin: 0 10px; font-weight: 400; }
 .brand-caption { color: var(--text-muted); font-size: 12px; font-weight: 400; }
 .console-layout { display: grid; grid-template-columns: 176px minmax(0, 1fr); gap: 40px; }
 .console-sidebar { position: sticky; top: 96px; align-self: start; padding-top: 12px; }
 .sidebar-caption { font-size: 11px; letter-spacing: .1em; color: var(--text-subtle); padding: 0 12px; margin-bottom: 16px; }
 .console-nav { display: flex; flex-direction: column; gap: 7px; }
-.console-nav a { display: flex; align-items: center; gap: 12px; color: var(--text-muted); padding: 12px; border-radius: 9px; font-size: 13px; text-decoration: none; transition: background .15s, color .15s; }
+.console-nav a {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  padding: 12px;
+  border-radius: 9px;
+  font-size: 13px;
+  text-decoration: none;
+  transition: background .15s, color .15s;
+}
+/* 活跃项左侧指示条：扫视时无需读字即可定位当前位置 */
+.console-nav a::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%) scaleY(0);
+  width: 3px;
+  height: 18px;
+  border-radius: var(--r-full);
+  background: var(--accent);
+  transition: transform var(--dur-base) var(--ease-out);
+}
 .console-nav a.nav-active, .console-nav a:hover, .console-nav a:focus-visible { background: var(--accent-subtle); color: var(--accent-strong); }
+.console-nav a.nav-active::before { transform: translateY(-50%) scaleY(1); }
 .nav-number { font-size: 10px; opacity: .6; }
-.nav-arrow { margin-left: auto; opacity: .5; }
+.nav-arrow { margin-left: auto; opacity: .5; transition: opacity var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
+.console-nav a:hover .nav-arrow { opacity: 1; transform: translateX(2px); }
 .sidebar-note { margin: 36px 12px 0; padding-top: 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--text-muted); }
 .connection-ok { background: var(--success); }
 .connection-warning { background: var(--warning); }
-.console-content { min-width: 0; }
+.console-content { min-width: 0; scroll-behavior: smooth; }
 .console-heading { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-bottom: 32px; }
 .console-eyebrow { font: 10px var(--font-mono); letter-spacing: .16em; color: var(--accent-strong); margin: 0 0 14px; }
 .console-heading h1 { font-size: clamp(24px, 3vw, 32px); letter-spacing: -.04em; font-weight: 600; line-height: 1.2; }
@@ -396,14 +477,15 @@ function formatTime(t) {
 .backend-indicator__icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; color: var(--accent-strong); background: var(--accent-subtle); font-size: 19px; }
 .backend-indicator span:not(.backend-indicator__icon) { display: block; color: var(--text-muted); font-size: 10px; margin-bottom: 4px; }
 .backend-indicator strong { font-size: 13px; font-weight: 600; }
-.console-section { scroll-margin-top: 90px; }
-.console-footer { display: flex; gap: 16px; justify-content: space-between; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-subtle); font-size: 11px; }
+.console-section { scroll-margin-top: 90px; margin-bottom: var(--sp-6); }
+.console-footer { display: flex; gap: 16px; justify-content: space-between; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-subtle); font-size: 11px; margin-top: var(--sp-4); }
 .lock-card__eyebrow { margin: 4px 0 12px; font: 10px var(--font-mono); letter-spacing: .14em; color: var(--accent-strong); }
 @media (max-width: 1050px) {
  .console-layout { grid-template-columns: 1fr; gap: 24px; }
  .console-sidebar { position: static; padding: 0; }
  .console-nav { flex-direction: row; gap: 4px; overflow-x: auto; padding-bottom: 3px; }
  .console-nav a { white-space: nowrap; flex: 1; justify-content: center; padding: 10px; border: 1px solid var(--border); background: var(--bg-elevated); }
+ .console-nav a::before { display: none; }
  .sidebar-caption, .sidebar-note, .nav-arrow { display: none; }
 }
 @media (max-width: 600px) {
@@ -415,5 +497,6 @@ function formatTime(t) {
  .nav-number { display: none; }
  .console-footer { flex-direction: column; gap: 6px; }
  .brand-caption, .brand-divider { display: none; }
+ .console-section { margin-bottom: var(--sp-4); }
 }
 </style>

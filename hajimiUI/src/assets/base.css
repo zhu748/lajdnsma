@@ -109,6 +109,10 @@
 
 /* ---------- Dark mode tokens ---------- */
 .dark-mode {
+  /* 让原生表单控件（select 下拉、输入框、滚动条）跟随深色渲染，
+     避免出现刺眼的白色原生控件 */
+  color-scheme: dark;
+
   --bg: #09090B;
   --bg-elevated: #18181B;
   --bg-subtle: #1F1F23;
@@ -210,6 +214,11 @@
 html,
 body {
   height: 100%;
+}
+
+/* 锚点导航平滑滚动（侧边导航跳转区块）；reduced-motion 下自动回退 */
+html {
+  scroll-behavior: smooth;
 }
 
 body {

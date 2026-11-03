@@ -3,7 +3,7 @@ from datetime import datetime
 
 from fastapi import Depends, HTTPException, Query
 from app.utils.request_registry import request_registry
-from app.utils.logging import get_log_feed
+from app.utils.logging import get_log_feed, clear_all_logs
 
 from app.api.dashboard import runtime
 from app.api.dashboard.auth import require_body_password, require_dashboard_token
@@ -150,6 +150,23 @@ async def reset_stats(password_data: dict = Depends(require_body_password)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"重置失败：{str(e)}")
+
+
+@runtime.dashboard_router.post("/clear-logs")
+async def clear_logs(password_data: dict = Depends(require_body_password)):
+    """手动清空面板运行日志。
+
+    自动策略（定时淘汰 + 环形缓冲满时淘汰）之外的手动出口：
+    清空两个 LogManager 与 /api/logs 增量 feed，并轮换 feed 实例 ID
+    让前端丢弃本地缓存。运行中的请求与统计数据不受影响。
+    """
+    try:
+        clear_all_logs(reason="面板手动清空：运行日志已清空")
+        return {"status": "success", "message": "运行日志已清空"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"清空日志失败：{str(e)}")
 
 
 @runtime.dashboard_router.get("/runtime-data")

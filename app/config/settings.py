@@ -85,6 +85,14 @@ PRECISE_CACHE = os.environ.get("PRECISE_CACHE", "false").lower() in [
     "yes",
 ]  # 是否取所有消息来算缓存键
 
+# ---------- 面板日志保留策略 ----------
+# 运行日志（LogManager 环形缓冲 + /api/logs 增量 feed）的保留时长，
+# 单位小时，默认 24（一天清空）。到达保留时长的日志由 maintenance.py
+# 的定时任务淘汰；缓冲写满时同样由 deque(maxlen=...) 淘汰最旧记录，
+# 保证"日志满了来新请求先删旧记录"。设为 0 表示只依赖环形缓冲淘汰
+# 与每日 15:00 的整体清空，不按时间清理。
+LOG_RETENTION_HOURS = float(os.environ.get("LOG_RETENTION_HOURS", "24"))
+
 # 是否启用 Vertex AI
 ENABLE_VERTEX = os.environ.get("ENABLE_VERTEX", "false").lower() in ["true", "1", "yes"]
 GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")

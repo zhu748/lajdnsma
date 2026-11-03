@@ -36,7 +36,7 @@ function buildOption() {
     animationDurationUpdate: 400,
     animationEasing: 'cubicOut',
     animationEasingUpdate: 'cubicInOut',
-    grid: { left: 32, right: 42, top: 16, bottom: 34, containLabel: true },
+    grid: { left: 46, right: 56, top: 16, bottom: 34, containLabel: true },
     tooltip: {
       trigger: 'axis',
       backgroundColor: dark ? '#18181B' : '#FFFFFF',

@@ -5,7 +5,7 @@ import traceback
 
 # from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # 替换为异步调度器
-from app.utils.logging import log
+from app.utils.logging import log, purge_expired_logs
 from app.utils.stats import api_stats_manager
 from app.utils import check_version
 from zoneinfo import ZoneInfo
@@ -130,6 +130,13 @@ def schedule_cache_cleanup(response_cache_manager, active_requests_manager):
 
     _scheduler.add_job(check_version, "interval", hours=4)
     _scheduler.add_job(api_call_stats_clean, "cron", hour=15, minute=0)
+
+    # 面板日志保留策略：按 LOG_RETENTION_HOURS（默认 24 小时，即一天）
+    # 定期淘汰过期运行日志。缓冲写满时的淘汰由 deque(maxlen) 自动完成
+    # （日志满了来新请求先删旧记录）；本任务额外保证时间维度的清理，
+    # 低流量部署下日志也不会无限期滞留在面板里。
+    _scheduler.add_job(purge_expired_logs, "interval", minutes=30)
+
     _scheduler.start()
     return _scheduler
 
@@ -157,7 +164,7 @@ async def api_call_stats_clean():
 
     使用新的统计系统重置
     """
-    from app.utils.logging import log
+    from app.utils.logging import log, clear_all_logs
 
     try:
         # 记录重置前的状态
@@ -167,6 +174,12 @@ async def api_call_stats_clean():
         await api_stats_manager.reset()
         from app.utils.request_registry import request_registry
         request_registry.reset()
+        request_registry.clear_history()
+
+        # 运行日志与请求记录同样按「一天」为单位清理：每日重置时整体
+        # 清空一次，面板从零开始新的一天；时间维度的滚动淘汰由
+        # purge_expired_logs 定时任务负责。
+        clear_all_logs(reason="每日定时清理：运行日志已清空")
 
         log("info", "API调用统计数据已成功重置")
         persistence.save_settings()

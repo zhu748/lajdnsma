@@ -573,6 +573,17 @@
   color: var(--text-muted);
 }
 
+/* 区块间距节奏：console 内多个 section 垂直堆叠时保持一致呼吸感 */
+.section + .section { margin-top: var(--sp-2); }
+
+/* 通用 details/summary：表格内返回摘要等折叠块 */
+details > summary {
+  cursor: pointer;
+  color: var(--text-muted);
+  user-select: none;
+}
+details > summary:hover { color: var(--text); }
+
 /* Loading skeleton */
 .skeleton {
   display: inline-block;

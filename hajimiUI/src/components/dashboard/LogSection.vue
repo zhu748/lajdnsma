@@ -12,6 +12,10 @@ const logContainer = ref(null)
 const isFirstLoad = ref(true)
 // 自动滚动开关：翻看历史日志时自动暂停跟随，回到底部自动恢复
 const autoScroll = ref(true)
+// 两步确认清空：首次点击进入待确认态，3 秒内再次点击才执行
+const clearArmed = ref(false)
+const clearing = ref(false)
+let clearDisarmTimer = null
 
 const filterLabels = {
   ALL: '全部',
@@ -21,6 +25,15 @@ const filterLabels = {
 }
 
 const filters = ['ALL', 'INFO', 'WARNING', 'ERROR']
+
+// 保留策略展示：环形缓冲容量 + 时间保留时长（默认 24 小时）
+const retentionHours = computed(() => {
+  const hours = Number(dashboardStore.logRetention.retention_hours)
+  return Number.isFinite(hours) && hours > 0 ? hours : 0
+})
+const retentionHint = computed(() => retentionHours.value
+  ? `环形缓冲 ${dashboardStore.logRetention.capacity} 条（满时自动淘汰最旧），超过 ${retentionHours.value} 小时定时清理，每日 15:00 整体清空`
+  : `环形缓冲 ${dashboardStore.logRetention.capacity} 条（满时自动淘汰最旧），每日 15:00 整体清空`)
 
 function setFilter(level) {
   currentFilter.value = level
@@ -109,6 +122,35 @@ function showToast() {
 }
 onUnmounted(() => clearTimeout(copyToastTimer))
 
+// 手动清空日志：后端清空缓冲并轮换 feed 实例，随后本地列表同步清空。
+async function clearAllLogs() {
+  if (clearing.value) return
+  clearing.value = true
+  disarmClear()
+  try {
+    await dashboardStore.clearLogs()
+    copyToast.value = '日志已清空'
+  } catch (e) {
+    copyToast.value = e.message || '清空失败，请稍后重试'
+  } finally {
+    clearing.value = false
+    showToast()
+  }
+}
+
+function armClear() {
+  clearArmed.value = true
+  clearTimeout(clearDisarmTimer)
+  clearDisarmTimer = setTimeout(disarmClear, 3000)
+}
+
+function disarmClear() {
+  clearArmed.value = false
+  clearTimeout(clearDisarmTimer)
+}
+
+onUnmounted(() => clearTimeout(clearDisarmTimer))
+
 watch(
   () => dashboardStore.logs,
   async (next, previous = []) => {
@@ -153,10 +195,20 @@ onMounted(() => {
 <template>
   <section class="section">
     <div class="section__header">
-      <div class="section__title">系统日志 · {{ dashboardStore.logs.length }}</div>
-      <div class="row log-toolbar">
+      <div>
+        <h2 class="section__title">系统日志 <span class="log-count-badge mono">{{ dashboardStore.logs.length }}</span></h2>
+        <p class="section-description">{{ retentionHint }}。复制和下载包含当前筛选的保留内容。{{ paused ? '已暂停更新。' : '' }}</p>
+      </div>
+      <div class="log-meta">
+        <span class="pill pill--accent" :title="`当前进程内保留的日志条数 / 环形缓冲容量`">{{ dashboardStore.logs.length }} / {{ dashboardStore.logRetention.capacity }}</span>
+        <span v-if="retentionHours" class="pill" :title="`超过该时长的日志由定时任务自动清理`">保留 ≤ {{ retentionHours }} 小时</span>
+      </div>
+    </div>
+    <p v-if="dashboardStore.logRetention.gap" role="status" class="text-muted">服务重启或缓冲区淘汰造成历史缺口，完整记录请查看服务端输出。</p>
+    <div class="log-toolbar">
+      <div class="log-toolbar__group">
         <input class="input log-search" v-model="query" placeholder="搜索编号、模型或内容" aria-label="搜索系统日志">
-        <div class="row log-filters">
+        <div class="log-filters">
           <button
             v-for="level in filters"
             :key="level"
@@ -169,37 +221,44 @@ onMounted(() => {
             <span v-if="level !== 'ALL'" class="filter-chip__count">{{ levelCounts[level] || 0 }}</span>
           </button>
         </div>
-        <div class="row log-actions">
-          <button class="btn btn--ghost btn--sm" @click="togglePause" :aria-pressed="paused">{{ paused ? '恢复实时' : '暂停更新' }}</button>
-          <button
-            class="btn btn--ghost btn--sm log-action-btn"
-            title="滚动到底部并恢复自动跟随"
-            @click="autoScroll = true; unseen = 0; nextTick(scrollToBottom)"
-          >
-            ↓ {{ unseen ? `${unseen} 条新记录 · ` : '' }}跟随
-          </button>
-          <button
-            class="btn btn--ghost btn--sm log-action-btn"
-            title="复制当前筛选下的全部日志"
-            :disabled="!filteredLogs.length"
-            @click="copyLogs"
-          >
-            复制
-          </button>
-          <button
-            class="btn btn--ghost btn--sm log-action-btn"
-            title="下载为 .txt 文件"
-            :disabled="!filteredLogs.length"
-            @click="downloadLogs"
-          >
-            下载
-          </button>
-        </div>
+      </div>
+      <div class="log-actions">
+        <button class="btn btn--ghost btn--sm log-action-btn" @click="togglePause" :aria-pressed="paused">{{ paused ? '恢复实时' : '暂停更新' }}</button>
+        <button
+          class="btn btn--ghost btn--sm log-action-btn"
+          title="滚动到底部并恢复自动跟随"
+          @click="autoScroll = true; unseen = 0; nextTick(scrollToBottom)"
+        >
+          ↓ {{ unseen ? `${unseen} 条新记录 · ` : '' }}跟随
+        </button>
+        <button
+          class="btn btn--ghost btn--sm log-action-btn"
+          title="复制当前筛选下的全部日志"
+          :disabled="!filteredLogs.length"
+          @click="copyLogs"
+        >
+          复制
+        </button>
+        <button
+          class="btn btn--ghost btn--sm log-action-btn"
+          title="下载为 .txt 文件"
+          :disabled="!filteredLogs.length"
+          @click="downloadLogs"
+        >
+          下载
+        </button>
+        <button
+          class="btn btn--sm log-action-btn log-clear-btn"
+          :class="clearArmed ? 'log-clear-btn--armed' : 'btn--ghost'"
+          :disabled="clearing || !dashboardStore.logs.length"
+          :title="clearArmed ? '再次点击确认清空全部运行日志' : '清空全部运行日志'"
+          @click="clearArmed ? clearAllLogs() : armClear()"
+          @blur="disarmClear"
+        >
+          {{ clearing ? '清空中…' : clearArmed ? '确认清空？' : '清空' }}
+        </button>
       </div>
     </div>
-
-    <p class="section-description">仅保留当前进程最近 {{ dashboardStore.logRetention.capacity }} 条日志；复制和下载包含当前筛选的保留内容。{{ paused ? '已暂停更新。' : '' }}</p>
-    <p v-if="dashboardStore.logRetention.gap" role="status" class="text-muted">服务重启或缓冲区淘汰造成历史缺口，完整记录请查看服务端输出。</p>
     <div class="card">
       <div class="log-container" ref="logContainer" @scroll.passive="handleScroll">
         <div v-if="!filteredLogs.length" class="empty-state" style="padding:var(--sp-8);">
@@ -262,22 +321,74 @@ onMounted(() => {
 </template>
 
 <style scoped>
-/* 日志工具行：筛选 chips + 复制/下载按钮，窄屏允许换行 */
-.log-search { max-width: 260px; height: 30px; }
+/* 区块标题上的计数徽标：与标题同行，弱化处理不抢视线 */
+.log-count-badge {
+  display: inline-block;
+  min-width: 22px;
+  padding: 1px 7px;
+  border-radius: var(--r-full);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: center;
+  vertical-align: 1px;
+}
+
+/* 头部右侧保留策略 pills */
+.log-meta {
+  display: flex;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+/* 工具栏：左侧搜索 + 级别筛选，右侧操作按钮，独立卡片化的一行 */
 .log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+.log-toolbar__group {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
   gap: var(--sp-2);
+  min-width: 0;
+  flex: 1 1 320px;
 }
+.log-search { max-width: 260px; height: 30px; }
 .log-filters {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 6px;
 }
 .log-actions {
-  gap: 2px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
 }
 .log-action-btn {
   height: 24px;
   padding: 0 8px;
   font-size: var(--fs-xs);
+}
+
+/* 清空按钮：默认与其它操作一致，待确认态换成醒目的危险色 */
+.log-clear-btn--armed {
+  background: var(--danger);
+  color: white;
+  font-weight: var(--fw-semibold);
+}
+.log-clear-btn--armed:hover:not(:disabled) {
+  background: var(--danger-strong);
 }
 
 .filter-chip {
@@ -286,7 +397,7 @@ onMounted(() => {
   gap: 6px;
   height: 24px;
   padding: 0 10px;
-  background: var(--bg-elevated);
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--r-full);
   color: var(--text-muted);
@@ -296,7 +407,7 @@ onMounted(() => {
   cursor: pointer;
 }
 
-/* 移动端：筛选 chip 加大触控高度 */
+/* 移动端：筛选 chip 与操作按钮加大触控高度，工具栏允许两端换行 */
 @media (max-width: 768px) {
   .filter-chip {
     height: 30px;
@@ -307,6 +418,22 @@ onMounted(() => {
     height: 30px;
     padding: 0 10px;
     font-size: var(--fs-sm);
+  }
+  .log-search {
+    max-width: none;
+    flex: 1 1 100%;
+  }
+  .log-toolbar__group {
+    flex-basis: 100%;
+  }
+  /* 操作按钮整行自然宽度均布，避免全挤在右侧 */
+  .log-actions {
+    flex: 1 1 100%;
+    justify-content: space-between;
+    gap: 6px;
+  }
+  .log-meta {
+    display: none;
   }
 }
 .filter-chip:hover {
@@ -349,6 +476,10 @@ onMounted(() => {
   border-bottom: 1px solid var(--border-subtle);
   transition: background var(--dur-fast) var(--ease-out);
 }
+/* 极弱斑马纹：长时间扫读时帮助视线跨行不断行 */
+.log-entry:nth-child(even) {
+  background: color-mix(in srgb, var(--bg-subtle) 45%, transparent);
+}
 .log-entry:hover {
   background: var(--bg-subtle);
 }
@@ -360,6 +491,7 @@ onMounted(() => {
   color: var(--text-subtle);
   flex-shrink: 0;
   width: 152px;
+  font-variant-numeric: tabular-nums;
 }
 
 .log-entry__level {
@@ -445,6 +577,10 @@ onMounted(() => {
 }
 .log-entry--error:hover {
   background: color-mix(in srgb, var(--danger-subtle) 70%, var(--bg-subtle));
+}
+/* 斑马纹不覆盖错误/警告自身的语义背景 */
+.log-entry--error:nth-child(even) {
+  background: var(--danger-subtle);
 }
 
 @media (max-width: 768px) {

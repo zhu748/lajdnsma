@@ -72,6 +72,7 @@ def get_log_feed(after=0):
         return {"instance_id": _feed_instance, "cursor": _feed_seq,
                 "gap": bool(after and after < oldest - 1), "capacity": _feed.maxlen,
                 "oldest_timestamp": _feed[0]["timestamp"] if _feed else None,
+                "retention_hours": _log_retention_hours(),
                 "logs": [dict(entry) for entry in _feed if entry["seq"] > after]}
 
 class LogManager:
@@ -99,6 +100,21 @@ class LogManager:
         with self.lock:
             return list(self.logs)[-count:] if count > 0 else []
 
+    def clear(self):
+        """清空环形缓冲（供手动清空与每日定时清理调用）。"""
+        with self.lock:
+            self.logs.clear()
+
+    def purge_older_than(self, cutoff_ns):
+        """淘汰 created_ns 早于 cutoff_ns 的日志（时间序，队列内单调递增）。"""
+        if cutoff_ns <= 0:
+            return 0
+        with self.lock:
+            before = len(self.logs)
+            while self.logs and self.logs[0].get("created_ns", 0) < cutoff_ns:
+                self.logs.popleft()
+            return before - len(self.logs)
+
 
 # 创建日志管理器实例 (输出到前端)
 log_manager = LogManager()
@@ -107,6 +123,54 @@ log_manager = LogManager()
 VertexLogManager = LogManager
 # 创建Vertex日志管理器实例 (输出到前端)
 vertex_log_manager = VertexLogManager()
+
+
+def _log_retention_hours():
+    """读取日志保留时长（小时）；延迟导入避免 settings 循环依赖。"""
+    try:
+        import app.config.settings as settings
+        return max(0.0, float(settings.LOG_RETENTION_HOURS))
+    except (AttributeError, ImportError, ValueError, TypeError):
+        return 24.0
+
+
+def purge_expired_logs():
+    """按 LOG_RETENTION_HOURS 淘汰过期的运行日志。
+
+    定期由 maintenance.py 的调度器调用（默认保留 24 小时，即一天前的
+    日志必然被清掉）。同时清理 /api/logs 增量 feed 与两个面板日志
+    管理器；缓冲写满时的淘汰仍由 deque(maxlen) 自动完成。
+    返回本次淘汰的条数，供调度日志使用。
+    """
+    retention_hours = _log_retention_hours()
+    if retention_hours <= 0:
+        return 0
+    cutoff_ns = time.time_ns() - int(retention_hours * 3600 * 1_000_000_000)
+    removed = 0
+    with _feed_lock:
+        before = len(_feed)
+        while _feed and _feed[0].get("created_ns", 0) < cutoff_ns:
+            _feed.popleft()
+        removed += before - len(_feed)
+    removed += log_manager.purge_older_than(cutoff_ns)
+    removed += vertex_log_manager.purge_older_than(cutoff_ns)
+    return removed
+
+
+def clear_all_logs(reason="运行日志已清空"):
+    """清空全部面板日志缓冲，并轮换 feed 实例 ID。
+
+    实例 ID 轮换复用前端的「服务重启检测」路径：/api/logs 返回新的
+    instance_id 后，面板会丢弃本地缓存的旧日志自动回到空列表，无需
+    前端单独处理。清空后写入一条 INFO 审计日志说明原因。
+    """
+    global _feed_instance
+    with _feed_lock:
+        _feed.clear()
+        _feed_instance = uuid.uuid4().hex[:12]
+    log_manager.clear()
+    vertex_log_manager.clear()
+    log("info", reason)
 
 
 def format_log_message(level, message, extra=None):

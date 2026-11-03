@@ -27,6 +27,10 @@ class RequestRegistry:
         self.tokens = Counter()
         self.series = {}
 
+    def clear_history(self):
+        """清空已结束请求的历史记录（运行中的请求保留，绝不被驱逐）。"""
+        self.recent.clear()
+
     def start(self, report):
         report.generation = self.generation
         self.active[report.request_id] = report

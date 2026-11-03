@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, watch, computed } from 'vue'
-import { errorMessage } from '../services/http'
+import { errorMessage, managementRequest } from '../services/http'
 
 export const useDashboardStore = defineStore('dashboard', () => {
   // ---------- Session password (post-hardening: every dashboard-data
@@ -19,7 +19,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
   let runtimeCursor = 0
   const monitor = ref({ requests: [], counts: {}, tokens: {}, time_series: [] })
   const liveError = ref('')
-  const logRetention = ref({ capacity: 1000, gap: false })
+  const logRetention = ref({ capacity: 1000, gap: false, retention_hours: 24 })
   const statsPeriodStartedAt = ref('')
 
   function applyMonitor(data) {
@@ -54,11 +54,21 @@ export const useDashboardStore = defineStore('dashboard', () => {
         applyMonitor(runtime)
         if (feed.instance_id) {
           const restart = logInstance && logInstance !== feed.instance_id
-          const existing = restart ? [] : logs.value
+          // 服务端按保留时长淘汰旧日志后 oldest_timestamp 前移：本地
+          // 同步丢弃比它更旧的条目，保持与服务端缓冲一致（不等服务重启）。
+          const cutoff = feed.oldest_timestamp || ''
+          const existing = restart
+            ? []
+            : logs.value.filter(l => !cutoff || !l.timestamp || l.timestamp >= cutoff)
           const merged = new Map(existing.map(l => [l.log_id || `${l.timestamp}-${l.message}`, l]))
           for (const entry of feed.logs || []) merged.set(entry.log_id, entry)
           logs.value = [...merged.values()].slice(-(feed.capacity || 1000))
-          logRetention.value = { ...feed, logs: undefined, gap: logRetention.value.gap || feed.gap || Boolean(restart) }
+          logRetention.value = {
+            ...feed,
+            logs: undefined,
+            retention_hours: feed.retention_hours ?? logRetention.value.retention_hours,
+            gap: logRetention.value.gap || feed.gap || Boolean(restart),
+          }
           logCursor = feed.cursor || 0
           logInstance = feed.instance_id
         }
@@ -89,7 +99,7 @@ export const useDashboardStore = defineStore('dashboard', () => {
     logCursor = 0
     runtimeCursor = 0
     logInstance = ''
-    logRetention.value = { capacity: 1000, gap: false }
+    logRetention.value = { capacity: 1000, gap: false, retention_hours: 24 }
     activeFetch?.controller.abort()
     activeFetch = null
     isRefreshing.value = false
@@ -361,6 +371,14 @@ export const useDashboardStore = defineStore('dashboard', () => {
     selectedModel.value = model
   }
 
+  // 手动清空运行日志：后端清空缓冲并轮换 feed 实例 ID，随后拉一次
+  // 实时数据让本地列表随 instance_id 变化同步清空（含清空后的审计日志）。
+  async function clearLogs() {
+    await managementRequest('/api/clear-logs', { password: sessionPassword.value })
+    await fetchLiveData()
+    return true
+  }
+
   function toggleDarkMode() {
     isDarkMode.value = !isDarkMode.value
   }
@@ -436,5 +454,6 @@ export const useDashboardStore = defineStore('dashboard', () => {
     postConfig,
     captureSession,
     authHeaders,
+    clearLogs,
   }
 })
